@@ -34,6 +34,7 @@ import androidx.media3.common.Format;
 import androidx.media3.common.Label;
 import androidx.media3.common.MimeTypes;
 import androidx.media3.common.ParserException;
+import androidx.media3.common.util.DolbyVisionCompatibility;
 import androidx.media3.common.util.Log;
 import androidx.media3.common.util.NullableType;
 import androidx.media3.common.util.UnstableApi;
@@ -856,9 +857,19 @@ public class DashManifestParser extends DefaultHandler
 
     @Nullable ColorInfo colorInfo = null;
     if (MimeTypes.isDolbyVisionCodec(codecs, supplementalCodecs)) {
-      sampleMimeType = MimeTypes.VIDEO_DOLBY_VISION;
       colorInfo = Util.getColorInfoForDolbyVision(codecs, supplementalCodecs, supplementalProfiles);
-      codecs = supplementalCodecs != null ? supplementalCodecs : codecs;
+      @Nullable String dolbyVisionCodecs = codecs;
+      if (!DolbyVisionCompatibility.isDolbyVisionProfile7(dolbyVisionCodecs)) {
+        dolbyVisionCodecs = supplementalCodecs;
+      }
+      if (DolbyVisionCompatibility.shouldMapDolbyVisionProfile7(
+          MimeTypes.VIDEO_DOLBY_VISION, dolbyVisionCodecs)) {
+        sampleMimeType = MimeTypes.VIDEO_H265;
+        codecs = DolbyVisionCompatibility.chooseHevcCodecsString(codecs, supplementalCodecs);
+      } else {
+        sampleMimeType = MimeTypes.VIDEO_DOLBY_VISION;
+        codecs = supplementalCodecs != null ? supplementalCodecs : codecs;
+      }
     }
     @C.SelectionFlags int selectionFlags = parseSelectionFlagsFromRoleDescriptors(roleDescriptors);
     @C.RoleFlags int roleFlags = parseRoleFlagsFromRoleDescriptors(roleDescriptors);

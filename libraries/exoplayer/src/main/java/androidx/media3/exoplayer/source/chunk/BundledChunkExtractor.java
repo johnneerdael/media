@@ -25,6 +25,7 @@ import androidx.media3.common.C;
 import androidx.media3.common.DataReader;
 import androidx.media3.common.Format;
 import androidx.media3.common.MimeTypes;
+import androidx.media3.common.util.DolbyVisionCompatibility;
 import androidx.media3.common.util.ParsableByteArray;
 import androidx.media3.common.util.UnstableApi;
 import androidx.media3.exoplayer.analytics.PlayerId;
@@ -164,7 +165,9 @@ public final class BundledChunkExtractor implements ExtractorOutput, ChunkExtrac
         if (!parseSubtitlesDuringExtraction) {
           flags |= MatroskaExtractor.FLAG_EMIT_RAW_SUBTITLE_DATA;
         }
-        extractor = new MatroskaExtractor(subtitleParserFactory, flags);
+        extractor =
+            new MatroskaExtractor(
+                subtitleParserFactory, flags, getGlobalMatroskaDolbyVisionSampleTransformer());
       } else if (Objects.equals(containerMimeType, MimeTypes.IMAGE_JPEG)) {
         extractor = new JpegExtractor(JpegExtractor.FLAG_READ_IMAGE);
       } else if (Objects.equals(containerMimeType, MimeTypes.IMAGE_PNG)) {
@@ -187,9 +190,29 @@ public final class BundledChunkExtractor implements ExtractorOutput, ChunkExtrac
                 /* timestampAdjuster= */ null,
                 /* sideloadedTrack= */ null,
                 closedCaptionFormats,
-                playerEmsgTrackOutput);
+                playerEmsgTrackOutput,
+                getGlobalFragmentedMp4DolbyVisionSampleTransformer());
       }
       return new BundledChunkExtractor(extractor, primaryTrackType, representationFormat);
+    }
+
+    @Nullable
+    private static MatroskaExtractor.DolbyVisionSampleTransformer
+        getGlobalMatroskaDolbyVisionSampleTransformer() {
+      @Nullable Object transformer = DolbyVisionCompatibility.getMatroskaDolbyVisionSampleTransformer();
+      return transformer instanceof MatroskaExtractor.DolbyVisionSampleTransformer
+          ? (MatroskaExtractor.DolbyVisionSampleTransformer) transformer
+          : null;
+    }
+
+    @Nullable
+    private static FragmentedMp4Extractor.DolbyVisionSampleTransformer
+        getGlobalFragmentedMp4DolbyVisionSampleTransformer() {
+      @Nullable Object transformer =
+          DolbyVisionCompatibility.getFragmentedMp4DolbyVisionSampleTransformer();
+      return transformer instanceof FragmentedMp4Extractor.DolbyVisionSampleTransformer
+          ? (FragmentedMp4Extractor.DolbyVisionSampleTransformer) transformer
+          : null;
     }
   }
 

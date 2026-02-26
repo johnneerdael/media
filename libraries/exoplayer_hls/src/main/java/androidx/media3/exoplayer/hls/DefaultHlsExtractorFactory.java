@@ -26,6 +26,7 @@ import androidx.media3.common.C;
 import androidx.media3.common.FileTypes;
 import androidx.media3.common.Format;
 import androidx.media3.common.MimeTypes;
+import androidx.media3.common.util.DolbyVisionCompatibility;
 import androidx.media3.common.util.TimestampAdjuster;
 import androidx.media3.common.util.UnstableApi;
 import androidx.media3.exoplayer.analytics.PlayerId;
@@ -39,6 +40,7 @@ import androidx.media3.extractor.ts.Ac3Extractor;
 import androidx.media3.extractor.ts.Ac4Extractor;
 import androidx.media3.extractor.ts.AdtsExtractor;
 import androidx.media3.extractor.ts.DefaultTsPayloadReaderFactory;
+import androidx.media3.extractor.ts.H265Reader;
 import androidx.media3.extractor.ts.TsExtractor;
 import com.google.common.collect.ImmutableList;
 import com.google.common.primitives.Ints;
@@ -314,7 +316,8 @@ public final class DefaultHlsExtractorFactory implements HlsExtractorFactory {
         extractorFlags,
         subtitleParserFactory,
         timestampAdjuster,
-        new DefaultTsPayloadReaderFactory(payloadReaderFactoryFlags, muxedCaptionFormats),
+        new DefaultTsPayloadReaderFactory(
+            payloadReaderFactoryFlags, muxedCaptionFormats, getGlobalTsDolbyVisionNalTransformer()),
         DEFAULT_TIMESTAMP_SEARCH_BYTES);
   }
 
@@ -338,7 +341,8 @@ public final class DefaultHlsExtractorFactory implements HlsExtractorFactory {
         timestampAdjuster,
         /* sideloadedTrack= */ null,
         muxedCaptionFormats != null ? muxedCaptionFormats : ImmutableList.of(),
-        /* additionalEmsgTrackOutput= */ null);
+        /* additionalEmsgTrackOutput= */ null,
+        getGlobalFragmentedMp4DolbyVisionSampleTransformer());
   }
 
   private static boolean sniffQuietly(Extractor extractor, ExtractorInput input)
@@ -352,5 +356,23 @@ public final class DefaultHlsExtractorFactory implements HlsExtractorFactory {
       input.resetPeekPosition();
     }
     return result;
+  }
+
+  @Nullable
+  private static FragmentedMp4Extractor.DolbyVisionSampleTransformer
+      getGlobalFragmentedMp4DolbyVisionSampleTransformer() {
+    @Nullable Object transformer =
+        DolbyVisionCompatibility.getFragmentedMp4DolbyVisionSampleTransformer();
+    return transformer instanceof FragmentedMp4Extractor.DolbyVisionSampleTransformer
+        ? (FragmentedMp4Extractor.DolbyVisionSampleTransformer) transformer
+        : null;
+  }
+
+  @Nullable
+  private static H265Reader.DolbyVisionNalTransformer getGlobalTsDolbyVisionNalTransformer() {
+    @Nullable Object transformer = DolbyVisionCompatibility.getTsDolbyVisionNalTransformer();
+    return transformer instanceof H265Reader.DolbyVisionNalTransformer
+        ? (H265Reader.DolbyVisionNalTransformer) transformer
+        : null;
   }
 }

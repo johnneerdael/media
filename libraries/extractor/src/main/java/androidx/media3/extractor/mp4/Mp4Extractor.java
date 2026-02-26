@@ -37,6 +37,7 @@ import androidx.media3.common.Format;
 import androidx.media3.common.Metadata;
 import androidx.media3.common.MimeTypes;
 import androidx.media3.common.ParserException;
+import androidx.media3.common.util.DolbyVisionCompatibility;
 import androidx.media3.common.util.ParsableByteArray;
 import androidx.media3.common.util.UnstableApi;
 import androidx.media3.container.MdtaMetadataEntry;
@@ -85,6 +86,52 @@ public final class Mp4Extractor implements Extractor {
    */
   public static ExtractorsFactory newFactory(SubtitleParser.Factory subtitleParserFactory) {
     return () -> new Extractor[] {new Mp4Extractor(subtitleParserFactory)};
+  }
+
+  /**
+   * Creates a factory for {@link Mp4Extractor} instances with an optional Dolby Vision sample
+   * transformer.
+   */
+  public static ExtractorsFactory newFactory(
+      SubtitleParser.Factory subtitleParserFactory,
+      @Nullable DolbyVisionSampleTransformer dolbyVisionSampleTransformer) {
+    return () -> new Extractor[] {new Mp4Extractor(subtitleParserFactory, 0, dolbyVisionSampleTransformer)};
+  }
+
+  /**
+   * Hook invoked for Dolby Vision specific MP4 sample/signaling rewrites.
+   *
+   * <p>This is a conversion seam for progressive MP4 streams carrying Dolby Vision NAL units in
+   * length-delimited HEVC samples.
+   */
+  public interface DolbyVisionSampleTransformer {
+
+    /**
+     * Optionally rewrites Dolby Vision codec signaling for output {@link Format}.
+     *
+     * @param codecs Existing codec string (for example {@code dvhe.07.06}).
+     * @return Replacement codec string, or null to keep original signaling.
+     */
+    @Nullable
+    default String onDolbyVisionCodecString(@Nullable String codecs) {
+      return null;
+    }
+
+    /**
+     * Optionally rewrites a length-delimited HEVC sample.
+     *
+     * @param sampleLengthDelimitedData Sample payload in length-delimited NAL format.
+     * @param nalUnitLengthFieldLength Length field size in bytes.
+     * @param codecs Track codec string, if present.
+     * @return Replacement sample payload in length-delimited NAL format, or null to keep original.
+     */
+    @Nullable
+    default byte[] transformHevcSample(
+        byte[] sampleLengthDelimitedData,
+        int nalUnitLengthFieldLength,
+        @Nullable String codecs) {
+      return null;
+    }
   }
 
   /**
@@ -236,6 +283,7 @@ public final class Mp4Extractor implements Extractor {
   private final SubtitleParser.Factory subtitleParserFactory;
   private final @Flags int flags;
   private final boolean omitTrackSampleTable;
+  @Nullable private final DolbyVisionSampleTransformer dolbyVisionSampleTransformer;
 
   // Temporary arrays.
   private final ParsableByteArray nalStartCode;
@@ -311,8 +359,25 @@ public final class Mp4Extractor implements Extractor {
    * @param flags Flags that control the extractor's behavior.
    */
   public Mp4Extractor(SubtitleParser.Factory subtitleParserFactory, @Flags int flags) {
+    this(subtitleParserFactory, flags, /* dolbyVisionSampleTransformer= */ null);
+  }
+
+  /**
+   * Creates a new extractor for unfragmented MP4 streams, using the specified flags to control the
+   * extractor's behavior and optional Dolby Vision sample transformation hooks.
+   *
+   * @param subtitleParserFactory The {@link SubtitleParser.Factory} for parsing subtitles during
+   *     extraction.
+   * @param flags Flags that control the extractor's behavior.
+   * @param dolbyVisionSampleTransformer Optional Dolby Vision sample/signaling transformer.
+   */
+  public Mp4Extractor(
+      SubtitleParser.Factory subtitleParserFactory,
+      @Flags int flags,
+      @Nullable DolbyVisionSampleTransformer dolbyVisionSampleTransformer) {
     this.subtitleParserFactory = subtitleParserFactory;
     this.flags = flags;
+    this.dolbyVisionSampleTransformer = dolbyVisionSampleTransformer;
     omitTrackSampleTable = (flags & FLAG_OMIT_TRACK_SAMPLE_TABLE) != 0;
     lastSniffFailures = ImmutableList.of();
     parserState =
@@ -687,6 +752,27 @@ public final class Mp4Extractor implements Extractor {
 
       Format.Builder formatBuilder = track.format.buildUpon();
       formatBuilder.setMaxInputSize(maxInputSize);
+      @Nullable String outputCodecs = track.format.codecs;
+      if (dolbyVisionSampleTransformer != null
+          && Objects.equals(track.format.sampleMimeType, MimeTypes.VIDEO_DOLBY_VISION)) {
+        @Nullable String transformedCodecs =
+            dolbyVisionSampleTransformer.onDolbyVisionCodecString(track.format.codecs);
+        if (transformedCodecs != null && !transformedCodecs.isEmpty()) {
+          outputCodecs = transformedCodecs;
+          formatBuilder.setCodecs(transformedCodecs);
+        }
+      }
+      if (DolbyVisionCompatibility.shouldMapDolbyVisionProfile7(
+          track.format.sampleMimeType, outputCodecs)) {
+        formatBuilder.setSampleMimeType(MimeTypes.VIDEO_H265);
+        @Nullable
+        String baseLayerCodecs =
+            NalUnitUtil.getH265BaseLayerCodecsString(track.format.initializationData);
+        if (baseLayerCodecs == null) {
+          baseLayerCodecs = DolbyVisionCompatibility.chooseHevcCodecsString(outputCodecs, null);
+        }
+        formatBuilder.setCodecs(baseLayerCodecs);
+      }
       if (track.type == C.TRACK_TYPE_VIDEO) {
         @C.RoleFlags int roleFlags = track.format.roleFlags;
         if ((flags & FLAG_MARK_FIRST_VIDEO_TRACK_WITH_MAIN_ROLE) != 0) {
@@ -891,6 +977,30 @@ public final class Mp4Extractor implements Extractor {
       isSampleDependedOn = true;
     }
     if (track.track.nalUnitLengthFieldLength != 0) {
+      if (shouldTransformDolbyVisionSample(track)) {
+        byte[] sampleLengthDelimitedData = new byte[track.sampleTable.sizes[sampleIndex]];
+        input.readFully(
+            sampleLengthDelimitedData,
+            /* offset= */ 0,
+            sampleLengthDelimitedData.length);
+        sampleBytesRead += sampleLengthDelimitedData.length;
+        byte[] transformedLengthDelimitedData = sampleLengthDelimitedData;
+        @Nullable
+        byte[] maybeTransformedSample =
+            checkNotNull(dolbyVisionSampleTransformer)
+                .transformHevcSample(
+                    sampleLengthDelimitedData,
+                    track.track.nalUnitLengthFieldLength,
+                    track.track.format.codecs);
+        if (maybeTransformedSample != null && maybeTransformedSample.length > 0) {
+          transformedLengthDelimitedData = maybeTransformedSample;
+        }
+        sampleSize =
+            writeLengthDelimitedSampleAsAnnexB(
+                trackOutput, transformedLengthDelimitedData, track.track.nalUnitLengthFieldLength);
+        sampleBytesWritten = sampleSize;
+        isSampleDependedOn = true;
+      } else {
       // Zero the top three bytes of the array that we'll use to decode nal unit lengths, in case
       // they're only 1 or 2 bytes long.
       byte[] nalPrefixData = nalPrefix.getData();
@@ -954,6 +1064,7 @@ public final class Mp4Extractor implements Extractor {
           sampleBytesWritten += writtenBytes;
           sampleCurrentNalBytesRemaining -= writtenBytes;
         }
+      }
       }
     } else {
       if (MimeTypes.AUDIO_AC4.equals(track.track.format.sampleMimeType)) {
@@ -1126,6 +1237,51 @@ public final class Mp4Extractor implements Extractor {
       return (flags & FLAG_READ_WITHIN_GOP_SAMPLE_DEPENDENCIES_H265) != 0;
     }
     return false;
+  }
+
+  private boolean shouldTransformDolbyVisionSample(Mp4Track track) {
+    return dolbyVisionSampleTransformer != null
+        && track.track.nalUnitLengthFieldLength > 0
+        && Objects.equals(track.track.format.sampleMimeType, MimeTypes.VIDEO_DOLBY_VISION);
+  }
+
+  /**
+   * Writes a length-delimited HEVC sample to {@code trackOutput} as AnnexB and returns the number
+   * of bytes written.
+   */
+  private int writeLengthDelimitedSampleAsAnnexB(
+      TrackOutput trackOutput, byte[] sampleLengthDelimitedData, int nalUnitLengthFieldLength)
+      throws ParserException {
+    if (nalUnitLengthFieldLength <= 0 || nalUnitLengthFieldLength > 4) {
+      throw ParserException.createForMalformedContainer(
+          "Invalid NAL length field length", /* cause= */ null);
+    }
+    ParsableByteArray sampleData = new ParsableByteArray(sampleLengthDelimitedData);
+    int offset = 0;
+    int writtenBytes = 0;
+    while (offset < sampleLengthDelimitedData.length) {
+      if (offset + nalUnitLengthFieldLength > sampleLengthDelimitedData.length) {
+        throw ParserException.createForMalformedContainer(
+            "Invalid NAL length field", /* cause= */ null);
+      }
+      int nalSize = 0;
+      for (int i = 0; i < nalUnitLengthFieldLength; i++) {
+        nalSize = (nalSize << 8) | (sampleLengthDelimitedData[offset + i] & 0xFF);
+      }
+      offset += nalUnitLengthFieldLength;
+      if (nalSize < 0 || offset + nalSize > sampleLengthDelimitedData.length) {
+        throw ParserException.createForMalformedContainer(
+            "Invalid NAL length", /* cause= */ null);
+      }
+      nalStartCode.setPosition(0);
+      trackOutput.sampleData(nalStartCode, 4);
+      writtenBytes += 4;
+      sampleData.setPosition(offset);
+      trackOutput.sampleData(sampleData, nalSize);
+      writtenBytes += nalSize;
+      offset += nalSize;
+    }
+    return writtenBytes;
   }
 
   /**
