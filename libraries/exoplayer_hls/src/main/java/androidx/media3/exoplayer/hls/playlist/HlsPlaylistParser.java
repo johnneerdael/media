@@ -35,6 +35,7 @@ import androidx.media3.common.Format;
 import androidx.media3.common.Metadata;
 import androidx.media3.common.MimeTypes;
 import androidx.media3.common.ParserException;
+import androidx.media3.common.util.DolbyVisionCompatibility;
 import androidx.media3.common.util.Log;
 import androidx.media3.common.util.UnstableApi;
 import androidx.media3.common.util.UriUtil;
@@ -487,9 +488,23 @@ public final class HlsPlaylistParser implements ParsingLoadable.Parser<HlsPlayli
         String videoCodecs = Util.getCodecsOfType(codecs, C.TRACK_TYPE_VIDEO);
         if (isDolbyVisionFormat(
             videoRange, videoCodecs, supplementalCodecs, supplementalProfiles)) {
-          videoCodecs = supplementalCodecs != null ? supplementalCodecs : videoCodecs;
+          boolean shouldMapToHevc =
+              DolbyVisionCompatibility.shouldMapDolbyVisionProfile7(
+                      MimeTypes.VIDEO_DOLBY_VISION, videoCodecs)
+                  || DolbyVisionCompatibility.shouldMapDolbyVisionProfile7(
+                      MimeTypes.VIDEO_DOLBY_VISION, supplementalCodecs);
+          if (shouldMapToHevc) {
+            videoCodecs =
+                DolbyVisionCompatibility.chooseHevcCodecsString(videoCodecs, supplementalCodecs);
+          } else {
+            videoCodecs = supplementalCodecs != null ? supplementalCodecs : videoCodecs;
+          }
           String nonVideoCodecs = Util.getCodecsWithoutType(codecs, C.TRACK_TYPE_VIDEO);
-          codecs = nonVideoCodecs != null ? videoCodecs + "," + nonVideoCodecs : videoCodecs;
+          if (videoCodecs == null) {
+            codecs = nonVideoCodecs;
+          } else {
+            codecs = nonVideoCodecs != null ? videoCodecs + "," + nonVideoCodecs : videoCodecs;
+          }
         }
 
         String resolutionString =
@@ -608,9 +623,14 @@ public final class HlsPlaylistParser implements ParsingLoadable.Parser<HlsPlayli
             Format variantFormat = variant.format;
             @Nullable
             String codecs = Util.getCodecsOfType(variantFormat.codecs, C.TRACK_TYPE_VIDEO);
+            @Nullable String sampleMimeType = MimeTypes.getMediaMimeType(codecs);
+            if (DolbyVisionCompatibility.shouldMapDolbyVisionProfile7(sampleMimeType, codecs)) {
+              sampleMimeType = MimeTypes.VIDEO_H265;
+              codecs = DolbyVisionCompatibility.chooseHevcCodecsString(codecs, null);
+            }
             formatBuilder
                 .setCodecs(codecs)
-                .setSampleMimeType(MimeTypes.getMediaMimeType(codecs))
+                .setSampleMimeType(sampleMimeType)
                 .setWidth(variantFormat.width)
                 .setHeight(variantFormat.height)
                 .setFrameRate(variantFormat.frameRate);

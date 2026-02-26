@@ -26,6 +26,7 @@ import androidx.media3.common.FileTypes;
 import androidx.media3.common.Format;
 import androidx.media3.common.PlaybackException;
 import androidx.media3.common.Player;
+import androidx.media3.common.util.DolbyVisionCompatibility;
 import androidx.media3.common.util.TimestampAdjuster;
 import androidx.media3.common.util.UnstableApi;
 import androidx.media3.extractor.amr.AmrExtractor;
@@ -48,6 +49,7 @@ import androidx.media3.extractor.ts.Ac3Extractor;
 import androidx.media3.extractor.ts.Ac4Extractor;
 import androidx.media3.extractor.ts.AdtsExtractor;
 import androidx.media3.extractor.ts.DefaultTsPayloadReaderFactory;
+import androidx.media3.extractor.ts.H265Reader;
 import androidx.media3.extractor.ts.PsExtractor;
 import androidx.media3.extractor.ts.TsExtractor;
 import androidx.media3.extractor.ts.TsPayloadReader;
@@ -156,6 +158,12 @@ public final class DefaultExtractorsFactory implements ExtractorsFactory {
   private @C.VideoCodecFlags int codecsToParseWithinGopSampleDependencies;
   private @JpegExtractor.Flags int jpegFlags;
   private @HeifExtractor.Flags int heifFlags;
+  @Nullable private MatroskaExtractor.DolbyVisionSampleTransformer matroskaDolbyVisionSampleTransformer;
+  @Nullable private Mp4Extractor.DolbyVisionSampleTransformer mp4DolbyVisionSampleTransformer;
+  @Nullable
+  private FragmentedMp4Extractor.DolbyVisionSampleTransformer
+      fragmentedMp4DolbyVisionSampleTransformer;
+  @Nullable private H265Reader.DolbyVisionNalTransformer tsDolbyVisionNalTransformer;
 
   public DefaultExtractorsFactory() {
     tsMode = TsExtractor.MODE_SINGLE_PMT;
@@ -261,6 +269,50 @@ public final class DefaultExtractorsFactory implements ExtractorsFactory {
   public synchronized DefaultExtractorsFactory setMatroskaExtractorFlags(
       @MatroskaExtractor.Flags int flags) {
     this.matroskaFlags = flags;
+    return this;
+  }
+
+  /**
+   * Sets an optional Dolby Vision hook for {@link MatroskaExtractor} instances created by the
+   * factory.
+   */
+  @CanIgnoreReturnValue
+  public synchronized DefaultExtractorsFactory setMatroskaDolbyVisionSampleTransformer(
+      @Nullable MatroskaExtractor.DolbyVisionSampleTransformer dolbyVisionSampleTransformer) {
+    this.matroskaDolbyVisionSampleTransformer = dolbyVisionSampleTransformer;
+    return this;
+  }
+
+  /**
+   * Sets an optional Dolby Vision hook for {@link Mp4Extractor} instances created by the factory.
+   */
+  @CanIgnoreReturnValue
+  public synchronized DefaultExtractorsFactory setMp4DolbyVisionSampleTransformer(
+      @Nullable Mp4Extractor.DolbyVisionSampleTransformer dolbyVisionSampleTransformer) {
+    this.mp4DolbyVisionSampleTransformer = dolbyVisionSampleTransformer;
+    return this;
+  }
+
+  /**
+   * Sets an optional Dolby Vision hook for {@link FragmentedMp4Extractor} instances created by the
+   * factory.
+   */
+  @CanIgnoreReturnValue
+  public synchronized DefaultExtractorsFactory setFragmentedMp4DolbyVisionSampleTransformer(
+      @Nullable FragmentedMp4Extractor.DolbyVisionSampleTransformer
+          dolbyVisionSampleTransformer) {
+    this.fragmentedMp4DolbyVisionSampleTransformer = dolbyVisionSampleTransformer;
+    return this;
+  }
+
+  /**
+   * Sets an optional Dolby Vision hook for H.265 streams parsed by {@link TsExtractor} instances
+   * created by the factory.
+   */
+  @CanIgnoreReturnValue
+  public synchronized DefaultExtractorsFactory setTsDolbyVisionNalTransformer(
+      @Nullable H265Reader.DolbyVisionNalTransformer dolbyVisionNalTransformer) {
+    this.tsDolbyVisionNalTransformer = dolbyVisionNalTransformer;
     return this;
   }
 
@@ -457,6 +509,27 @@ public final class DefaultExtractorsFactory implements ExtractorsFactory {
   }
 
   private void addExtractorsForFileType(@FileTypes.Type int fileType, List<Extractor> extractors) {
+    @Nullable
+    MatroskaExtractor.DolbyVisionSampleTransformer matroskaDvTransformer =
+        matroskaDolbyVisionSampleTransformer != null
+            ? matroskaDolbyVisionSampleTransformer
+            : getGlobalMatroskaDolbyVisionSampleTransformer();
+    @Nullable
+    Mp4Extractor.DolbyVisionSampleTransformer mp4DvTransformer =
+        mp4DolbyVisionSampleTransformer != null
+            ? mp4DolbyVisionSampleTransformer
+            : getGlobalMp4DolbyVisionSampleTransformer();
+    @Nullable
+    FragmentedMp4Extractor.DolbyVisionSampleTransformer fragmentedMp4DvTransformer =
+        fragmentedMp4DolbyVisionSampleTransformer != null
+            ? fragmentedMp4DolbyVisionSampleTransformer
+            : getGlobalFragmentedMp4DolbyVisionSampleTransformer();
+    @Nullable
+    H265Reader.DolbyVisionNalTransformer tsDvTransformer =
+        tsDolbyVisionNalTransformer != null
+            ? tsDolbyVisionNalTransformer
+            : getGlobalTsDolbyVisionNalTransformer();
+
     switch (fileType) {
       case FileTypes.AC3:
         extractors.add(new Ac3Extractor());
@@ -504,7 +577,8 @@ public final class DefaultExtractorsFactory implements ExtractorsFactory {
                 matroskaFlags
                     | (textTrackTranscodingEnabled
                         ? 0
-                        : MatroskaExtractor.FLAG_EMIT_RAW_SUBTITLE_DATA)));
+                        : MatroskaExtractor.FLAG_EMIT_RAW_SUBTITLE_DATA),
+                matroskaDvTransformer));
         break;
       case FileTypes.MP3:
         extractors.add(
@@ -526,7 +600,12 @@ public final class DefaultExtractorsFactory implements ExtractorsFactory {
                         codecsToParseWithinGopSampleDependencies)
                     | (textTrackTranscodingEnabled
                         ? 0
-                        : FragmentedMp4Extractor.FLAG_EMIT_RAW_SUBTITLE_DATA)));
+                        : FragmentedMp4Extractor.FLAG_EMIT_RAW_SUBTITLE_DATA),
+                /* timestampAdjuster= */ null,
+                /* sideloadedTrack= */ null,
+                /* closedCaptionFormats= */ ImmutableList.of(),
+                /* additionalEmsgTrackOutput= */ null,
+                fragmentedMp4DvTransformer));
         extractors.add(
             new Mp4Extractor(
                 subtitleParserFactory,
@@ -535,7 +614,8 @@ public final class DefaultExtractorsFactory implements ExtractorsFactory {
                         codecsToParseWithinGopSampleDependencies)
                     | (textTrackTranscodingEnabled
                         ? 0
-                        : Mp4Extractor.FLAG_EMIT_RAW_SUBTITLE_DATA)));
+                        : Mp4Extractor.FLAG_EMIT_RAW_SUBTITLE_DATA),
+                mp4DvTransformer));
         break;
       case FileTypes.OGG:
         extractors.add(new OggExtractor());
@@ -553,7 +633,8 @@ public final class DefaultExtractorsFactory implements ExtractorsFactory {
                 (textTrackTranscodingEnabled ? 0 : TsExtractor.FLAG_EMIT_RAW_SUBTITLE_DATA),
                 subtitleParserFactory,
                 new TimestampAdjuster(0),
-                new DefaultTsPayloadReaderFactory(tsFlags, tsSubtitleFormats),
+                new DefaultTsPayloadReaderFactory(
+                    tsFlags, tsSubtitleFormats, tsDvTransformer),
                 tsTimestampSearchBytes));
         break;
       case FileTypes.WAV:
@@ -594,6 +675,41 @@ public final class DefaultExtractorsFactory implements ExtractorsFactory {
       default:
         break;
     }
+  }
+
+  @Nullable
+  private static MatroskaExtractor.DolbyVisionSampleTransformer
+      getGlobalMatroskaDolbyVisionSampleTransformer() {
+    @Nullable Object transformer = DolbyVisionCompatibility.getMatroskaDolbyVisionSampleTransformer();
+    return transformer instanceof MatroskaExtractor.DolbyVisionSampleTransformer
+        ? (MatroskaExtractor.DolbyVisionSampleTransformer) transformer
+        : null;
+  }
+
+  @Nullable
+  private static Mp4Extractor.DolbyVisionSampleTransformer getGlobalMp4DolbyVisionSampleTransformer() {
+    @Nullable Object transformer = DolbyVisionCompatibility.getMp4DolbyVisionSampleTransformer();
+    return transformer instanceof Mp4Extractor.DolbyVisionSampleTransformer
+        ? (Mp4Extractor.DolbyVisionSampleTransformer) transformer
+        : null;
+  }
+
+  @Nullable
+  private static FragmentedMp4Extractor.DolbyVisionSampleTransformer
+      getGlobalFragmentedMp4DolbyVisionSampleTransformer() {
+    @Nullable Object transformer =
+        DolbyVisionCompatibility.getFragmentedMp4DolbyVisionSampleTransformer();
+    return transformer instanceof FragmentedMp4Extractor.DolbyVisionSampleTransformer
+        ? (FragmentedMp4Extractor.DolbyVisionSampleTransformer) transformer
+        : null;
+  }
+
+  @Nullable
+  private static H265Reader.DolbyVisionNalTransformer getGlobalTsDolbyVisionNalTransformer() {
+    @Nullable Object transformer = DolbyVisionCompatibility.getTsDolbyVisionNalTransformer();
+    return transformer instanceof H265Reader.DolbyVisionNalTransformer
+        ? (H265Reader.DolbyVisionNalTransformer) transformer
+        : null;
   }
 
   private static Constructor<? extends Extractor> getMidiExtractorConstructor()

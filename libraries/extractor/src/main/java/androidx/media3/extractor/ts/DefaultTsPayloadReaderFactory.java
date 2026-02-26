@@ -112,6 +112,7 @@ public final class DefaultTsPayloadReaderFactory implements TsPayloadReader.Fact
 
   private final @Flags int flags;
   private final List<Format> closedCaptionFormats;
+  @Nullable private final H265Reader.DolbyVisionNalTransformer h265DolbyVisionNalTransformer;
 
   public DefaultTsPayloadReaderFactory() {
     this(0);
@@ -136,8 +137,28 @@ public final class DefaultTsPayloadReaderFactory implements TsPayloadReader.Fact
    *     exposed.
    */
   public DefaultTsPayloadReaderFactory(@Flags int flags, List<Format> closedCaptionFormats) {
+    this(flags, closedCaptionFormats, /* h265DolbyVisionNalTransformer= */ null);
+  }
+
+  /**
+   * @param flags A combination of {@code FLAG_*} values that control the behavior of the created
+   *     readers.
+   * @param closedCaptionFormats {@link Format}s to be exposed by payload readers for streams with
+   *     embedded closed captions when no caption service descriptors are provided. If {@link
+   *     #FLAG_OVERRIDE_CAPTION_DESCRIPTORS} is set, {@code closedCaptionFormats} overrides any
+   *     descriptor information. If not set, and {@code closedCaptionFormats} is empty, a closed
+   *     caption track with {@link Format#accessibilityChannel} {@link Format#NO_VALUE} will be
+   *     exposed.
+   * @param h265DolbyVisionNalTransformer Optional transformer for H.265 AnnexB NAL unit payloads
+   *     (for example Dolby Vision RPU conversion).
+   */
+  public DefaultTsPayloadReaderFactory(
+      @Flags int flags,
+      List<Format> closedCaptionFormats,
+      @Nullable H265Reader.DolbyVisionNalTransformer h265DolbyVisionNalTransformer) {
     this.flags = flags;
     this.closedCaptionFormats = closedCaptionFormats;
+    this.h265DolbyVisionNalTransformer = h265DolbyVisionNalTransformer;
   }
 
   @Override
@@ -206,7 +227,9 @@ public final class DefaultTsPayloadReaderFactory implements TsPayloadReader.Fact
                     isSet(FLAG_DETECT_ACCESS_UNITS),
                     MimeTypes.VIDEO_MP2T));
       case TsExtractor.TS_STREAM_TYPE_H265:
-        return new PesReader(new H265Reader(buildSeiReader(esInfo), MimeTypes.VIDEO_MP2T));
+        return new PesReader(
+            new H265Reader(
+                buildSeiReader(esInfo), MimeTypes.VIDEO_MP2T, h265DolbyVisionNalTransformer));
       case TsExtractor.TS_STREAM_TYPE_SPLICE_INFO:
         return isSet(FLAG_IGNORE_SPLICE_INFO_STREAM)
             ? null

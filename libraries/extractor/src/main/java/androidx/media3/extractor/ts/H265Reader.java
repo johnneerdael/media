@@ -21,8 +21,10 @@ import static com.google.common.base.Preconditions.checkState;
 import androidx.annotation.Nullable;
 import androidx.media3.common.C;
 import androidx.media3.common.ColorInfo;
+import androidx.media3.common.DataReader;
 import androidx.media3.common.Format;
 import androidx.media3.common.MimeTypes;
+import androidx.media3.common.util.Log;
 import androidx.media3.common.util.CodecSpecificDataUtil;
 import androidx.media3.common.util.ParsableByteArray;
 import androidx.media3.common.util.UnstableApi;
@@ -31,6 +33,10 @@ import androidx.media3.container.NalUnitUtil;
 import androidx.media3.extractor.ExtractorOutput;
 import androidx.media3.extractor.TrackOutput;
 import androidx.media3.extractor.ts.TsPayloadReader.TrackIdGenerator;
+import java.io.ByteArrayOutputStream;
+import java.io.EOFException;
+import java.io.IOException;
+import java.util.Arrays;
 import java.util.Collections;
 import org.checkerframework.checker.nullness.qual.EnsuresNonNull;
 import org.checkerframework.checker.nullness.qual.MonotonicNonNull;
@@ -40,8 +46,38 @@ import org.checkerframework.checker.nullness.qual.RequiresNonNull;
 @UnstableApi
 public final class H265Reader implements ElementaryStreamReader {
 
+  /** Hook invoked for Dolby Vision specific H.265 stream/signaling rewrites. */
+  public interface DolbyVisionNalTransformer {
+
+    /**
+     * Optionally rewrites Dolby Vision codec signaling for output {@link Format}.
+     *
+     * @param codecs Existing codec string, if present.
+     * @return Replacement codec string, or null to keep original signaling.
+     */
+    @Nullable
+    default String onDolbyVisionCodecString(@Nullable String codecs) {
+      return null;
+    }
+
+    /**
+     * Optionally rewrites a Dolby Vision RPU NAL unit payload.
+     *
+     * @param nalUnit Annex-B NAL unit payload excluding start code and including NAL header bytes.
+     * @param codecs Track codec string, if present.
+     * @return Replacement NAL payload, or null to keep original.
+     */
+    @Nullable
+    default byte[] transformDolbyVisionRpuNal(byte[] nalUnit, @Nullable String codecs) {
+      return null;
+    }
+  }
+
+  private static final String TAG = "H265Reader";
+
   private final SeiReader seiReader;
   private final String containerMimeType;
+  @Nullable private final DolbyVisionNalTransformer dolbyVisionNalTransformer;
 
   private @MonotonicNonNull String formatId;
   private @MonotonicNonNull TrackOutput output;
@@ -70,8 +106,21 @@ public final class H265Reader implements ElementaryStreamReader {
    * @param containerMimeType The MIME type of the container holding the stream.
    */
   public H265Reader(SeiReader seiReader, String containerMimeType) {
+    this(seiReader, containerMimeType, /* dolbyVisionNalTransformer= */ null);
+  }
+
+  /**
+   * @param seiReader An SEI reader for consuming closed caption channels.
+   * @param containerMimeType The MIME type of the container holding the stream.
+   * @param dolbyVisionNalTransformer Optional Dolby Vision NAL transformer for Annex-B payloads.
+   */
+  public H265Reader(
+      SeiReader seiReader,
+      String containerMimeType,
+      @Nullable DolbyVisionNalTransformer dolbyVisionNalTransformer) {
     this.seiReader = seiReader;
     this.containerMimeType = containerMimeType;
+    this.dolbyVisionNalTransformer = dolbyVisionNalTransformer;
     prefixFlags = new boolean[3];
     vps = new NalUnitTargetBuffer(NalUnitUtil.H265_NAL_UNIT_TYPE_VPS, 128);
     sps = new NalUnitTargetBuffer(NalUnitUtil.H265_NAL_UNIT_TYPE_SPS, 128);
@@ -102,7 +151,12 @@ public final class H265Reader implements ElementaryStreamReader {
   public void createTracks(ExtractorOutput extractorOutput, TrackIdGenerator idGenerator) {
     idGenerator.generateNewId();
     formatId = idGenerator.getFormatId();
-    output = extractorOutput.track(idGenerator.getTrackId(), C.TRACK_TYPE_VIDEO);
+    TrackOutput trackOutput = extractorOutput.track(idGenerator.getTrackId(), C.TRACK_TYPE_VIDEO);
+    if (dolbyVisionNalTransformer != null) {
+      trackOutput =
+          new DolbyVisionTransformingTrackOutput(trackOutput, dolbyVisionNalTransformer);
+    }
+    output = trackOutput;
     sampleReader = new SampleReader(output);
     seiReader.createTracks(extractorOutput, idGenerator);
   }
@@ -297,6 +351,217 @@ public final class H265Reader implements ElementaryStreamReader {
   private void assertTracksCreated() {
     checkNotNull(output);
     Util.castNonNull(sampleReader);
+  }
+
+  /**
+   * TrackOutput wrapper that rewrites Dolby Vision RPU NAL units (type 62) in Annex-B streams.
+   *
+   * <p>The rewrite is applied only when transformed NAL length is unchanged to preserve upstream
+   * sample sizing and offsets.
+   */
+  private static final class DolbyVisionTransformingTrackOutput implements TrackOutput {
+
+    private static final int H265_NAL_UNIT_TYPE_DOLBY_VISION_RPU = 62;
+
+    private final TrackOutput delegate;
+    private final DolbyVisionNalTransformer transformer;
+    private final ParsableByteArray scratch;
+    private final ByteArrayOutputStream pendingOutputBuffer;
+    @Nullable private String codecs;
+    private byte[] pendingData;
+
+    public DolbyVisionTransformingTrackOutput(
+        TrackOutput delegate, DolbyVisionNalTransformer transformer) {
+      this.delegate = delegate;
+      this.transformer = transformer;
+      this.scratch = new ParsableByteArray();
+      this.pendingOutputBuffer = new ByteArrayOutputStream();
+      this.pendingData = new byte[0];
+    }
+
+    @Override
+    public void durationUs(long durationUs) {
+      delegate.durationUs(durationUs);
+    }
+
+    @Override
+    public void format(Format format) {
+      @Nullable String rewrittenCodecs = transformer.onDolbyVisionCodecString(format.codecs);
+      if (rewrittenCodecs != null && !rewrittenCodecs.isEmpty()) {
+        format = format.buildUpon().setCodecs(rewrittenCodecs).build();
+      }
+      codecs = format.codecs;
+      delegate.format(format);
+    }
+
+    @Override
+    public int sampleData(
+        DataReader input, int length, boolean allowEndOfInput, @SampleDataPart int sampleDataPart)
+        throws IOException {
+      byte[] bytes = new byte[length];
+      int bytesRead = input.read(bytes, 0, length);
+      if (bytesRead == C.RESULT_END_OF_INPUT) {
+        if (allowEndOfInput) {
+          return C.RESULT_END_OF_INPUT;
+        }
+        throw new EOFException();
+      }
+      ParsableByteArray data = new ParsableByteArray(bytes, bytesRead);
+      sampleData(data, bytesRead, sampleDataPart);
+      return bytesRead;
+    }
+
+    @Override
+    public void sampleData(ParsableByteArray data, int length, @SampleDataPart int sampleDataPart) {
+      if (sampleDataPart != SAMPLE_DATA_PART_MAIN || length <= 0) {
+        delegate.sampleData(data, length, sampleDataPart);
+        return;
+      }
+      byte[] incoming = new byte[length];
+      data.readBytes(incoming, 0, length);
+      appendPending(incoming);
+      flushCompleteNalUnits(/* flushAll= */ false);
+    }
+
+    @Override
+    public void sampleMetadata(
+        long timeUs, @C.BufferFlags int flags, int size, int offset, @Nullable CryptoData cryptoData) {
+      flushCompleteNalUnits(/* flushAll= */ true);
+      delegate.sampleMetadata(timeUs, flags, size, offset, cryptoData);
+    }
+
+    private void appendPending(byte[] bytes) {
+      if (pendingData.length == 0) {
+        pendingData = bytes;
+        return;
+      }
+      byte[] merged = new byte[pendingData.length + bytes.length];
+      System.arraycopy(pendingData, 0, merged, 0, pendingData.length);
+      System.arraycopy(bytes, 0, merged, pendingData.length, bytes.length);
+      pendingData = merged;
+    }
+
+    private void flushCompleteNalUnits(boolean flushAll) {
+      if (pendingData.length == 0) {
+        return;
+      }
+      pendingOutputBuffer.reset();
+      int dataLength = pendingData.length;
+      int scanPosition = 0;
+      while (scanPosition < dataLength) {
+        int startCodeOffset = findStartCode(pendingData, scanPosition, dataLength);
+        if (startCodeOffset < 0) {
+          break;
+        }
+        int nextStartCodeOffset = findStartCode(pendingData, startCodeOffset + 3, dataLength);
+        if (nextStartCodeOffset < 0) {
+          if (!flushAll) {
+            break;
+          }
+          nextStartCodeOffset = dataLength;
+        }
+        if (startCodeOffset > scanPosition) {
+          pendingOutputBuffer.write(pendingData, scanPosition, startCodeOffset - scanPosition);
+        }
+        int startCodeLength = getStartCodeLength(pendingData, startCodeOffset, nextStartCodeOffset);
+        int nalPayloadOffset = startCodeOffset + startCodeLength;
+        if (nalPayloadOffset >= nextStartCodeOffset) {
+          pendingOutputBuffer.write(
+              pendingData, startCodeOffset, nextStartCodeOffset - startCodeOffset);
+        } else {
+          byte[] nalPayload = new byte[nextStartCodeOffset - nalPayloadOffset];
+          System.arraycopy(
+              pendingData, nalPayloadOffset, nalPayload, 0, nextStartCodeOffset - nalPayloadOffset);
+          int nalUnitType = (nalPayload[0] & 0x7E) >> 1;
+          int layerId = getNuhLayerId(nalPayload);
+          if (layerId > 0 && nalUnitType != H265_NAL_UNIT_TYPE_DOLBY_VISION_RPU) {
+            // Drop enhancement-layer NAL units for single-layer HEVC compatibility.
+            scanPosition = nextStartCodeOffset;
+            continue;
+          }
+          pendingOutputBuffer.write(pendingData, startCodeOffset, startCodeLength);
+          byte[] transformedNalPayload = maybeTransformDolbyVisionRpuNal(nalPayload);
+          pendingOutputBuffer.write(transformedNalPayload, 0, transformedNalPayload.length);
+        }
+        scanPosition = nextStartCodeOffset;
+      }
+      int flushedLength = scanPosition;
+      if (flushAll && flushedLength < dataLength) {
+        pendingOutputBuffer.write(pendingData, flushedLength, dataLength - flushedLength);
+        flushedLength = dataLength;
+      }
+      byte[] flushed = pendingOutputBuffer.toByteArray();
+      if (flushed.length > 0) {
+        scratch.reset(flushed);
+        delegate.sampleData(scratch, flushed.length);
+      }
+      if (flushedLength >= dataLength) {
+        pendingData = new byte[0];
+      } else if (flushedLength > 0) {
+        byte[] remaining = new byte[dataLength - flushedLength];
+        System.arraycopy(pendingData, flushedLength, remaining, 0, dataLength - flushedLength);
+        pendingData = remaining;
+      }
+    }
+
+    private byte[] maybeTransformDolbyVisionRpuNal(byte[] nalPayload) {
+      if (nalPayload.length == 0) {
+        return nalPayload;
+      }
+      int nalUnitType = (nalPayload[0] & 0x7E) >> 1;
+      if (nalUnitType != H265_NAL_UNIT_TYPE_DOLBY_VISION_RPU) {
+        return nalPayload;
+      }
+      @Nullable byte[] maybeTransformed = transformer.transformDolbyVisionRpuNal(nalPayload, codecs);
+      if (maybeTransformed == null || maybeTransformed.length == 0) {
+        return nalPayload;
+      }
+      return normalizeNuhLayerIdToZero(maybeTransformed);
+    }
+
+    private static int getNuhLayerId(byte[] nalPayload) {
+      if (nalPayload.length < 2) {
+        return 0;
+      }
+      int b0 = nalPayload[0] & 0x01;
+      int b1 = nalPayload[1] & 0xF8;
+      return (b0 << 5) | (b1 >> 3);
+    }
+
+    private static byte[] normalizeNuhLayerIdToZero(byte[] nalPayload) {
+      if (nalPayload.length < 2 || getNuhLayerId(nalPayload) == 0) {
+        return nalPayload;
+      }
+      byte[] copy = Arrays.copyOf(nalPayload, nalPayload.length);
+      copy[0] = (byte) (copy[0] & 0xFE);
+      copy[1] = (byte) (copy[1] & 0x07);
+      return copy;
+    }
+
+    private static int findStartCode(byte[] data, int from, int limit) {
+      for (int i = from; i + 2 < limit; i++) {
+        if (data[i] == 0 && data[i + 1] == 0) {
+          if (data[i + 2] == 1) {
+            return i;
+          }
+          if (i + 3 < limit && data[i + 2] == 0 && data[i + 3] == 1) {
+            return i;
+          }
+        }
+      }
+      return C.INDEX_UNSET;
+    }
+
+    private static int getStartCodeLength(byte[] data, int startCodeOffset, int limit) {
+      if (startCodeOffset + 3 < limit
+          && data[startCodeOffset] == 0
+          && data[startCodeOffset + 1] == 0
+          && data[startCodeOffset + 2] == 0
+          && data[startCodeOffset + 3] == 1) {
+        return 4;
+      }
+      return 3;
+    }
   }
 
   private static final class SampleReader {

@@ -35,6 +35,7 @@ import androidx.media3.common.Format;
 import androidx.media3.common.Metadata;
 import androidx.media3.common.MimeTypes;
 import androidx.media3.common.ParserException;
+import androidx.media3.common.util.DolbyVisionCompatibility;
 import androidx.media3.common.util.Log;
 import androidx.media3.common.util.NullableType;
 import androidx.media3.common.util.ParsableByteArray;
@@ -63,6 +64,7 @@ import androidx.media3.extractor.metadata.ThumbnailMetadata;
 import androidx.media3.extractor.text.SubtitleParser;
 import androidx.media3.extractor.text.SubtitleTranscodingExtractorOutput;
 import com.google.common.collect.ImmutableList;
+import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.lang.annotation.Documented;
 import java.lang.annotation.Retention;
@@ -96,6 +98,19 @@ public class MatroskaExtractor implements Extractor {
   }
 
   /**
+   * Creates a factory for {@link MatroskaExtractor} instances with the provided {@link
+   * SubtitleParser.Factory} and optional Dolby Vision sample hook.
+   */
+  public static ExtractorsFactory newFactory(
+      SubtitleParser.Factory subtitleParserFactory,
+      @Nullable DolbyVisionSampleTransformer dolbyVisionSampleTransformer) {
+    return () ->
+        new Extractor[] {
+          new MatroskaExtractor(subtitleParserFactory, /* flags= */ 0, dolbyVisionSampleTransformer)
+        };
+  }
+
+  /**
    * Flags controlling the behavior of the extractor. Possible flag values are {@link
    * #FLAG_DISABLE_SEEK_FOR_CUES} and {#FLAG_EMIT_RAW_SUBTITLE_DATA}.
    */
@@ -106,6 +121,75 @@ public class MatroskaExtractor implements Extractor {
       flag = true,
       value = {FLAG_DISABLE_SEEK_FOR_CUES, FLAG_EMIT_RAW_SUBTITLE_DATA})
   public @interface Flags {}
+
+  /**
+   * Hook invoked for Dolby Vision related Matroska data.
+   *
+   * <p>This is a phase-2 integration seam for DV7 conversion experiments. The extractor keeps
+   * existing behavior unless this hook is provided.
+   */
+  public interface DolbyVisionSampleTransformer {
+
+    /**
+     * Called when Dolby Vision BlockAdditional data is encountered for an HEVC track.
+     *
+     * @param blockAdditionalData Block additional payload bytes.
+     * @param blockAddIdType Dolby Vision BlockAddIdType ({@code dvcc}/{@code dvvc}).
+     * @param dolbyVisionConfigBytes Track-level Dolby Vision config bytes, if available.
+     * @return Payload to retain for the associated sample, or null to keep original data.
+     */
+    @Nullable
+    default byte[] onDolbyVisionBlockAdditionalData(
+        byte[] blockAdditionalData, int blockAddIdType, @Nullable byte[] dolbyVisionConfigBytes) {
+      return null;
+    }
+
+    /**
+     * Called before writing an HEVC sample that has pending Dolby Vision block-additional bytes.
+     *
+     * <p>Current spike wiring is telemetry/inspection only. A future phase may allow replacing the
+     * sample payload at this point.
+     */
+    default void onHevcSample(
+        int sampleSizeBytes,
+        @Nullable byte[] blockAdditionalData,
+        @Nullable byte[] dolbyVisionConfigBytes) {}
+
+    /**
+     * Optionally rewrites an HEVC sample payload.
+     *
+     * @param sampleLengthDelimitedData Sample payload in length-delimited NAL format.
+     * @param nalUnitLengthFieldLength Length field size in bytes.
+     * @param blockAdditionalData Block additional payload associated with this sample.
+     * @param dolbyVisionConfigBytes Track-level Dolby Vision config bytes, if available.
+     * @return Replacement sample payload in length-delimited NAL format, or null to keep original.
+     */
+    @Nullable
+    default byte[] transformHevcSample(
+        byte[] sampleLengthDelimitedData,
+        int nalUnitLengthFieldLength,
+        @Nullable byte[] blockAdditionalData,
+        @Nullable byte[] dolbyVisionConfigBytes) {
+      return null;
+    }
+
+    /**
+     * Optionally rewrites Dolby Vision codec signaling for output {@link Format}.
+     *
+     * <p>This is used when sample-level metadata conversion changes the effective Dolby Vision
+     * profile (for example DV7 to DV8.1), but container-level codec signaling would otherwise still
+     * advertise the source profile.
+     *
+     * @param codecs Existing codec string (for example {@code dvhe.07.06}).
+     * @param dolbyVisionConfigBytes Track-level Dolby Vision config bytes, if available.
+     * @return Replacement codec string, or null to keep original signaling.
+     */
+    @Nullable
+    default String onDolbyVisionCodecString(
+        @Nullable String codecs, @Nullable byte[] dolbyVisionConfigBytes) {
+      return null;
+    }
+  }
 
   /**
    * Flag to disable seeking for cues.
@@ -435,6 +519,7 @@ public class MatroskaExtractor implements Extractor {
   private final boolean seekForCuesEnabled;
   private final boolean parseSubtitlesDuringExtraction;
   private final SubtitleParser.Factory subtitleParserFactory;
+  @Nullable private final DolbyVisionSampleTransformer dolbyVisionSampleTransformer;
 
   // Temporary arrays.
   private final ParsableByteArray nalStartCode;
@@ -516,7 +601,11 @@ public class MatroskaExtractor implements Extractor {
    */
   @Deprecated
   public MatroskaExtractor() {
-    this(new DefaultEbmlReader(), FLAG_EMIT_RAW_SUBTITLE_DATA, SubtitleParser.Factory.UNSUPPORTED);
+    this(
+        new DefaultEbmlReader(),
+        FLAG_EMIT_RAW_SUBTITLE_DATA,
+        SubtitleParser.Factory.UNSUPPORTED,
+        /* dolbyVisionSampleTransformer= */ null);
   }
 
   /**
@@ -527,7 +616,8 @@ public class MatroskaExtractor implements Extractor {
     this(
         new DefaultEbmlReader(),
         flags | FLAG_EMIT_RAW_SUBTITLE_DATA,
-        SubtitleParser.Factory.UNSUPPORTED);
+        SubtitleParser.Factory.UNSUPPORTED,
+        /* dolbyVisionSampleTransformer= */ null);
   }
 
   /**
@@ -537,7 +627,11 @@ public class MatroskaExtractor implements Extractor {
    *     extraction.
    */
   public MatroskaExtractor(SubtitleParser.Factory subtitleParserFactory) {
-    this(new DefaultEbmlReader(), /* flags= */ 0, subtitleParserFactory);
+    this(
+        new DefaultEbmlReader(),
+        /* flags= */ 0,
+        subtitleParserFactory,
+        /* dolbyVisionSampleTransformer= */ null);
   }
 
   /**
@@ -548,14 +642,46 @@ public class MatroskaExtractor implements Extractor {
    * @param flags Flags that control the extractor's behavior.
    */
   public MatroskaExtractor(SubtitleParser.Factory subtitleParserFactory, @Flags int flags) {
-    this(new DefaultEbmlReader(), flags, subtitleParserFactory);
+    this(
+        new DefaultEbmlReader(),
+        flags,
+        subtitleParserFactory,
+        /* dolbyVisionSampleTransformer= */ null);
+  }
+
+  /**
+   * Constructs an instance with an optional Dolby Vision sample hook.
+   *
+   * @param subtitleParserFactory The {@link SubtitleParser.Factory} for parsing subtitles during
+   *     extraction.
+   * @param flags Flags that control the extractor's behavior.
+   * @param dolbyVisionSampleTransformer Optional hook for DV sample processing.
+   */
+  public MatroskaExtractor(
+      SubtitleParser.Factory subtitleParserFactory,
+      @Flags int flags,
+      @Nullable DolbyVisionSampleTransformer dolbyVisionSampleTransformer) {
+    this(new DefaultEbmlReader(), flags, subtitleParserFactory, dolbyVisionSampleTransformer);
   }
 
   /* package */ MatroskaExtractor(
       EbmlReader reader, @Flags int flags, SubtitleParser.Factory subtitleParserFactory) {
+    this(
+        reader,
+        flags,
+        subtitleParserFactory,
+        /* dolbyVisionSampleTransformer= */ null);
+  }
+
+  /* package */ MatroskaExtractor(
+      EbmlReader reader,
+      @Flags int flags,
+      SubtitleParser.Factory subtitleParserFactory,
+      @Nullable DolbyVisionSampleTransformer dolbyVisionSampleTransformer) {
     this.reader = reader;
     this.reader.init(new InnerEbmlProcessor());
     this.subtitleParserFactory = subtitleParserFactory;
+    this.dolbyVisionSampleTransformer = dolbyVisionSampleTransformer;
     this.perTrackCues = new SparseArray<>();
     seekForCuesEnabled = (flags & FLAG_DISABLE_SEEK_FOR_CUES) == 0;
     parseSubtitlesDuringExtraction = (flags & FLAG_EMIT_RAW_SUBTITLE_DATA) == 0;
@@ -985,7 +1111,7 @@ public class MatroskaExtractor implements Extractor {
               "CodecId is missing in TrackEntry element", /* cause= */ null);
         } else {
           if (isCodecSupported(currentTrack.codecId)) {
-            currentTrack.initializeFormat(currentTrack.number);
+            currentTrack.initializeFormat(currentTrack.number, dolbyVisionSampleTransformer);
             currentTrack.output = extractorOutput.track(currentTrack.number, currentTrack.type);
             tracks.put(currentTrack.number, currentTrack);
           }
@@ -1617,6 +1743,28 @@ public class MatroskaExtractor implements Extractor {
         && CODEC_ID_VP9.equals(track.codecId)) {
       supplementalData.reset(contentSize);
       input.readFully(supplementalData.getData(), 0, contentSize);
+    } else if (CODEC_ID_H265.equals(track.codecId)
+        && (track.blockAddIdType == BLOCK_ADD_ID_TYPE_DVVC
+            || track.blockAddIdType == BLOCK_ADD_ID_TYPE_DVCC)) {
+      byte[] blockAdditionalData = new byte[contentSize];
+      input.readFully(blockAdditionalData, 0, contentSize);
+      track.pendingDolbyVisionBlockAdditionalData = blockAdditionalData;
+
+      if (dolbyVisionSampleTransformer != null) {
+        try {
+          byte[] transformed =
+              dolbyVisionSampleTransformer.onDolbyVisionBlockAdditionalData(
+                  blockAdditionalData, track.blockAddIdType, track.dolbyVisionConfigBytes);
+          if (transformed != null) {
+            track.pendingDolbyVisionBlockAdditionalData = transformed;
+          }
+        } catch (RuntimeException e) {
+          Log.w(
+              TAG,
+              "DolbyVisionSampleTransformer.onDolbyVisionBlockAdditionalData failed: "
+                  + e.getMessage());
+        }
+      }
     } else {
       // Unhandled block additional data.
       input.skipFully(contentSize);
@@ -1696,6 +1844,9 @@ public class MatroskaExtractor implements Extractor {
       }
       track.output.sampleMetadata(timeUs, flags, size, offset, track.cryptoData);
     }
+    if (CODEC_ID_H265.equals(track.codecId)) {
+      track.pendingDolbyVisionBlockAdditionalData = null;
+    }
     haveOutputSample = true;
   }
 
@@ -1727,6 +1878,7 @@ public class MatroskaExtractor implements Extractor {
   @RequiresNonNull("#2.output")
   private int writeSampleData(ExtractorInput input, Track track, int size, boolean isBlockGroup)
       throws IOException {
+    boolean deferSupplementalMainSampleSizePrefix = false;
     if (CODEC_ID_SUBRIP.equals(track.codecId)) {
       writeSubtitleSampleData(input, SUBRIP_PREFIX, size);
       return finishWriteSampleData();
@@ -1848,21 +2000,66 @@ public class MatroskaExtractor implements Extractor {
         supplementalData.reset(/* limit= */ 0);
         // If there is supplemental data, the structure of the sample data is:
         // encryption data (if any) || sample size (4 bytes) || sample data || supplemental data
-        int sampleSize = size + sampleStrippedBytes.limit() - sampleBytesRead;
-        scratch.reset(/* limit= */ 4);
-        scratch.getData()[0] = (byte) ((sampleSize >> 24) & 0xFF);
-        scratch.getData()[1] = (byte) ((sampleSize >> 16) & 0xFF);
-        scratch.getData()[2] = (byte) ((sampleSize >> 8) & 0xFF);
-        scratch.getData()[3] = (byte) (sampleSize & 0xFF);
-        output.sampleData(scratch, 4, TrackOutput.SAMPLE_DATA_PART_SUPPLEMENTAL);
-        sampleBytesWritten += 4;
+        deferSupplementalMainSampleSizePrefix =
+            CODEC_ID_H265.equals(track.codecId) && dolbyVisionSampleTransformer != null;
+        if (!deferSupplementalMainSampleSizePrefix) {
+          int sampleSize = size + sampleStrippedBytes.limit() - sampleBytesRead;
+          writeSupplementalMainSampleSizePrefix(output, sampleSize);
+          sampleBytesWritten += 4;
+        }
       }
 
       sampleEncodingHandled = true;
     }
     size += sampleStrippedBytes.limit();
+    if (CODEC_ID_H265.equals(track.codecId) && dolbyVisionSampleTransformer != null) {
+      try {
+        // Phase-2 seam: sample event is surfaced here. Payload replacement is added in a later
+        // step once DV conversion is wired for full HEVC access units.
+        dolbyVisionSampleTransformer.onHevcSample(
+            size, track.pendingDolbyVisionBlockAdditionalData, track.dolbyVisionConfigBytes);
+      } catch (RuntimeException e) {
+        Log.w(TAG, "DolbyVisionSampleTransformer.onHevcSample failed: " + e.getMessage());
+      }
+    }
 
-    if (CODEC_ID_H264.equals(track.codecId) || CODEC_ID_H265.equals(track.codecId)) {
+    if (CODEC_ID_H265.equals(track.codecId) && dolbyVisionSampleTransformer != null) {
+      int remainingSampleBytes = size - sampleBytesRead;
+      byte[] sampleLengthDelimitedData = new byte[remainingSampleBytes];
+      writeToTarget(input, sampleLengthDelimitedData, /* offset= */ 0, remainingSampleBytes);
+      sampleBytesRead += remainingSampleBytes;
+
+      byte[] payloadToWrite = sampleLengthDelimitedData;
+      try {
+        byte[] transformedPayload =
+            dolbyVisionSampleTransformer.transformHevcSample(
+                sampleLengthDelimitedData,
+                track.nalUnitLengthFieldLength,
+                track.pendingDolbyVisionBlockAdditionalData,
+                track.dolbyVisionConfigBytes);
+        if (transformedPayload != null) {
+          payloadToWrite = transformedPayload;
+        }
+      } catch (RuntimeException e) {
+        Log.w(TAG, "DolbyVisionSampleTransformer.transformHevcSample failed: " + e.getMessage());
+      }
+
+      if (deferSupplementalMainSampleSizePrefix) {
+        byte[] annexBSample =
+            convertLengthDelimitedSampleToAnnexB(
+                payloadToWrite, track.nalUnitLengthFieldLength, track.codecId);
+        writeSupplementalMainSampleSizePrefix(output, annexBSample.length);
+        sampleBytesWritten += 4;
+        ParsableByteArray annexBData = new ParsableByteArray(annexBSample);
+        output.sampleData(annexBData, annexBSample.length);
+        sampleBytesWritten += annexBSample.length;
+      } else {
+        int bytesWritten =
+            writeLengthDelimitedSampleAsAnnexB(
+                output, payloadToWrite, track.nalUnitLengthFieldLength, track.codecId);
+        sampleBytesWritten += bytesWritten;
+      }
+    } else if (CODEC_ID_H264.equals(track.codecId) || CODEC_ID_H265.equals(track.codecId)) {
       // TODO: Deduplicate with Mp4Extractor.
 
       // Zero the top three bytes of the array that we'll use to decode nal unit lengths, in case
@@ -1923,6 +2120,86 @@ public class MatroskaExtractor implements Extractor {
     }
 
     return finishWriteSampleData();
+  }
+
+  private int writeLengthDelimitedSampleAsAnnexB(
+      TrackOutput output,
+      byte[] sampleLengthDelimitedData,
+      int nalUnitLengthFieldLength,
+      String codecId)
+      throws ParserException {
+    if (nalUnitLengthFieldLength <= 0 || nalUnitLengthFieldLength > 4) {
+      throw ParserException.createForMalformedContainer(
+          "Invalid NAL length field size for " + codecId + ": " + nalUnitLengthFieldLength,
+          /* cause= */ null);
+    }
+
+    ParsableByteArray source = new ParsableByteArray(sampleLengthDelimitedData);
+    int bytesWritten = 0;
+    while (source.bytesLeft() > 0) {
+      if (source.bytesLeft() < nalUnitLengthFieldLength) {
+        throw ParserException.createForMalformedContainer(
+            "Truncated NAL length for " + codecId, /* cause= */ null);
+      }
+
+      int nalLength = 0;
+      for (int i = 0; i < nalUnitLengthFieldLength; i++) {
+        nalLength = (nalLength << 8) | source.readUnsignedByte();
+      }
+
+      if (nalLength < 0 || source.bytesLeft() < nalLength) {
+        throw ParserException.createForMalformedContainer(
+            "Invalid NAL length for " + codecId + ": " + nalLength, /* cause= */ null);
+      }
+
+      nalStartCode.setPosition(0);
+      output.sampleData(nalStartCode, 4);
+      bytesWritten += 4;
+      output.sampleData(source, nalLength);
+      bytesWritten += nalLength;
+    }
+
+    return bytesWritten;
+  }
+
+  private byte[] convertLengthDelimitedSampleToAnnexB(
+      byte[] sampleLengthDelimitedData, int nalUnitLengthFieldLength, String codecId)
+      throws ParserException {
+    if (nalUnitLengthFieldLength <= 0 || nalUnitLengthFieldLength > 4) {
+      throw ParserException.createForMalformedContainer(
+          "Invalid NAL length field size for " + codecId + ": " + nalUnitLengthFieldLength,
+          /* cause= */ null);
+    }
+
+    ParsableByteArray source = new ParsableByteArray(sampleLengthDelimitedData);
+    ByteArrayOutputStream output = new ByteArrayOutputStream(sampleLengthDelimitedData.length + 64);
+    while (source.bytesLeft() > 0) {
+      if (source.bytesLeft() < nalUnitLengthFieldLength) {
+        throw ParserException.createForMalformedContainer(
+            "Truncated NAL length for " + codecId, /* cause= */ null);
+      }
+      int nalLength = 0;
+      for (int i = 0; i < nalUnitLengthFieldLength; i++) {
+        nalLength = (nalLength << 8) | source.readUnsignedByte();
+      }
+      if (nalLength < 0 || source.bytesLeft() < nalLength) {
+        throw ParserException.createForMalformedContainer(
+            "Invalid NAL length for " + codecId + ": " + nalLength, /* cause= */ null);
+      }
+      output.write(NalUnitUtil.NAL_START_CODE, 0, NalUnitUtil.NAL_START_CODE.length);
+      output.write(source.getData(), source.getPosition(), nalLength);
+      source.skipBytes(nalLength);
+    }
+    return output.toByteArray();
+  }
+
+  private void writeSupplementalMainSampleSizePrefix(TrackOutput output, int sampleSize) {
+    scratch.reset(/* limit= */ 4);
+    scratch.getData()[0] = (byte) ((sampleSize >> 24) & 0xFF);
+    scratch.getData()[1] = (byte) ((sampleSize >> 16) & 0xFF);
+    scratch.getData()[2] = (byte) ((sampleSize >> 8) & 0xFF);
+    scratch.getData()[3] = (byte) (sampleSize & 0xFF);
+    output.sampleData(scratch, 4, TrackOutput.SAMPLE_DATA_PART_SUPPLEMENTAL);
   }
 
   /**
@@ -2270,6 +2547,7 @@ public class MatroskaExtractor implements Extractor {
     public float maxMasteringLuminance = Format.NO_VALUE;
     public float minMasteringLuminance = Format.NO_VALUE;
     public byte @MonotonicNonNull [] dolbyVisionConfigBytes;
+    public byte @MonotonicNonNull [] pendingDolbyVisionBlockAdditionalData;
 
     // Audio elements. Initially set to their default values.
     public int channelCount = 1;
@@ -2294,7 +2572,9 @@ public class MatroskaExtractor implements Extractor {
 
     /** Builds the {@link Format} for the track. */
     @RequiresNonNull("codecId")
-    public void initializeFormat(int trackId) throws ParserException {
+    public void initializeFormat(
+        int trackId, @Nullable DolbyVisionSampleTransformer dolbyVisionSampleTransformer)
+        throws ParserException {
       String mimeType;
       int maxInputSize = Format.NO_VALUE;
       @C.PcmEncoding int pcmEncoding = Format.NO_VALUE;
@@ -2508,7 +2788,24 @@ public class MatroskaExtractor implements Extractor {
         if (dolbyVisionConfig != null) {
           codecs = dolbyVisionConfig.codecs;
           mimeType = MimeTypes.VIDEO_DOLBY_VISION;
+          if (dolbyVisionSampleTransformer != null) {
+            @Nullable
+            String transformedCodecs =
+                dolbyVisionSampleTransformer.onDolbyVisionCodecString(
+                    codecs, this.dolbyVisionConfigBytes);
+            if (transformedCodecs != null && !transformedCodecs.isEmpty()) {
+              codecs = transformedCodecs;
+            }
+          }
         }
+      }
+      if (DolbyVisionCompatibility.shouldMapDolbyVisionProfile7(mimeType, codecs)) {
+        mimeType = MimeTypes.VIDEO_H265;
+        @Nullable String baseLayerCodecs = NalUnitUtil.getH265BaseLayerCodecsString(initializationData);
+        if (baseLayerCodecs == null) {
+          baseLayerCodecs = DolbyVisionCompatibility.chooseHevcCodecsString(codecs, null);
+        }
+        codecs = baseLayerCodecs;
       }
 
       @C.SelectionFlags int selectionFlags = 0;
@@ -2615,6 +2912,7 @@ public class MatroskaExtractor implements Extractor {
       if (trueHdSampleRechunker != null) {
         trueHdSampleRechunker.reset();
       }
+      pendingDolbyVisionBlockAdditionalData = null;
     }
 
     /**

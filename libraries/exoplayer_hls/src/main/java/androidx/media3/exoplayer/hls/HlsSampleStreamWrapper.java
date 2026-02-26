@@ -38,6 +38,7 @@ import androidx.media3.common.Metadata;
 import androidx.media3.common.MimeTypes;
 import androidx.media3.common.ParserException;
 import androidx.media3.common.TrackGroup;
+import androidx.media3.common.util.DolbyVisionCompatibility;
 import androidx.media3.common.util.Log;
 import androidx.media3.common.util.NullableType;
 import androidx.media3.common.util.ParsableByteArray;
@@ -1651,6 +1652,11 @@ import org.checkerframework.checker.nullness.qual.RequiresNonNull;
       // matches this track's type.
       codecs = Util.getCodecsOfType(playlistFormat.codecs, sampleTrackType);
       sampleMimeType = MimeTypes.getMediaMimeType(codecs);
+      if (sampleTrackType == C.TRACK_TYPE_VIDEO
+          && DolbyVisionCompatibility.shouldMapDolbyVisionProfile7(sampleMimeType, codecs)) {
+        sampleMimeType = MimeTypes.VIDEO_H265;
+        codecs = DolbyVisionCompatibility.chooseHevcCodecsString(codecs, null);
+      }
     } else {
       // The variant assigns more than one codec string to this track. We choose whichever codec
       // string matches the sample MIME type. This can happen when different languages are encoded
@@ -1659,6 +1665,11 @@ import org.checkerframework.checker.nullness.qual.RequiresNonNull;
           MimeTypes.getCodecsCorrespondingToMimeType(
               playlistFormat.codecs, sampleFormat.sampleMimeType);
       sampleMimeType = sampleFormat.sampleMimeType;
+      if (sampleTrackType == C.TRACK_TYPE_VIDEO
+          && DolbyVisionCompatibility.shouldMapDolbyVisionProfile7(sampleMimeType, codecs)) {
+        sampleMimeType = MimeTypes.VIDEO_H265;
+        codecs = DolbyVisionCompatibility.chooseHevcCodecsString(codecs, null);
+      }
     }
 
     Format.Builder formatBuilder =

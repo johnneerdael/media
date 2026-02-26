@@ -29,6 +29,7 @@ import androidx.media3.common.Metadata;
 import androidx.media3.common.MimeTypes;
 import androidx.media3.common.StreamKey;
 import androidx.media3.common.TrackGroup;
+import androidx.media3.common.util.DolbyVisionCompatibility;
 import androidx.media3.common.util.NullableType;
 import androidx.media3.common.util.Util;
 import androidx.media3.datasource.DataSource;
@@ -898,6 +899,10 @@ import org.checkerframework.checker.nullness.qual.MonotonicNonNull;
   private static Format deriveVideoFormat(Format variantFormat) {
     @Nullable String codecs = Util.getCodecsOfType(variantFormat.codecs, C.TRACK_TYPE_VIDEO);
     @Nullable String sampleMimeType = MimeTypes.getMediaMimeType(codecs);
+    if (DolbyVisionCompatibility.shouldMapDolbyVisionProfile7(sampleMimeType, codecs)) {
+      sampleMimeType = MimeTypes.VIDEO_H265;
+      codecs = DolbyVisionCompatibility.chooseHevcCodecsString(codecs, null);
+    }
     return new Format.Builder()
         .setId(variantFormat.id)
         .setLabel(variantFormat.label)
