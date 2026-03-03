@@ -59,6 +59,8 @@ import java.util.Set;
 @UnstableApi
 public final class AudioCapabilities {
 
+  private static volatile boolean experimentalIec61937PassthroughEnabled;
+
   // TODO(internal b/283945513): Have separate default max channel counts in `AudioCapabilities`
   // for PCM and compressed audio.
   @VisibleForTesting /* package */ static final int DEFAULT_MAX_CHANNEL_COUNT = 10;
@@ -67,6 +69,29 @@ public final class AudioCapabilities {
   /** The minimum audio capabilities supported by all devices. */
   public static final AudioCapabilities DEFAULT_AUDIO_CAPABILITIES =
       new AudioCapabilities(ImmutableList.of(AudioProfile.DEFAULT_AUDIO_PROFILE));
+
+  /** Enables experimental IEC61937 passthrough profile handling. Disabled by default. */
+  public static void setExperimentalIec61937PassthroughEnabled(boolean enabled) {
+    experimentalIec61937PassthroughEnabled = enabled;
+  }
+
+  /** Returns whether experimental IEC61937 passthrough profile handling is enabled. */
+  public static boolean isExperimentalIec61937PassthroughEnabled() {
+    return experimentalIec61937PassthroughEnabled;
+  }
+
+  /** Passthrough output configuration derived from the current audio capabilities. */
+  static final class PassthroughConfig {
+    public final @C.Encoding int encoding;
+    public final int channelConfig;
+    public final int encapsulationMode;
+
+    public PassthroughConfig(@C.Encoding int encoding, int channelConfig, int encapsulationMode) {
+      this.encoding = encoding;
+      this.channelConfig = channelConfig;
+      this.encapsulationMode = encapsulationMode;
+    }
+  }
 
   /** Encodings supported when the device specifies external surround sound. */
   @SuppressLint("InlinedApi") // Compile-time access to integer constants defined in API 21.
@@ -272,7 +297,11 @@ public final class AudioCapabilities {
   @Deprecated
   @Nullable
   public Pair<Integer, Integer> getEncodingAndChannelConfigForPassthrough(Format format) {
-    return getEncodingAndChannelConfigForPassthrough(format, AudioAttributes.DEFAULT);
+    PassthroughConfig passthroughConfig =
+        getPassthroughConfigForFormat(format, AudioAttributes.DEFAULT);
+    return passthroughConfig == null
+        ? null
+        : Pair.create(passthroughConfig.encoding, passthroughConfig.channelConfig);
   }
 
   /**
@@ -287,6 +316,15 @@ public final class AudioCapabilities {
    */
   @Nullable
   public Pair<Integer, Integer> getEncodingAndChannelConfigForPassthrough(
+      Format format, AudioAttributes audioAttributes) {
+    PassthroughConfig passthroughConfig = getPassthroughConfigForFormat(format, audioAttributes);
+    return passthroughConfig == null
+        ? null
+        : Pair.create(passthroughConfig.encoding, passthroughConfig.channelConfig);
+  }
+
+  @Nullable
+  /* package */ PassthroughConfig getPassthroughConfigForFormat(
       Format format, AudioAttributes audioAttributes) {
     @C.Encoding
     int encoding = MimeTypes.getEncoding(checkNotNull(format.sampleMimeType), format.codecs);
@@ -335,7 +373,8 @@ public final class AudioCapabilities {
     if (channelConfig == AudioFormat.CHANNEL_INVALID) {
       return null;
     }
-    return Pair.create(encoding, channelConfig);
+    return new PassthroughConfig(
+        encoding, channelConfig, audioProfile.getAudioTrackEncapsulationMode());
   }
 
   @Override
@@ -402,7 +441,8 @@ public final class AudioCapabilities {
     for (int i = 0; i < audioProfiles.size(); i++) {
       android.media.AudioProfile audioProfile = audioProfiles.get(i);
       if ((audioProfile.getEncapsulationType()
-          == android.media.AudioProfile.AUDIO_ENCAPSULATION_TYPE_IEC61937)) {
+              == android.media.AudioProfile.AUDIO_ENCAPSULATION_TYPE_IEC61937)
+          && !experimentalIec61937PassthroughEnabled) {
         // Skip the IEC61937 encapsulation because we don't support it yet.
         continue;
       }
@@ -422,8 +462,21 @@ public final class AudioCapabilities {
 
     ImmutableList.Builder<AudioProfile> localAudioProfiles = ImmutableList.builder();
     for (Map.Entry<Integer, Set<Integer>> formatAndChannelMasks : formatToChannelMasks.entrySet()) {
+      int encapsulationType = android.media.AudioProfile.AUDIO_ENCAPSULATION_TYPE_NONE;
+      if (experimentalIec61937PassthroughEnabled) {
+        for (int i = 0; i < audioProfiles.size(); i++) {
+          android.media.AudioProfile audioProfile = audioProfiles.get(i);
+          if (audioProfile.getFormat() == formatAndChannelMasks.getKey()
+              && audioProfile.getEncapsulationType()
+                  == android.media.AudioProfile.AUDIO_ENCAPSULATION_TYPE_IEC61937) {
+            encapsulationType = android.media.AudioProfile.AUDIO_ENCAPSULATION_TYPE_IEC61937;
+            break;
+          }
+        }
+      }
       localAudioProfiles.add(
-          new AudioProfile(formatAndChannelMasks.getKey(), formatAndChannelMasks.getValue()));
+          new AudioProfile(
+              formatAndChannelMasks.getKey(), formatAndChannelMasks.getValue(), encapsulationType));
     }
     return localAudioProfiles.build();
   }
@@ -491,12 +544,22 @@ public final class AudioCapabilities {
 
     public final @C.Encoding int encoding;
     public final int maxChannelCount;
+    public final int encapsulationType;
     @Nullable private final ImmutableSet<Integer> channelMasks;
 
     @RequiresApi(33)
     public AudioProfile(@C.Encoding int encoding, Set<Integer> channelMasks) {
+      this(
+          encoding,
+          channelMasks,
+          android.media.AudioProfile.AUDIO_ENCAPSULATION_TYPE_NONE);
+    }
+
+    @RequiresApi(33)
+    public AudioProfile(@C.Encoding int encoding, Set<Integer> channelMasks, int encapsulationType) {
       this.encoding = encoding;
       this.channelMasks = ImmutableSet.copyOf(channelMasks);
+      this.encapsulationType = encapsulationType;
       int maxChannelCount = 0;
       for (int channelMask : this.channelMasks) {
         maxChannelCount = max(maxChannelCount, Integer.bitCount(channelMask));
@@ -507,7 +570,15 @@ public final class AudioCapabilities {
     public AudioProfile(@C.Encoding int encoding, int maxChannelCount) {
       this.encoding = encoding;
       this.maxChannelCount = maxChannelCount;
+      this.encapsulationType = android.media.AudioProfile.AUDIO_ENCAPSULATION_TYPE_NONE;
       this.channelMasks = null;
+    }
+
+    public int getAudioTrackEncapsulationMode() {
+      if (encapsulationType == android.media.AudioProfile.AUDIO_ENCAPSULATION_TYPE_IEC61937) {
+        return AudioTrack.ENCAPSULATION_MODE_ELEMENTARY_STREAM;
+      }
+      return AudioTrack.ENCAPSULATION_MODE_NONE;
     }
 
     public boolean supportsChannelCount(int channelCount) {
@@ -553,6 +624,7 @@ public final class AudioCapabilities {
       AudioProfile audioProfile = (AudioProfile) other;
       return encoding == audioProfile.encoding
           && maxChannelCount == audioProfile.maxChannelCount
+          && encapsulationType == audioProfile.encapsulationType
           && Objects.equals(channelMasks, audioProfile.channelMasks);
     }
 
@@ -560,6 +632,7 @@ public final class AudioCapabilities {
     public int hashCode() {
       int result = encoding;
       result = 31 * result + maxChannelCount;
+      result = 31 * result + encapsulationType;
       result = 31 * result + (channelMasks == null ? 0 : channelMasks.hashCode());
       return result;
     }
@@ -570,6 +643,8 @@ public final class AudioCapabilities {
           + encoding
           + ", maxChannelCount="
           + maxChannelCount
+          + ", encapsulationType="
+          + encapsulationType
           + ", channelMasks="
           + channelMasks
           + "]";

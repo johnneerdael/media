@@ -33,7 +33,6 @@ import android.media.AudioFormat;
 import android.media.AudioManager;
 import android.media.AudioTrack;
 import android.os.Looper;
-import android.util.Pair;
 import androidx.annotation.Nullable;
 import androidx.annotation.RequiresApi;
 import androidx.media3.common.AudioAttributes;
@@ -226,6 +225,7 @@ public final class AudioTrackAudioOutputProvider implements AudioOutputProvider 
     int outputSampleRate;
     int outputChannelConfig;
     int outputPcmFrameSize;
+    int outputEncapsulationMode = AudioTrack.ENCAPSULATION_MODE_NONE;
     boolean usePlaybackParameters;
     boolean useOffloadGapless = false;
 
@@ -255,17 +255,17 @@ public final class AudioTrackAudioOutputProvider implements AudioOutputProvider 
       } else {
         outputMode = OUTPUT_MODE_PASSTHROUGH;
         @Nullable
-        Pair<Integer, Integer> encodingAndChannelConfig =
-            audioCapabilities.getEncodingAndChannelConfigForPassthrough(
-                format, formatConfig.audioAttributes);
-        if (encodingAndChannelConfig == null) {
+        AudioCapabilities.PassthroughConfig passthroughConfig =
+            audioCapabilities.getPassthroughConfigForFormat(format, formatConfig.audioAttributes);
+        if (passthroughConfig == null) {
           throw new ConfigurationException("Unable to configure passthrough for: " + format);
         }
-        outputEncoding = encodingAndChannelConfig.first;
-        outputChannelConfig = encodingAndChannelConfig.second;
+        outputEncoding = passthroughConfig.encoding;
+        outputChannelConfig = passthroughConfig.channelConfig;
         // Passthrough only supports audio output playback parameters, but we only enable it this
         // was specifically requested by the app.
         usePlaybackParameters = formatConfig.enablePlaybackParameters;
+        outputEncapsulationMode = passthroughConfig.encapsulationMode;
       }
     }
 
@@ -298,6 +298,7 @@ public final class AudioTrackAudioOutputProvider implements AudioOutputProvider 
         .setAudioAttributes(formatConfig.audioAttributes)
         .setIsOffload(outputMode == OUTPUT_MODE_OFFLOAD)
         .setIsTunneling(formatConfig.enableTunneling)
+        .setEncapsulationMode(outputEncapsulationMode)
         .setUsePlaybackParameters(usePlaybackParameters)
         .setUseOffloadGapless(useOffloadGapless)
         .setVirtualDeviceId(formatConfig.virtualDeviceId)
@@ -343,6 +344,9 @@ public final class AudioTrackAudioOutputProvider implements AudioOutputProvider 
                 .setSessionId(audioSessionId);
         if (SDK_INT >= 29) {
           audioTrackBuilder.setOffloadedPlayback(config.isOffload);
+        }
+        if (SDK_INT >= 30 && config.encapsulationMode != AudioTrack.ENCAPSULATION_MODE_NONE) {
+          audioTrackBuilder.setEncapsulationMode(config.encapsulationMode);
         }
         if (SDK_INT >= 34 && contextForAudioTrack != null) {
           audioTrackBuilder.setContext(contextForAudioTrack);

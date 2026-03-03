@@ -282,6 +282,9 @@ public interface AudioOutputProvider {
     /** Whether tunneling is enabled for this output. */
     public final boolean isTunneling;
 
+    /** The AudioTrack encapsulation mode for this output. */
+    public final int encapsulationMode;
+
     /** Whether offload is enabled for this output. */
     public final boolean isOffload;
 
@@ -311,6 +314,7 @@ public interface AudioOutputProvider {
       this.sampleRate = builder.sampleRate;
       this.channelMask = builder.channelMask;
       this.isTunneling = builder.isTunneling;
+      this.encapsulationMode = builder.encapsulationMode;
       this.isOffload = builder.isOffload;
       this.bufferSize = builder.bufferSize;
       this.audioAttributes = builder.audioAttributes;
@@ -338,6 +342,7 @@ public interface AudioOutputProvider {
           && sampleRate == that.sampleRate
           && channelMask == that.channelMask
           && isTunneling == that.isTunneling
+          && encapsulationMode == that.encapsulationMode
           && isOffload == that.isOffload
           && bufferSize == that.bufferSize
           && audioSessionId == that.audioSessionId
@@ -354,6 +359,7 @@ public interface AudioOutputProvider {
           sampleRate,
           channelMask,
           isTunneling,
+          encapsulationMode,
           isOffload,
           bufferSize,
           audioAttributes,
@@ -369,6 +375,7 @@ public interface AudioOutputProvider {
       private int sampleRate;
       private int channelMask;
       private boolean isTunneling;
+      private int encapsulationMode;
       private boolean isOffload;
       private int bufferSize;
       private AudioAttributes audioAttributes;
@@ -389,6 +396,7 @@ public interface AudioOutputProvider {
         this.sampleRate = config.sampleRate;
         this.channelMask = config.channelMask;
         this.isTunneling = config.isTunneling;
+        this.encapsulationMode = config.encapsulationMode;
         this.isOffload = config.isOffload;
         this.bufferSize = config.bufferSize;
         this.audioAttributes = config.audioAttributes;
@@ -428,6 +436,13 @@ public interface AudioOutputProvider {
       @CanIgnoreReturnValue
       public Builder setIsTunneling(boolean isTunneling) {
         this.isTunneling = isTunneling;
+        return this;
+      }
+
+      /** Sets the AudioTrack encapsulation mode. */
+      @CanIgnoreReturnValue
+      public Builder setEncapsulationMode(int encapsulationMode) {
+        this.encapsulationMode = encapsulationMode;
         return this;
       }
 
