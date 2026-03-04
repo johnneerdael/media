@@ -724,10 +724,15 @@ public class DefaultLoadControl implements LoadControl {
       TrackGroupArray trackGroups,
       @NullableType ExoTrackSelection[] trackSelections) {
     int targetBufferBytesOverwrite = getTargetBufferBytesOverwrite(parameters.playerId);
-    checkNotNull(loadingStates.get(parameters.playerId)).targetBufferBytes =
+    PlayerLoadingState playerLoadingState = checkNotNull(loadingStates.get(parameters.playerId));
+    playerLoadingState.targetBufferBytes =
         targetBufferBytesOverwrite == C.LENGTH_UNSET
             ? calculateTargetBufferBytes(parameters, trackSelections)
             : targetBufferBytesOverwrite;
+    playerLoadingState.maxBackBufferReserveBytes =
+        calculateBackBufferReserveBytes(parameters, playerLoadingState.targetBufferBytes);
+    playerLoadingState.activeBackBufferReserveBytes = playerLoadingState.maxBackBufferReserveBytes;
+    playerLoadingState.lastBufferedDurationUs = C.TIME_UNSET;
     updateAllocator();
   }
 
@@ -763,14 +768,15 @@ public class DefaultLoadControl implements LoadControl {
   public boolean shouldContinueLoading(Parameters parameters) {
     PlayerId playerId = parameters.playerId;
     PlayerLoadingState playerLoadingState = checkNotNull(loadingStates.get(playerId));
+    boolean isLocalPlayback = isLocalPlayback(parameters);
+    long minBufferUs = getMinBufferUs(isLocalPlayback);
+    long maxBufferUs = getMaxBufferUs(isLocalPlayback);
+    updateBackBufferReserveForPressure(parameters, playerLoadingState, minBufferUs, maxBufferUs);
     boolean targetBufferSizeReached =
         getTotalBufferBytesAllocated(playerId) >= getTargetBufferBytes(playerId);
     if (playerId.equals(PlayerId.PRELOAD)) {
       return !targetBufferSizeReached;
     }
-    boolean isLocalPlayback = isLocalPlayback(parameters);
-    long minBufferUs = getMinBufferUs(isLocalPlayback);
-    long maxBufferUs = getMaxBufferUs(isLocalPlayback);
     if (parameters.playbackSpeed > 1) {
       // The playback speed is faster than real time, so scale up the minimum required media
       // duration to keep enough media buffered for a playout duration of minBufferUs.
@@ -865,7 +871,7 @@ public class DefaultLoadControl implements LoadControl {
   /* package */ int calculateTotalTargetBufferBytes() {
     int totalTargetBufferBytes = 0;
     for (PlayerLoadingState state : loadingStates.values()) {
-      totalTargetBufferBytes += state.targetBufferBytes;
+      totalTargetBufferBytes += state.targetBufferBytes + state.activeBackBufferReserveBytes;
     }
     return totalTargetBufferBytes;
   }
@@ -877,6 +883,9 @@ public class DefaultLoadControl implements LoadControl {
         targetBufferBytesOverwrite != C.LENGTH_UNSET
             ? targetBufferBytesOverwrite
             : DEFAULT_MIN_BUFFER_SIZE;
+    playerLoadingState.maxBackBufferReserveBytes = 0;
+    playerLoadingState.activeBackBufferReserveBytes = 0;
+    playerLoadingState.lastBufferedDurationUs = C.TIME_UNSET;
     playerLoadingState.isLoading = false;
   }
 
@@ -980,13 +989,75 @@ public class DefaultLoadControl implements LoadControl {
   }
 
   private int getTargetBufferBytes(PlayerId playerId) {
-    return checkNotNull(loadingStates.get(playerId)).targetBufferBytes;
+    PlayerLoadingState playerLoadingState = checkNotNull(loadingStates.get(playerId));
+    return playerLoadingState.targetBufferBytes + playerLoadingState.activeBackBufferReserveBytes;
+  }
+
+  private void updateBackBufferReserveForPressure(
+      Parameters parameters,
+      PlayerLoadingState playerLoadingState,
+      long minBufferUs,
+      long maxBufferUs) {
+    if (playerLoadingState.maxBackBufferReserveBytes <= 0) {
+      playerLoadingState.lastBufferedDurationUs = parameters.bufferedDurationUs;
+      return;
+    }
+
+    long previousBufferedDurationUs = playerLoadingState.lastBufferedDurationUs;
+    playerLoadingState.lastBufferedDurationUs = parameters.bufferedDurationUs;
+    if (previousBufferedDurationUs == C.TIME_UNSET) {
+      return;
+    }
+
+    boolean bufferedDurationFalling =
+        parameters.bufferedDurationUs + 250_000L < previousBufferedDurationUs;
+    int totalAllocatedBytes = getTotalBufferBytesAllocated(parameters.playerId);
+    boolean forwardBufferUnderPressure =
+        totalAllocatedBytes >= playerLoadingState.targetBufferBytes && bufferedDurationFalling;
+    if (forwardBufferUnderPressure) {
+      if (parameters.bufferedDurationUs <= minBufferUs / 2) {
+        playerLoadingState.activeBackBufferReserveBytes = 0;
+      } else if (playerLoadingState.activeBackBufferReserveBytes > 0) {
+        playerLoadingState.activeBackBufferReserveBytes =
+            max(
+                allocator.getIndividualAllocationLength(),
+                playerLoadingState.activeBackBufferReserveBytes / 2);
+      }
+      return;
+    }
+
+    long restoreThresholdUs = min(maxBufferUs, max(minBufferUs * 2, minBufferUs));
+    if (!bufferedDurationFalling
+        && parameters.bufferedDurationUs >= restoreThresholdUs
+        && playerLoadingState.activeBackBufferReserveBytes
+            < playerLoadingState.maxBackBufferReserveBytes) {
+      playerLoadingState.activeBackBufferReserveBytes = playerLoadingState.maxBackBufferReserveBytes;
+    }
+  }
+
+  private int calculateBackBufferReserveBytes(Parameters parameters, int targetBufferBytes) {
+    if (backBufferDurationUs <= 0 || targetBufferBytes <= 0) {
+      return 0;
+    }
+    long maxBufferForBudgetUs = getMaxBufferUs(isLocalPlayback(parameters));
+    if (maxBufferForBudgetUs <= 0) {
+      return 0;
+    }
+    long cappedBackBufferUs = min(backBufferDurationUs, maxBufferForBudgetUs);
+    long reserveBytes =
+        (targetBufferBytes * cappedBackBufferUs + maxBufferForBudgetUs - 1) / maxBufferForBudgetUs;
+    reserveBytes = max(allocator.getIndividualAllocationLength(), reserveBytes);
+    reserveBytes = min(targetBufferBytes, reserveBytes);
+    return (int) reserveBytes;
   }
 
   private static class PlayerLoadingState {
     public int referenceCount;
     public boolean isLoading;
     public int targetBufferBytes;
+    public int maxBackBufferReserveBytes;
+    public int activeBackBufferReserveBytes;
+    public long lastBufferedDurationUs;
 
     @GuardedBy("this")
     private int allocatedCounts;
