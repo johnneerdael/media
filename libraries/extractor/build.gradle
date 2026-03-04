@@ -40,6 +40,7 @@ dependencies {
     api project(modulePrefix + 'lib-container')
     // TODO(b/203752187): Remove this dependency.
     implementation project(modulePrefix + 'lib-decoder')
+    compileOnly 'com.google.code.findbugs:jsr305:' + jsr305Version
     compileOnly 'com.google.errorprone:error_prone_annotations:' + errorProneVersion
     compileOnly 'org.checkerframework:checker-qual:' + checkerframeworkVersion
     compileOnly 'org.jetbrains.kotlin:kotlin-annotations-jvm:' + kotlinAnnotationsVersion
