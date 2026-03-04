@@ -44,6 +44,7 @@ import androidx.media3.common.MimeTypes;
 import androidx.media3.common.PlaybackException;
 import androidx.media3.common.PlaybackParameters;
 import androidx.media3.common.audio.AudioProcessor;
+import androidx.media3.common.util.AmazonQuirks;
 import androidx.media3.common.util.CodecSpecificDataUtil;
 import androidx.media3.common.util.Log;
 import androidx.media3.common.util.MediaFormatUtil;
@@ -462,7 +463,8 @@ public class MediaCodecAudioRenderer extends MediaCodecRenderer implements Media
     if (format.sampleMimeType == null) {
       return ImmutableList.of();
     }
-    if (audioSink.supportsFormat(format)) {
+    if (audioSink.supportsFormat(format)
+        && (!AmazonQuirks.shouldApplyAudioQuirks() || AmazonQuirks.useDefaultPassthroughDecoder())) {
       // The format is supported directly, so a codec is only needed for decryption.
       @Nullable MediaCodecInfo codecInfo = MediaCodecUtil.getDecryptOnlyDecoderInfo();
       if (codecInfo != null) {
@@ -634,6 +636,11 @@ public class MediaCodecAudioRenderer extends MediaCodecRenderer implements Media
         pcmEncoding = mediaFormat.getInteger(MediaFormat.KEY_PCM_ENCODING);
       } else if (mediaFormat.containsKey(VIVO_BITS_PER_SAMPLE_KEY)) {
         pcmEncoding = Util.getPcmEncoding(mediaFormat.getInteger(VIVO_BITS_PER_SAMPLE_KEY));
+      } else if (AmazonQuirks.shouldApplyAudioQuirks()) {
+        int mimeDerivedEncoding =
+            MimeTypes.getEncoding(mediaFormat.getString(MediaFormat.KEY_MIME), format.codecs);
+        pcmEncoding =
+            mimeDerivedEncoding == C.ENCODING_INVALID ? C.ENCODING_PCM_16BIT : mimeDerivedEncoding;
       } else {
         // If the format is anything other than PCM then we assume that the audio decoder will
         // output 16-bit PCM.
