@@ -30,6 +30,7 @@ import static java.lang.Math.min;
 import android.media.AudioTrack;
 import androidx.annotation.Nullable;
 import androidx.media3.common.C;
+import androidx.media3.common.util.AmazonQuirks;
 import androidx.media3.common.util.Clock;
 import androidx.media3.common.util.Util;
 import java.lang.reflect.Method;
@@ -398,7 +399,10 @@ import java.lang.reflect.Method;
 
   private boolean maybeUpdateLatency(long systemTimeUs) {
     long previousLatencyUs = latencyUs;
-    if (isOutputPcm
+    if (AmazonQuirks.isLatencyQuirkEnabled()) {
+      latencyUs = AmazonQuirks.getAudioHardwareLatencyUs();
+      lastLatencySampleTimeUs = systemTimeUs;
+    } else if (isOutputPcm
         && getLatencyMethod != null
         && systemTimeUs - lastLatencySampleTimeUs >= MIN_LATENCY_SAMPLE_INTERVAL_US) {
       try {

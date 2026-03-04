@@ -42,6 +42,7 @@ import androidx.media3.common.C;
 import androidx.media3.common.Format;
 import androidx.media3.common.MimeTypes;
 import androidx.media3.common.audio.AudioManagerCompat;
+import androidx.media3.common.util.AmazonQuirks;
 import androidx.media3.common.util.UnstableApi;
 import androidx.media3.common.util.Util;
 import com.google.common.collect.ImmutableList;
@@ -59,8 +60,6 @@ import java.util.Set;
 @UnstableApi
 public final class AudioCapabilities {
 
-  private static volatile boolean experimentalIec61937PassthroughEnabled;
-
   // TODO(internal b/283945513): Have separate default max channel counts in `AudioCapabilities`
   // for PCM and compressed audio.
   @VisibleForTesting /* package */ static final int DEFAULT_MAX_CHANNEL_COUNT = 10;
@@ -70,14 +69,30 @@ public final class AudioCapabilities {
   public static final AudioCapabilities DEFAULT_AUDIO_CAPABILITIES =
       new AudioCapabilities(ImmutableList.of(AudioProfile.DEFAULT_AUDIO_PROFILE));
 
-  /** Enables experimental IEC61937 passthrough profile handling. Disabled by default. */
-  public static void setExperimentalIec61937PassthroughEnabled(boolean enabled) {
-    experimentalIec61937PassthroughEnabled = enabled;
+  /** Enables experimental Fire OS audio quirks. Disabled by default. */
+  public static void setExperimentalFireOsAudioQuirksEnabled(boolean enabled) {
+    AmazonQuirks.setExperimentalFireOsAudioQuirksEnabled(enabled);
   }
 
-  /** Returns whether experimental IEC61937 passthrough profile handling is enabled. */
+  /** Returns whether experimental Fire OS audio quirks are enabled. */
+  public static boolean isExperimentalFireOsAudioQuirksEnabled() {
+    return AmazonQuirks.isExperimentalFireOsAudioQuirksEnabled();
+  }
+
+  /** @deprecated Use {@link #setExperimentalFireOsAudioQuirksEnabled(boolean)} instead. */
+  @Deprecated
+  public static void setExperimentalIec61937PassthroughEnabled(boolean enabled) {
+    setExperimentalFireOsAudioQuirksEnabled(enabled);
+  }
+
+  /** @deprecated Use {@link #isExperimentalFireOsAudioQuirksEnabled()} instead. */
+  @Deprecated
   public static boolean isExperimentalIec61937PassthroughEnabled() {
-    return experimentalIec61937PassthroughEnabled;
+    return isExperimentalFireOsAudioQuirksEnabled();
+  }
+
+  /* package */ static boolean useSurroundSoundFlagV17(ContentResolver resolver) {
+    return AmazonQuirks.shouldUseSurroundSoundFlag(resolver);
   }
 
   /** Passthrough output configuration derived from the current audio capabilities. */
@@ -338,8 +353,10 @@ public final class AudioCapabilities {
     if (encoding == C.ENCODING_E_AC3_JOC && !supportsEncoding(C.ENCODING_E_AC3_JOC)) {
       // E-AC3 receivers support E-AC3 JOC streams (but decode only the base layer).
       encoding = C.ENCODING_E_AC3;
-    } else if ((encoding == C.ENCODING_DTS_HD && !supportsEncoding(C.ENCODING_DTS_HD))
-        || (encoding == C.ENCODING_DTS_UHD_P2 && !supportsEncoding(C.ENCODING_DTS_UHD_P2))) {
+    } else if ((encoding == C.ENCODING_DTS_HD || encoding == C.ENCODING_DTS_UHD_P2)
+        && (AmazonQuirks.shouldForceLimitedFireTvDtsCoreFallback()
+            || (encoding == C.ENCODING_DTS_HD && !supportsEncoding(C.ENCODING_DTS_HD))
+            || (encoding == C.ENCODING_DTS_UHD_P2 && !supportsEncoding(C.ENCODING_DTS_UHD_P2)))) {
       // DTS receivers support DTS-HD streams (but decode only the core layer).
       encoding = C.ENCODING_DTS;
     }
@@ -442,7 +459,8 @@ public final class AudioCapabilities {
       android.media.AudioProfile audioProfile = audioProfiles.get(i);
       if ((audioProfile.getEncapsulationType()
               == android.media.AudioProfile.AUDIO_ENCAPSULATION_TYPE_IEC61937)
-          && !experimentalIec61937PassthroughEnabled) {
+          && (!AmazonQuirks.isExperimentalFireOsAudioQuirksEnabled()
+              || AmazonQuirks.shouldForceLimitedFireTvDtsCoreFallback())) {
         // Skip the IEC61937 encapsulation because we don't support it yet.
         continue;
       }
@@ -463,7 +481,7 @@ public final class AudioCapabilities {
     ImmutableList.Builder<AudioProfile> localAudioProfiles = ImmutableList.builder();
     for (Map.Entry<Integer, Set<Integer>> formatAndChannelMasks : formatToChannelMasks.entrySet()) {
       int encapsulationType = android.media.AudioProfile.AUDIO_ENCAPSULATION_TYPE_NONE;
-      if (experimentalIec61937PassthroughEnabled) {
+      if (AmazonQuirks.isExperimentalFireOsAudioQuirksEnabled()) {
         for (int i = 0; i < audioProfiles.size(); i++) {
           android.media.AudioProfile audioProfile = audioProfiles.get(i);
           if (audioProfile.getFormat() == formatAndChannelMasks.getKey()

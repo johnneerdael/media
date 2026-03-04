@@ -30,6 +30,7 @@ import android.os.Handler;
 import androidx.annotation.Nullable;
 import androidx.media3.common.AudioAttributes;
 import androidx.media3.common.audio.AudioManagerCompat;
+import androidx.media3.common.util.AmazonQuirks;
 import androidx.media3.common.util.UnstableApi;
 import androidx.media3.common.util.Util;
 import java.util.Objects;
@@ -56,7 +57,7 @@ public final class AudioCapabilitiesReceiver {
   private final Listener listener;
   private final Handler handler;
   private final AudioDeviceCallback audioDeviceCallback;
-  private final BroadcastReceiver hdmiAudioPlugBroadcastReceiver;
+  @Nullable private final BroadcastReceiver hdmiAudioPlugBroadcastReceiver;
   @Nullable private final ExternalSurroundSoundSettingObserver externalSurroundSoundSettingObserver;
 
   @Nullable private AudioCapabilities audioCapabilities;
@@ -92,12 +93,18 @@ public final class AudioCapabilitiesReceiver {
     this.routedDevice = routedDevice;
     handler = Util.createHandlerForCurrentOrMainLooper();
     audioDeviceCallback = new AudioDeviceCallback();
-    hdmiAudioPlugBroadcastReceiver = new HdmiAudioPlugBroadcastReceiver();
+    ContentResolver resolver = context.getContentResolver();
+    boolean useSurroundSoundFlag =
+        Util.SDK_INT >= 17 && AudioCapabilities.useSurroundSoundFlagV17(resolver);
+    hdmiAudioPlugBroadcastReceiver =
+        (Util.SDK_INT >= 21 && AmazonQuirks.shouldApplyAudioQuirks() && useSurroundSoundFlag)
+            ? null
+            : new HdmiAudioPlugBroadcastReceiver();
     Uri externalSurroundSoundUri = AudioCapabilities.getExternalSurroundSoundGlobalSettingUri();
     externalSurroundSoundSettingObserver =
         externalSurroundSoundUri != null
             ? new ExternalSurroundSoundSettingObserver(
-                handler, context.getContentResolver(), externalSurroundSoundUri)
+                handler, resolver, externalSurroundSoundUri)
             : null;
   }
 
@@ -160,11 +167,13 @@ public final class AudioCapabilitiesReceiver {
     AudioManagerCompat.getAudioManager(context)
         .registerAudioDeviceCallback(audioDeviceCallback, handler);
     Intent stickyIntent =
-        context.registerReceiver(
-            hdmiAudioPlugBroadcastReceiver,
-            new IntentFilter(AudioManager.ACTION_HDMI_AUDIO_PLUG),
-            /* broadcastPermission= */ null,
-            handler);
+        hdmiAudioPlugBroadcastReceiver == null
+            ? null
+            : context.registerReceiver(
+                hdmiAudioPlugBroadcastReceiver,
+                new IntentFilter(AudioManager.ACTION_HDMI_AUDIO_PLUG),
+                /* broadcastPermission= */ null,
+                handler);
     audioCapabilities =
         AudioCapabilities.getCapabilitiesInternal(
             context, stickyIntent, audioAttributes, routedDevice);
@@ -181,7 +190,9 @@ public final class AudioCapabilitiesReceiver {
     }
     audioCapabilities = null;
     AudioManagerCompat.getAudioManager(context).unregisterAudioDeviceCallback(audioDeviceCallback);
-    context.unregisterReceiver(hdmiAudioPlugBroadcastReceiver);
+    if (hdmiAudioPlugBroadcastReceiver != null) {
+      context.unregisterReceiver(hdmiAudioPlugBroadcastReceiver);
+    }
     if (externalSurroundSoundSettingObserver != null) {
       externalSurroundSoundSettingObserver.unregister();
     }
