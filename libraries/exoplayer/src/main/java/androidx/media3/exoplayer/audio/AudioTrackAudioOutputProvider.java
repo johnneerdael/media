@@ -39,6 +39,7 @@ import androidx.media3.common.AudioAttributes;
 import androidx.media3.common.C;
 import androidx.media3.common.Format;
 import androidx.media3.common.MimeTypes;
+import androidx.media3.common.util.AmazonQuirks;
 import androidx.media3.common.util.Clock;
 import androidx.media3.common.util.ListenerSet;
 import androidx.media3.common.util.Log;
@@ -320,7 +321,12 @@ public final class AudioTrackAudioOutputProvider implements AudioOutputProvider 
         contextForAudioTrack = contextWithDeviceId;
         audioSessionId = AudioManager.AUDIO_SESSION_ID_GENERATE;
       }
-      if (audioTrackProvider != null) {
+      android.media.AudioAttributes audioTrackAttributes =
+          getAudioTrackAttributes(config.audioAttributes, config.isTunneling);
+      if (shouldApplyDolbyPassthroughQuirk(config)) {
+        audioTrack =
+            buildDolbyPassthroughAudioTrack(config, audioSessionId, audioTrackAttributes);
+      } else if (audioTrackProvider != null) {
         AudioTrackConfig audioTrackConfig = getAudioTrackConfig(config);
         audioTrack =
             audioTrackProvider.getAudioTrack(
@@ -333,8 +339,6 @@ public final class AudioTrackAudioOutputProvider implements AudioOutputProvider 
                 .setChannelMask(config.channelMask)
                 .setEncoding(config.encoding)
                 .build();
-        android.media.AudioAttributes audioTrackAttributes =
-            getAudioTrackAttributes(config.audioAttributes, config.isTunneling);
         AudioTrack.Builder audioTrackBuilder =
             new AudioTrack.Builder()
                 .setAudioAttributes(audioTrackAttributes)
@@ -412,6 +416,41 @@ public final class AudioTrackAudioOutputProvider implements AudioOutputProvider 
     } else {
       return audioAttributes.getPlatformAudioAttributes();
     }
+  }
+
+  private boolean shouldApplyDolbyPassthroughQuirk(OutputConfig config) {
+    return AmazonQuirks.isDolbyPassthroughQuirkEnabled()
+        && !config.isOffload
+        && !config.isTunneling
+        && isLegacyDolbyPassthroughEncoding(config.encoding);
+  }
+
+  private boolean isLegacyDolbyPassthroughEncoding(@C.Encoding int encoding) {
+    return encoding == C.ENCODING_AC3
+        || encoding == C.ENCODING_E_AC3
+        || encoding == C.ENCODING_E_AC3_JOC
+        || encoding == C.ENCODING_AC4;
+  }
+
+  @SuppressLint("WrongConstant")
+  private AudioTrack buildDolbyPassthroughAudioTrack(
+      OutputConfig config, int audioSessionId, android.media.AudioAttributes audioTrackAttributes) {
+    AudioFormat format =
+        new AudioFormat.Builder()
+            .setSampleRate(config.sampleRate)
+            .setChannelMask(config.channelMask)
+            .setEncoding(config.encoding)
+            .build();
+    int directTrackSessionId =
+        audioSessionId != C.AUDIO_SESSION_ID_UNSET
+            ? audioSessionId
+            : AudioManager.AUDIO_SESSION_ID_GENERATE;
+    return new DolbyPassthroughAudioTrack(
+        audioTrackAttributes,
+        format,
+        config.bufferSize,
+        AudioTrack.MODE_STREAM,
+        directTrackSessionId);
   }
 
   private android.media.AudioAttributes getAudioTrackTunnelingAttributes() {

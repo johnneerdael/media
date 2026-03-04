@@ -49,6 +49,7 @@ import androidx.annotation.VisibleForTesting;
 import androidx.media3.common.C;
 import androidx.media3.common.ColorInfo;
 import androidx.media3.common.Format;
+import androidx.media3.common.util.AmazonQuirks;
 import androidx.media3.common.MimeTypes;
 import androidx.media3.common.util.CodecSpecificDataUtil;
 import androidx.media3.common.util.Log;
@@ -359,9 +360,10 @@ public final class MediaCodecInfo {
       }
     }
 
-    if (!isVideo
+    if (AmazonQuirks.shouldSkipProfileLevelCheck()
+        || (!isVideo
         && !mimeType.equals(MimeTypes.AUDIO_AC4)
-        && profile != CodecProfileLevel.AACObjectXHE) {
+        && profile != CodecProfileLevel.AACObjectXHE)) {
       // AC-4 decoders report profile levels or audio capabilities that determine whether the input
       // format is supported or not.
       // With other encodings some devices/builds underreport audio capabilities, so assume support

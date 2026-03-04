@@ -62,6 +62,10 @@ public final class AmazonQuirks {
         || model.equalsIgnoreCase(FIRETV_STICK_DEVICE_MODEL);
   }
 
+  public static boolean isDolbyPassthroughQuirkEnabled() {
+    return shouldApplyAudioQuirks() && isFireTvGen1Family();
+  }
+
   public static boolean useDefaultPassthroughDecoder() {
     return !shouldApplyAudioQuirks() || !isFireTvGen1Family();
   }
