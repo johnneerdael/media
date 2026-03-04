@@ -43,6 +43,7 @@ import androidx.test.ext.junit.runners.AndroidJUnit4;
 import com.google.common.collect.ImmutableList;
 import java.util.ArrayList;
 import java.util.List;
+import org.junit.After;
 import org.junit.Before;
 import org.junit.Test;
 import org.junit.runner.RunWith;
@@ -69,6 +70,13 @@ public class AudioCapabilitiesTest {
     uiModeManager =
         (UiModeManager)
             ApplicationProvider.getApplicationContext().getSystemService(Context.UI_MODE_SERVICE);
+  }
+
+  @After
+  public void tearDown() {
+    AudioCapabilities.setExperimentalFireOsAudioQuirksEnabled(false);
+    ShadowBuild.setManufacturer("Google");
+    ShadowBuild.setModel("AOSP");
   }
 
   @Test
@@ -459,6 +467,59 @@ public class AudioCapabilitiesTest {
             format, directPlaybackAudioAttributes);
 
     assertThat(encodingAndChannelConfig.first).isEqualTo(AudioFormat.ENCODING_E_AC3_JOC);
+    assertThat(encodingAndChannelConfig.second).isEqualTo(AudioFormat.CHANNEL_OUT_5POINT1);
+  }
+
+  @Test
+  public void
+      getEncodingAndChannelConfigForPassthrough_fireTvLimitedDtsHd71ForcesDtsCoreAndClampTo51() {
+    AudioCapabilities.setExperimentalFireOsAudioQuirksEnabled(true);
+    ShadowBuild.setManufacturer("Amazon");
+    ShadowBuild.setModel("AFTMM");
+    AudioCapabilities audioCapabilities =
+        new AudioCapabilities(
+            new int[] {AudioFormat.ENCODING_PCM_16BIT, AudioFormat.ENCODING_DTS},
+            /* maxChannelCount= */ 6);
+    Format format =
+        new Format.Builder()
+            .setSampleMimeType(MimeTypes.AUDIO_DTS_HD)
+            .setChannelCount(8)
+            .setSampleRate(48_000)
+            .build();
+
+    Pair<Integer, Integer> encodingAndChannelConfig =
+        audioCapabilities.getEncodingAndChannelConfigForPassthrough(
+            format, AudioAttributes.DEFAULT);
+
+    assertThat(encodingAndChannelConfig).isNotNull();
+    assertThat(checkNotNull(encodingAndChannelConfig).first).isEqualTo(C.ENCODING_DTS);
+    assertThat(encodingAndChannelConfig.second).isEqualTo(AudioFormat.CHANNEL_OUT_5POINT1);
+  }
+
+  @Test
+  public void
+      getEncodingAndChannelConfigForPassthrough_fireTvLimitedDtsHdCodecHintStillForcesDtsCoreAndClampTo51() {
+    AudioCapabilities.setExperimentalFireOsAudioQuirksEnabled(true);
+    ShadowBuild.setManufacturer("Amazon");
+    ShadowBuild.setModel("AFTMM");
+    AudioCapabilities audioCapabilities =
+        new AudioCapabilities(
+            new int[] {AudioFormat.ENCODING_PCM_16BIT, AudioFormat.ENCODING_DTS},
+            /* maxChannelCount= */ 6);
+    Format format =
+        new Format.Builder()
+            .setSampleMimeType("audio/x-dts")
+            .setCodecs("dtsh")
+            .setChannelCount(8)
+            .setSampleRate(48_000)
+            .build();
+
+    Pair<Integer, Integer> encodingAndChannelConfig =
+        audioCapabilities.getEncodingAndChannelConfigForPassthrough(
+            format, AudioAttributes.DEFAULT);
+
+    assertThat(encodingAndChannelConfig).isNotNull();
+    assertThat(checkNotNull(encodingAndChannelConfig).first).isEqualTo(C.ENCODING_DTS);
     assertThat(encodingAndChannelConfig.second).isEqualTo(AudioFormat.CHANNEL_OUT_5POINT1);
   }
 
