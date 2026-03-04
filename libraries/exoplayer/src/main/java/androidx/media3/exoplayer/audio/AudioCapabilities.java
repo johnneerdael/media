@@ -52,6 +52,7 @@ import com.google.common.primitives.Ints;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
@@ -59,6 +60,7 @@ import java.util.Set;
 /** Represents the set of audio formats that a device is capable of playing. */
 @UnstableApi
 public final class AudioCapabilities {
+  private static final String TAG = "AudioCapabilities";
 
   // TODO(internal b/283945513): Have separate default max channel counts in `AudioCapabilities`
   // for PCM and compressed audio.
@@ -341,8 +343,22 @@ public final class AudioCapabilities {
   @Nullable
   /* package */ PassthroughConfig getPassthroughConfigForFormat(
       Format format, AudioAttributes audioAttributes) {
+    @Nullable String sampleMimeType = format.sampleMimeType;
+    @Nullable String codecs = format.codecs;
     @C.Encoding
-    int encoding = MimeTypes.getEncoding(checkNotNull(format.sampleMimeType), format.codecs);
+    int encoding =
+        sampleMimeType == null ? C.ENCODING_INVALID : MimeTypes.getEncoding(sampleMimeType, codecs);
+    @C.Encoding int requestedEncoding = encoding;
+    boolean forceLimitedFireTvDtsCoreFallback =
+        AmazonQuirks.shouldForceLimitedFireTvDtsCoreFallback()
+            && isDtsHdLike(sampleMimeType, codecs, encoding);
+    if (encoding == C.ENCODING_INVALID
+        && AmazonQuirks.shouldForceLimitedFireTvDtsCoreFallback()
+        && isDtsFamily(sampleMimeType, codecs, encoding)) {
+      // Some Fire OS devices report DTS-HD family tracks with non-standard mime/codec descriptors.
+      // Coerce to a known DTS encoding so passthrough config can still be derived.
+      encoding = forceLimitedFireTvDtsCoreFallback ? C.ENCODING_DTS_HD : C.ENCODING_DTS;
+    }
     // Check that this is an encoding known to work for passthrough. This avoids trying to use
     // passthrough with an encoding where the device/app reports it's capable but it is untested or
     // known to be broken (for example AAC-LC).
@@ -354,7 +370,7 @@ public final class AudioCapabilities {
       // E-AC3 receivers support E-AC3 JOC streams (but decode only the base layer).
       encoding = C.ENCODING_E_AC3;
     } else if ((encoding == C.ENCODING_DTS_HD || encoding == C.ENCODING_DTS_UHD_P2)
-        && (AmazonQuirks.shouldForceLimitedFireTvDtsCoreFallback()
+        && (forceLimitedFireTvDtsCoreFallback
             || (encoding == C.ENCODING_DTS_HD && !supportsEncoding(C.ENCODING_DTS_HD))
             || (encoding == C.ENCODING_DTS_UHD_P2 && !supportsEncoding(C.ENCODING_DTS_UHD_P2)))) {
       // DTS receivers support DTS-HD streams (but decode only the core layer).
@@ -376,7 +392,10 @@ public final class AudioCapabilities {
           audioProfile.getMaxSupportedChannelCountForPassthrough(sampleRate, audioAttributes);
     } else {
       channelCount = format.channelCount;
-      if (format.sampleMimeType.equals(MimeTypes.AUDIO_DTS_X) && SDK_INT < 33) {
+      if (forceLimitedFireTvDtsCoreFallback && channelCount > 6) {
+        channelCount = 6;
+      }
+      if (MimeTypes.AUDIO_DTS_X.equals(format.sampleMimeType) && SDK_INT < 33) {
         // Some DTS:X TVs reports ACTION_HDMI_AUDIO_PLUG.EXTRA_MAX_CHANNEL_COUNT as 8
         // instead of 10. See https://github.com/androidx/media/issues/396
         if (channelCount > 10) {
@@ -390,8 +409,68 @@ public final class AudioCapabilities {
     if (channelConfig == AudioFormat.CHANNEL_INVALID) {
       return null;
     }
+    if (forceLimitedFireTvDtsCoreFallback) {
+      android.util.Log.i(
+          TAG,
+          "FIREOS_DTS_FALLBACK"
+              + " model="
+              + Build.MODEL
+              + " mime="
+              + sampleMimeType
+              + " codecs="
+              + codecs
+              + " inEncoding="
+              + requestedEncoding
+              + " outEncoding="
+              + encoding
+              + " inChannels="
+              + format.channelCount
+              + " outChannels="
+              + channelCount
+              + " channelConfig="
+              + channelConfig);
+    }
     return new PassthroughConfig(
         encoding, channelConfig, audioProfile.getAudioTrackEncapsulationMode());
+  }
+
+  private static boolean isDtsFamily(
+      @Nullable String sampleMimeType, @Nullable String codecs, @C.Encoding int encoding) {
+    if (encoding == C.ENCODING_DTS
+        || encoding == C.ENCODING_DTS_HD
+        || encoding == C.ENCODING_DTS_UHD_P2) {
+      return true;
+    }
+    String normalizedMime = normalizeLower(sampleMimeType);
+    if (normalizedMime.contains("audio/vnd.dts")) {
+      return true;
+    }
+    String normalizedCodecs = normalizeLower(codecs);
+    return normalizedCodecs.contains("dts");
+  }
+
+  private static boolean isDtsHdLike(
+      @Nullable String sampleMimeType, @Nullable String codecs, @C.Encoding int encoding) {
+    if (encoding == C.ENCODING_DTS_HD || encoding == C.ENCODING_DTS_UHD_P2) {
+      return true;
+    }
+    String normalizedMime = normalizeLower(sampleMimeType);
+    if (normalizedMime.contains("audio/vnd.dts.hd") || normalizedMime.contains("audio/vnd.dts.uhd")) {
+      return true;
+    }
+    String normalizedCodecs = normalizeLower(codecs);
+    return normalizedCodecs.contains("dtsh")
+        || normalizedCodecs.contains("dtsl")
+        || normalizedCodecs.contains("dtsma")
+        || normalizedCodecs.contains("dts-hd")
+        || normalizedCodecs.contains("dts_hd")
+        || normalizedCodecs.contains("dtsx")
+        || normalizedCodecs.contains("dts:x")
+        || normalizedCodecs.contains("dtsuhd");
+  }
+
+  private static String normalizeLower(@Nullable String value) {
+    return value == null ? "" : value.toLowerCase(Locale.US);
   }
 
   @Override
