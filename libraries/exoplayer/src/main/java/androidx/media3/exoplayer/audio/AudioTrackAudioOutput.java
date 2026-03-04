@@ -156,6 +156,7 @@ public final class AudioTrackAudioOutput implements AudioOutput {
       pcmFrameSize = C.LENGTH_UNSET;
     }
 
+    boolean applyLegacyDolbyPassthroughQuirk = audioTrack instanceof DolbyPassthroughAudioTrack;
     audioTrackPositionTracker =
         new AudioTrackPositionTracker(
             new PositionTrackerListener(),
@@ -163,7 +164,8 @@ public final class AudioTrackAudioOutput implements AudioOutput {
             audioTrack,
             config.encoding,
             pcmFrameSize,
-            config.bufferSize);
+            config.bufferSize,
+            applyLegacyDolbyPassthroughQuirk);
 
     if (SDK_INT >= 24 && capabilityChangeListener != null) {
       onRoutingChangedListener =

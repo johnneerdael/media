@@ -110,6 +110,7 @@ import java.lang.annotation.Target;
   private final AudioTimestampWrapper audioTimestamp;
   private final int sampleRate;
   private final AudioTrackPositionTracker.Listener errorListener;
+  private final boolean applyLegacyDolbyPassthroughQuirk;
 
   private @State int state;
   private long initializeSystemTimeUs;
@@ -125,10 +126,13 @@ import java.lang.annotation.Target;
    * @param errorListener The {@link AudioTrackPositionTracker.Listener} for timestamp errors.
    */
   public AudioTimestampPoller(
-      AudioTrack audioTrack, AudioTrackPositionTracker.Listener errorListener) {
+      AudioTrack audioTrack,
+      AudioTrackPositionTracker.Listener errorListener,
+      boolean applyLegacyDolbyPassthroughQuirk) {
     this.audioTimestamp = new AudioTimestampWrapper(audioTrack);
     this.sampleRate = audioTrack.getSampleRate();
     this.errorListener = errorListener;
+    this.applyLegacyDolbyPassthroughQuirk = applyLegacyDolbyPassthroughQuirk;
     reset();
   }
 
@@ -149,7 +153,9 @@ import java.lang.annotation.Target;
       float audioTrackPlaybackSpeed,
       long playbackHeadPositionEstimateUs,
       boolean forceUpdate) {
-    if (!forceUpdate && (systemTimeUs - lastTimestampSampleTimeUs) < sampleIntervalUs) {
+    if (!forceUpdate
+        && !applyLegacyDolbyPassthroughQuirk
+        && (systemTimeUs - lastTimestampSampleTimeUs) < sampleIntervalUs) {
       return;
     }
     lastTimestampSampleTimeUs = systemTimeUs;
@@ -161,7 +167,8 @@ import java.lang.annotation.Target;
     switch (state) {
       case STATE_INITIALIZING:
         if (updatedTimestamp) {
-          if (audioTimestamp.getTimestampSystemTimeUs() >= initializeSystemTimeUs) {
+          if (applyLegacyDolbyPassthroughQuirk
+              || audioTimestamp.getTimestampSystemTimeUs() >= initializeSystemTimeUs) {
             // We have an initial timestamp, but don't know if it's advancing yet.
             initialTimestampPositionFrames = audioTimestamp.getTimestampPositionFrames();
             initialTimestampSystemTimeUs = audioTimestamp.getTimestampSystemTimeUs();

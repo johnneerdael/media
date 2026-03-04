@@ -131,6 +131,7 @@ import java.lang.reflect.Method;
   private final int outputSampleRate;
   private final long bufferSizeUs;
   private final boolean isOutputPcm;
+  private final boolean applyLegacyDolbyPassthroughQuirk;
 
   private AudioTimestampPoller audioTimestampPoller;
   private float audioTrackPlaybackSpeed;
@@ -185,10 +186,12 @@ import java.lang.reflect.Method;
       AudioTrack audioTrack,
       @C.Encoding int outputEncoding,
       int outputPcmFrameSize,
-      int bufferSize) {
+      int bufferSize,
+      boolean applyLegacyDolbyPassthroughQuirk) {
     this.listener = checkNotNull(listener);
     this.clock = clock;
     this.audioTrack = audioTrack;
+    this.applyLegacyDolbyPassthroughQuirk = applyLegacyDolbyPassthroughQuirk;
     try {
       getLatencyMethod = AudioTrack.class.getMethod("getLatency", (Class<?>[]) null);
     } catch (NoSuchMethodException e) {
@@ -197,7 +200,8 @@ import java.lang.reflect.Method;
     playheadOffsets = new long[MAX_PLAYHEAD_OFFSET_COUNT];
     lastSystemTimeUs = C.TIME_UNSET;
     lastPositionUs = C.TIME_UNSET;
-    audioTimestampPoller = new AudioTimestampPoller(audioTrack, listener);
+    audioTimestampPoller =
+        new AudioTimestampPoller(audioTrack, listener, applyLegacyDolbyPassthroughQuirk);
     outputSampleRate = audioTrack.getSampleRate();
     isOutputPcm = Util.isEncodingLinearPcm(outputEncoding);
     bufferSizeUs =
@@ -337,7 +341,8 @@ import java.lang.reflect.Method;
   /** Resets the position tracker. Should be called when the audio track is flushed. */
   public void reset() {
     resetSyncParams();
-    audioTimestampPoller = new AudioTimestampPoller(audioTrack, listener);
+    audioTimestampPoller =
+        new AudioTimestampPoller(audioTrack, listener, applyLegacyDolbyPassthroughQuirk);
     rawPlaybackHeadPosition = 0;
     rawPlaybackHeadWrapCount = 0;
     expectRawPlaybackHeadReset = false;
@@ -394,7 +399,7 @@ import java.lang.reflect.Method;
         systemTimeUs,
         audioTrackPlaybackSpeed,
         getPlaybackHeadPositionEstimateUs(systemTimeUs),
-        /* forceUpdate= */ latencyUpdated);
+        /* forceUpdate= */ latencyUpdated || applyLegacyDolbyPassthroughQuirk);
   }
 
   private boolean maybeUpdateLatency(long systemTimeUs) {
