@@ -53,6 +53,12 @@ android {
 }
 
 dependencies {
+    // Provide annotation classes referenced from external dependencies to avoid
+    // javac "unknown enum constant" warnings in library modules.
+    compileOnly "com.google.code.findbugs:jsr305:${jsr305Version}"
+    compileOnly "com.google.j2objc:j2objc-annotations:${j2objcAnnotationsVersion}"
+    compileOnly "org.jetbrains.kotlin:kotlin-annotations-jvm:${kotlinAnnotationsVersion}"
+
     // See https://developer.android.com/training/testing/instrumented-tests/androidx-test-libraries/runner
     androidTestUtil 'androidx.test:orchestrator:1.6.1'
 }
