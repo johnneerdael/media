@@ -39,6 +39,10 @@ android {
     }
 
     buildTypes {
+        debug {
+            // Avoid AGP warning about a debuggable build with minification.
+            debuggable false
+        }
         // Run R8 for all build types to discover potential proguard problems.
         configureEach {
             shrinkResources true
