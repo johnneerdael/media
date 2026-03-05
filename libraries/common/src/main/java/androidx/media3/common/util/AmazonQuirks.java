@@ -75,10 +75,8 @@ public final class AmazonQuirks {
       return false;
     }
     String model = Build.MODEL != null ? Build.MODEL : "";
-    return model.startsWith("AFT")
-        && !"AFTGAZL".equals(model)
-        && !model.startsWith("AFTB")
-        && !model.startsWith("AFTA");
+    // Treat all Fire TV "AFT*" models as DTS-core-only for passthrough stability.
+    return model.startsWith("AFT");
   }
 
   public static boolean shouldUseSurroundSoundFlag(ContentResolver resolver) {
