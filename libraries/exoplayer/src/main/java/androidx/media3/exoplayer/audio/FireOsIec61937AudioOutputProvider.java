@@ -24,6 +24,7 @@ import android.content.Context;
 import android.media.AudioFormat;
 import android.media.AudioTrack;
 import androidx.annotation.Nullable;
+import androidx.media3.common.AudioAttributes;
 import androidx.media3.common.C;
 import androidx.media3.common.Format;
 import androidx.media3.common.MimeTypes;
@@ -40,6 +41,7 @@ import java.util.ArrayList;
 import java.util.EnumMap;
 import java.util.HashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.concurrent.atomic.AtomicInteger;
 
@@ -96,13 +98,15 @@ public final class FireOsIec61937AudioOutputProvider extends ForwardingAudioOutp
 
   public FireOsIec61937AudioOutputProvider(Context context) {
     this(
+        context.getApplicationContext(),
         new AudioTrackAudioOutputProvider.Builder(context).build(),
         new AudioTrackAudioOutputProvider.Builder(context)
-            .setAudioTrackBuilderModifier(FireOsIec61937AudioOutputProvider::overrideToIec61937)
+            .setAudioTrackProvider(new Iec61937AudioTrackProvider())
             .build());
   }
 
   private FireOsIec61937AudioOutputProvider(
+      Context context,
       AudioOutputProvider passthroughProvider, AudioOutputProvider iecCarrierProvider) {
     super(passthroughProvider);
     this.passthroughProvider = passthroughProvider;
@@ -186,18 +190,59 @@ public final class FireOsIec61937AudioOutputProvider extends ForwardingAudioOutp
     if (MimeTypes.AUDIO_DTS_HD.equals(sampleMimeType)
         || MimeTypes.AUDIO_DTS_X.equals(sampleMimeType)
         || MimeTypes.AUDIO_DTS_EXPRESS.equals(sampleMimeType)) {
+      boolean keepMultichannelCarrier =
+          shouldUseMultichannelDtsHdCarrier(format, passthroughConfig.channelMask);
       return buildCarrierPlan(
           PackerKind.DTS_HD,
           new DtsHdIecPacker(
               format.sampleRate != Format.NO_VALUE ? format.sampleRate : 48_000,
-              format.channelCount > 2),
+              keepMultichannelCarrier),
           passthroughConfig);
     }
     if (MimeTypes.AUDIO_TRUEHD.equals(sampleMimeType)) {
+      boolean keepMultichannelCarrier =
+          shouldUseMultichannelTrueHdCarrier(passthroughConfig.channelMask);
       return buildCarrierPlan(
-          PackerKind.TRUEHD, new TrueHdIecPacker(format.channelCount > 2), passthroughConfig);
+          PackerKind.TRUEHD, new TrueHdIecPacker(keepMultichannelCarrier), passthroughConfig);
     }
     return null;
+  }
+
+  private boolean shouldUseMultichannelDtsHdCarrier(Format format, int passthroughChannelMask) {
+    if (!looksLikeDtsHdMa(format) || passthroughChannelMask == AudioFormat.CHANNEL_OUT_STEREO) {
+      return false;
+    }
+    if (!supportsIec61937Config(IEC61937_DTS_HD_CARRIER_RATE_HZ, passthroughChannelMask)) {
+      Log.w(
+          TAG,
+          "Falling back to stereo IEC carrier for DTS-HD; multichannel IEC config unsupported"
+              + " codecs="
+              + format.codecs
+              + " channelMask="
+              + passthroughChannelMask);
+      return false;
+    }
+    return true;
+  }
+
+  private boolean shouldUseMultichannelTrueHdCarrier(int passthroughChannelMask) {
+    if (passthroughChannelMask == AudioFormat.CHANNEL_OUT_STEREO) {
+      return false;
+    }
+    if (!supportsIec61937Config(IEC61937_TRUEHD_CARRIER_RATE_HZ, passthroughChannelMask)) {
+      Log.w(
+          TAG,
+          "Falling back to stereo IEC carrier for TrueHD; multichannel IEC config unsupported"
+              + " channelMask="
+              + passthroughChannelMask);
+      return false;
+    }
+    return true;
+  }
+
+  private boolean supportsIec61937Config(int sampleRateHz, int channelMask) {
+    return AudioTrack.getMinBufferSize(sampleRateHz, channelMask, AudioFormat.ENCODING_IEC61937)
+        > 0;
   }
 
   private static CarrierPlan buildCarrierPlan(
@@ -224,16 +269,6 @@ public final class FireOsIec61937AudioOutputProvider extends ForwardingAudioOutp
     return new CarrierPlan(kind, packer, passthroughConfig, carrierConfig);
   }
 
-  private static void overrideToIec61937(AudioTrack.Builder builder, OutputConfig config) {
-    AudioFormat iecFormat =
-        new AudioFormat.Builder()
-            .setSampleRate(config.sampleRate)
-            .setChannelMask(config.channelMask)
-            .setEncoding(AudioFormat.ENCODING_IEC61937)
-            .build();
-    builder.setAudioFormat(iecFormat);
-  }
-
   private static FormatConfig copyFormatConfig(FormatConfig formatConfig, Format format) {
     return new FormatConfig.Builder(format)
         .setAudioAttributes(formatConfig.audioAttributes)
@@ -250,6 +285,18 @@ public final class FireOsIec61937AudioOutputProvider extends ForwardingAudioOutp
 
   private static Format downgradeToDtsCore(Format format) {
     return format.buildUpon().setSampleMimeType(MimeTypes.AUDIO_DTS).setCodecs(null).build();
+  }
+
+  private static boolean looksLikeDtsHdMa(Format format) {
+    @Nullable String codecs = format.codecs;
+    if (codecs == null) {
+      return false;
+    }
+    String normalizedCodecs = codecs.toLowerCase(Locale.US);
+    return normalizedCodecs.contains("dtsl")
+        || normalizedCodecs.contains("dtsma")
+        || normalizedCodecs.contains("dts-hd ma")
+        || normalizedCodecs.contains("dts_hd_ma");
   }
 
   @Nullable
@@ -298,6 +345,85 @@ public final class FireOsIec61937AudioOutputProvider extends ForwardingAudioOutp
       this.packer = packer;
       this.passthroughConfig = passthroughConfig;
       this.carrierConfig = carrierConfig;
+    }
+  }
+
+  private static final class Iec61937AudioTrackProvider
+      implements DefaultAudioSink.AudioTrackProvider {
+
+    @Override
+    public AudioTrack getAudioTrack(
+        AudioSink.AudioTrackConfig audioTrackConfig,
+        AudioAttributes audioAttributes,
+        int audioSessionId,
+        @Nullable Context context) {
+      AudioFormat format =
+          new AudioFormat.Builder()
+              .setSampleRate(audioTrackConfig.sampleRate)
+              .setChannelMask(audioTrackConfig.channelConfig)
+              .setEncoding(AudioFormat.ENCODING_IEC61937)
+              .build();
+      android.media.AudioAttributes platformAttributes =
+          audioTrackConfig.tunneling
+              ? getTunnelingAudioTrackAttributes()
+              : audioAttributes.getPlatformAudioAttributes();
+      return new Iec61937AudioTrack(
+          platformAttributes,
+          format,
+          audioTrackConfig.bufferSize,
+          AudioTrack.MODE_STREAM,
+          audioSessionId);
+    }
+
+    private static android.media.AudioAttributes getTunnelingAudioTrackAttributes() {
+      return new android.media.AudioAttributes.Builder()
+          .setContentType(android.media.AudioAttributes.CONTENT_TYPE_MOVIE)
+          .setFlags(android.media.AudioAttributes.FLAG_HW_AV_SYNC)
+          .setUsage(android.media.AudioAttributes.USAGE_MEDIA)
+          .build();
+    }
+  }
+
+  private static final class Iec61937AudioTrack extends AudioTrack {
+
+    @Nullable private short[] scratchShortBuffer;
+
+    public Iec61937AudioTrack(
+        android.media.AudioAttributes attributes,
+        AudioFormat format,
+        int bufferSizeInBytes,
+        int mode,
+        int sessionId) {
+      super(attributes, format, bufferSizeInBytes, mode, sessionId);
+    }
+
+    @Override
+    public int write(ByteBuffer audioData, int sizeInBytes, int writeMode) {
+      if ((sizeInBytes & 1) != 0) {
+        return ERROR_BAD_VALUE;
+      }
+      int shortCount = sizeInBytes / 2;
+      if (shortCount == 0) {
+        return 0;
+      }
+      if (scratchShortBuffer == null || scratchShortBuffer.length < shortCount) {
+        scratchShortBuffer = new short[shortCount];
+      }
+      int startPosition = audioData.position();
+      ByteBuffer source = audioData.duplicate().order(ByteOrder.LITTLE_ENDIAN);
+      source.limit(startPosition + sizeInBytes);
+      source.asShortBuffer().get(checkNotNull(scratchShortBuffer), 0, shortCount);
+      int shortsWritten = super.write(checkNotNull(scratchShortBuffer), 0, shortCount, writeMode);
+      if (shortsWritten > 0) {
+        audioData.position(startPosition + (shortsWritten * 2));
+        return shortsWritten * 2;
+      }
+      return shortsWritten;
+    }
+
+    @Override
+    public int write(ByteBuffer audioData, int sizeInBytes, int writeMode, long timestampNs) {
+      return write(audioData, sizeInBytes, writeMode);
     }
   }
 
