@@ -53,6 +53,12 @@ import java.lang.annotation.Documented;
 import java.lang.annotation.Retention;
 import java.lang.annotation.RetentionPolicy;
 import java.lang.annotation.Target;
+import java.util.ArrayList;
+import java.util.HashMap;
+import java.util.HashSet;
+import java.util.List;
+import java.util.Map;
+import java.util.Set;
 import java.nio.ByteBuffer;
 import java.util.Objects;
 import org.checkerframework.checker.nullness.qual.MonotonicNonNull;
@@ -117,13 +123,20 @@ public final class TextRenderer extends BaseRenderer implements Callback {
   // Fields used with both CuesWithTiming and Subtitle objects
   @Nullable private final Handler outputHandler;
   private final TextOutput output;
+  @Nullable private final CueGroupSubtitleTranslator cueGroupSubtitleTranslator;
   private final FormatHolder formatHolder;
+  private final Object cueGroupTranslationLock;
+  private final Map<Long, CueGroup> translatedCueGroupsByPresentationTimeUs;
+  private final Set<Long> pendingTranslationPresentationTimesUs;
   private boolean inputStreamEnded;
   private boolean outputStreamEnded;
   @Nullable private Format streamFormat;
   private long lastRendererPositionUs;
   private long finalStreamEndPositionUs;
   private boolean legacyDecodingEnabled;
+  @Nullable private String cueGroupTranslationToken;
+  private long cueGroupTranslationGeneration;
+  private CueGroup lastOutputCueGroup;
 
   /**
    * @param output The output.
@@ -134,7 +147,7 @@ public final class TextRenderer extends BaseRenderer implements Callback {
    *     directly on the player's internal rendering thread.
    */
   public TextRenderer(TextOutput output, @Nullable Looper outputLooper) {
-    this(output, outputLooper, SubtitleDecoderFactory.DEFAULT);
+    this(output, outputLooper, SubtitleDecoderFactory.DEFAULT, /* cueGroupSubtitleTranslator= */ null);
   }
 
   /**
@@ -150,18 +163,43 @@ public final class TextRenderer extends BaseRenderer implements Callback {
       TextOutput output,
       @Nullable Looper outputLooper,
       SubtitleDecoderFactory subtitleDecoderFactory) {
+    this(
+        output,
+        outputLooper,
+        subtitleDecoderFactory,
+        /* cueGroupSubtitleTranslator= */ null);
+  }
+
+  /**
+   * @param output The output.
+   * @param outputLooper The looper associated with the thread on which the output should be called.
+   * @param subtitleDecoderFactory A factory from which to obtain {@link SubtitleDecoder} instances.
+   * @param cueGroupSubtitleTranslator An optional translator that can pre-translate future cue
+   *     groups before they're rendered.
+   */
+  public TextRenderer(
+      TextOutput output,
+      @Nullable Looper outputLooper,
+      SubtitleDecoderFactory subtitleDecoderFactory,
+      @Nullable CueGroupSubtitleTranslator cueGroupSubtitleTranslator) {
     super(C.TRACK_TYPE_TEXT);
     this.output = checkNotNull(output);
     this.outputHandler =
         outputLooper == null ? null : Util.createHandler(outputLooper, /* callback= */ this);
     this.subtitleDecoderFactory = subtitleDecoderFactory;
+    this.cueGroupSubtitleTranslator = cueGroupSubtitleTranslator;
     this.cueDecoder = new CueDecoder();
     this.cueDecoderInputBuffer =
         new DecoderInputBuffer(DecoderInputBuffer.BUFFER_REPLACEMENT_MODE_NORMAL);
     formatHolder = new FormatHolder();
+    cueGroupTranslationLock = new Object();
+    translatedCueGroupsByPresentationTimeUs = new HashMap<>();
+    pendingTranslationPresentationTimesUs = new HashSet<>();
     finalStreamEndPositionUs = C.TIME_UNSET;
     lastRendererPositionUs = C.TIME_UNSET;
     legacyDecodingEnabled = false;
+    cueGroupTranslationGeneration = 0L;
+    lastOutputCueGroup = CueGroup.EMPTY_TIME_ZERO;
   }
 
   @Override
@@ -207,6 +245,7 @@ public final class TextRenderer extends BaseRenderer implements Callback {
       long offsetUs,
       MediaSource.MediaPeriodId mediaPeriodId) {
     streamFormat = formats[0];
+    resetCueGroupTranslations();
     if (!isCuesWithTiming(streamFormat)) {
       assertLegacyDecodingEnabledIfRequired();
       if (subtitleDecoder != null) {
@@ -226,6 +265,7 @@ public final class TextRenderer extends BaseRenderer implements Callback {
   protected void onPositionReset(
       long positionUs, boolean joining, boolean sampleStreamIsResetToKeyFrame) {
     lastRendererPositionUs = positionUs;
+    resetCueGroupTranslations();
     if (cuesResolver != null) {
       cuesResolver.clear();
     }
@@ -293,6 +333,7 @@ public final class TextRenderer extends BaseRenderer implements Callback {
   @RequiresNonNull("this.cuesResolver")
   private void renderFromCuesWithTiming(long positionUs) {
     boolean outputNeedsUpdating = readAndDecodeCuesWithTiming(positionUs);
+    maybePrefetchTranslatedCueGroups(positionUs);
 
     long nextCueChangeTimeUs = cuesResolver.getNextCueChangeTimeUs(lastRendererPositionUs);
     if (nextCueChangeTimeUs == C.TIME_END_OF_SOURCE && inputStreamEnded && !outputNeedsUpdating) {
@@ -303,10 +344,14 @@ public final class TextRenderer extends BaseRenderer implements Callback {
     }
 
     if (outputNeedsUpdating) {
-      ImmutableList<Cue> cuesAtTimeUs = cuesResolver.getCuesAtTimeUs(positionUs);
       long previousCueChangeTimeUs = cuesResolver.getPreviousCueChangeTimeUs(positionUs);
-      updateOutput(new CueGroup(cuesAtTimeUs, getPresentationTimeUs(previousCueChangeTimeUs)));
-      cuesResolver.discardCuesBeforeTimeUs(previousCueChangeTimeUs);
+      CueGroup cueGroup = getCueGroupForCuesWithTiming(positionUs);
+      maybeUpdateOutput(cueGroup);
+      if (previousCueChangeTimeUs != C.TIME_UNSET) {
+        cuesResolver.discardCuesBeforeTimeUs(previousCueChangeTimeUs);
+      }
+    } else if (cueGroupSubtitleTranslator != null) {
+      maybeUpdateOutput(getCueGroupForCuesWithTiming(positionUs));
     }
     lastRendererPositionUs = positionUs;
   }
@@ -398,13 +443,9 @@ public final class TextRenderer extends BaseRenderer implements Callback {
       }
     }
 
-    if (textRendererNeedsUpdate) {
-      // If textRendererNeedsUpdate then subtitle must be non-null.
-      checkNotNull(subtitle);
-      // textRendererNeedsUpdate is set and we're playing. Update the renderer.
-      long presentationTimeUs = getPresentationTimeUs(getCurrentEventTimeUs(positionUs));
-      CueGroup cueGroup = new CueGroup(subtitle.getCues(positionUs), presentationTimeUs);
-      updateOutput(cueGroup);
+    maybePrefetchTranslatedCueGroups(positionUs);
+    if (textRendererNeedsUpdate || cueGroupSubtitleTranslator != null) {
+      maybeUpdateOutput(getCueGroupForSubtitle(positionUs));
     }
 
     if (decoderReplacementState == REPLACEMENT_STATE_WAIT_END_OF_STREAM) {
@@ -461,6 +502,7 @@ public final class TextRenderer extends BaseRenderer implements Callback {
   protected void onDisabled() {
     streamFormat = null;
     finalStreamEndPositionUs = C.TIME_UNSET;
+    resetCueGroupTranslations();
     clearOutput();
     lastRendererPositionUs = C.TIME_UNSET;
     if (subtitleDecoder != null) {
@@ -553,6 +595,7 @@ public final class TextRenderer extends BaseRenderer implements Callback {
   }
 
   private void updateOutput(CueGroup cueGroup) {
+    lastOutputCueGroup = cueGroup;
     if (outputHandler != null) {
       outputHandler.obtainMessage(MSG_UPDATE_OUTPUT, cueGroup).sendToTarget();
     } else {
@@ -561,7 +604,11 @@ public final class TextRenderer extends BaseRenderer implements Callback {
   }
 
   private void clearOutput() {
-    updateOutput(new CueGroup(ImmutableList.of(), getPresentationTimeUs(lastRendererPositionUs)));
+    CueGroup cueGroup =
+        lastRendererPositionUs == C.TIME_UNSET
+            ? CueGroup.EMPTY_TIME_ZERO
+            : new CueGroup(ImmutableList.of(), getPresentationTimeUs(lastRendererPositionUs));
+    updateOutput(cueGroup);
   }
 
   @Override
@@ -589,16 +636,270 @@ public final class TextRenderer extends BaseRenderer implements Callback {
    */
   private void handleDecoderError(SubtitleDecoderException e) {
     Log.e(TAG, "Subtitle decoding failed. streamFormat=" + streamFormat, e);
+    resetCueGroupTranslations();
     clearOutput();
     replaceSubtitleDecoder();
+  }
+
+  private void maybeUpdateOutput(CueGroup cueGroup) {
+    CueGroup translatedCueGroup = maybeGetTranslatedCueGroup(cueGroup);
+    if (!translatedCueGroup.equals(lastOutputCueGroup)) {
+      updateOutput(translatedCueGroup);
+    }
+  }
+
+  private CueGroup getCueGroupForCuesWithTiming(long positionUs) {
+    ImmutableList<Cue> cuesAtTimeUs = cuesResolver.getCuesAtTimeUs(positionUs);
+    if (cuesAtTimeUs.isEmpty()) {
+      return CueGroup.EMPTY_TIME_ZERO;
+    }
+    long previousCueChangeTimeUs = cuesResolver.getPreviousCueChangeTimeUs(positionUs);
+    if (previousCueChangeTimeUs == C.TIME_UNSET) {
+      return CueGroup.EMPTY_TIME_ZERO;
+    }
+    return new CueGroup(cuesAtTimeUs, getPresentationTimeUs(previousCueChangeTimeUs));
+  }
+
+  private CueGroup getCueGroupForSubtitle(long positionUs) {
+    if (subtitle == null) {
+      return CueGroup.EMPTY_TIME_ZERO;
+    }
+    List<Cue> cues = subtitle.getCues(positionUs);
+    if (cues.isEmpty()) {
+      return CueGroup.EMPTY_TIME_ZERO;
+    }
+    long presentationTimeUs = getPresentationTimeUs(getCurrentEventTimeUs(checkNotNull(subtitle), positionUs));
+    return new CueGroup(cues, presentationTimeUs);
+  }
+
+  private void maybePrefetchTranslatedCueGroups(long positionUs) {
+    if (cueGroupSubtitleTranslator == null || streamFormat == null) {
+      return;
+    }
+
+    @Nullable String configurationToken = cueGroupSubtitleTranslator.getConfigurationToken(streamFormat);
+    if (!Objects.equals(cueGroupTranslationToken, configurationToken)) {
+      clearCueGroupTranslations();
+      cueGroupTranslationToken = configurationToken;
+    }
+    if (configurationToken == null) {
+      return;
+    }
+
+    long prefetchDurationUs = Math.max(0L, cueGroupSubtitleTranslator.getPrefetchDurationUs());
+    List<CueGroup> upcomingCueGroups =
+        isCuesWithTiming(streamFormat)
+            ? getUpcomingCuesWithTimingCueGroups(positionUs, prefetchDurationUs)
+            : getUpcomingSubtitleCueGroups(positionUs, prefetchDurationUs);
+    if (upcomingCueGroups.isEmpty()) {
+      return;
+    }
+
+    ArrayList<CueGroup> cueGroupsToTranslate = new ArrayList<>();
+    ArrayList<Long> requestedPresentationTimesUs = new ArrayList<>();
+    synchronized (cueGroupTranslationLock) {
+      for (int i = 0; i < upcomingCueGroups.size(); i++) {
+        CueGroup cueGroup = upcomingCueGroups.get(i);
+        long presentationTimeUs = cueGroup.presentationTimeUs;
+        if (translatedCueGroupsByPresentationTimeUs.containsKey(presentationTimeUs)
+            || pendingTranslationPresentationTimesUs.contains(presentationTimeUs)) {
+          continue;
+        }
+        pendingTranslationPresentationTimesUs.add(presentationTimeUs);
+        cueGroupsToTranslate.add(cueGroup);
+        requestedPresentationTimesUs.add(presentationTimeUs);
+      }
+    }
+    if (cueGroupsToTranslate.isEmpty()) {
+      return;
+    }
+
+    long translationGeneration = cueGroupTranslationGeneration;
+    cueGroupSubtitleTranslator.translate(
+        streamFormat,
+        cueGroupsToTranslate,
+        new CueGroupSubtitleTranslator.TranslationCallback() {
+          @Override
+          public void onSuccess(List<CueGroup> translatedCueGroups) {
+            synchronized (cueGroupTranslationLock) {
+              if (translationGeneration != cueGroupTranslationGeneration
+                  || !Objects.equals(configurationToken, cueGroupTranslationToken)) {
+                return;
+              }
+              for (int i = 0; i < requestedPresentationTimesUs.size(); i++) {
+                pendingTranslationPresentationTimesUs.remove(requestedPresentationTimesUs.get(i));
+              }
+              for (int i = 0; i < translatedCueGroups.size(); i++) {
+                CueGroup translatedCueGroup = translatedCueGroups.get(i);
+                translatedCueGroupsByPresentationTimeUs.put(
+                    translatedCueGroup.presentationTimeUs, translatedCueGroup);
+              }
+            }
+          }
+
+          @Override
+          public void onFailure(Exception exception) {
+            synchronized (cueGroupTranslationLock) {
+              if (translationGeneration != cueGroupTranslationGeneration
+                  || !Objects.equals(configurationToken, cueGroupTranslationToken)) {
+                return;
+              }
+              for (int i = 0; i < requestedPresentationTimesUs.size(); i++) {
+                pendingTranslationPresentationTimesUs.remove(requestedPresentationTimesUs.get(i));
+              }
+            }
+            Log.w(TAG, "Cue group translation failed. streamFormat=" + streamFormat, exception);
+          }
+        });
+  }
+
+  private CueGroup maybeGetTranslatedCueGroup(CueGroup cueGroup) {
+    if (cueGroupSubtitleTranslator == null
+        || cueGroupTranslationToken == null
+        || cueGroup.cues.isEmpty()) {
+      return cueGroup;
+    }
+    synchronized (cueGroupTranslationLock) {
+      CueGroup translatedCueGroup =
+          translatedCueGroupsByPresentationTimeUs.get(cueGroup.presentationTimeUs);
+      return translatedCueGroup != null ? translatedCueGroup : cueGroup;
+    }
+  }
+
+  private ImmutableList<CueGroup> getUpcomingCuesWithTimingCueGroups(
+      long positionUs, long prefetchDurationUs) {
+    ArrayList<CueGroup> upcomingCueGroups = new ArrayList<>();
+    HashSet<Long> seenPresentationTimesUs = new HashSet<>();
+    long horizonUs = positionUs + prefetchDurationUs;
+    long currentCueStartTimeUs = cuesResolver.getPreviousCueChangeTimeUs(positionUs);
+    if (currentCueStartTimeUs != C.TIME_UNSET) {
+      maybeAddUpcomingCueGroup(
+          cuesResolver.getCuesAtTimeUs(positionUs),
+          currentCueStartTimeUs,
+          seenPresentationTimesUs,
+          upcomingCueGroups);
+    }
+    long nextCueChangeTimeUs = cuesResolver.getNextCueChangeTimeUs(positionUs);
+    while (nextCueChangeTimeUs != C.TIME_END_OF_SOURCE && nextCueChangeTimeUs <= horizonUs) {
+      maybeAddUpcomingCueGroup(
+          cuesResolver.getCuesAtTimeUs(nextCueChangeTimeUs),
+          nextCueChangeTimeUs,
+          seenPresentationTimesUs,
+          upcomingCueGroups);
+      nextCueChangeTimeUs = cuesResolver.getNextCueChangeTimeUs(nextCueChangeTimeUs);
+    }
+    return ImmutableList.copyOf(upcomingCueGroups);
+  }
+
+  private ImmutableList<CueGroup> getUpcomingSubtitleCueGroups(long positionUs, long prefetchDurationUs) {
+    ArrayList<CueGroup> upcomingCueGroups = new ArrayList<>();
+    HashSet<Long> seenPresentationTimesUs = new HashSet<>();
+    long horizonUs = positionUs + prefetchDurationUs;
+    if (subtitle != null) {
+      maybeAddUpcomingCueGroupsFromSubtitle(
+          subtitle,
+          positionUs,
+          getCurrentEventTimeUs(checkNotNull(subtitle), positionUs),
+          horizonUs,
+          seenPresentationTimesUs,
+          upcomingCueGroups);
+    }
+    if (nextSubtitle != null) {
+      maybeAddUpcomingCueGroupsFromSubtitle(
+          nextSubtitle,
+          nextSubtitle.timeUs,
+          nextSubtitle.timeUs,
+          horizonUs,
+          seenPresentationTimesUs,
+          upcomingCueGroups);
+    }
+    return ImmutableList.copyOf(upcomingCueGroups);
+  }
+
+  private void maybeAddUpcomingCueGroupsFromSubtitle(
+      Subtitle subtitle,
+      long cueQueryTimeUs,
+      long firstPresentationTimeUs,
+      long horizonUs,
+      Set<Long> seenPresentationTimesUs,
+      List<CueGroup> out) {
+    if (firstPresentationTimeUs > horizonUs) {
+      return;
+    }
+    maybeAddUpcomingCueGroup(
+        subtitle.getCues(cueQueryTimeUs),
+        firstPresentationTimeUs,
+        seenPresentationTimesUs,
+        out);
+    int nextEventTimeIndex = subtitle.getNextEventTimeIndex(cueQueryTimeUs);
+    while (nextEventTimeIndex != C.INDEX_UNSET && nextEventTimeIndex < subtitle.getEventTimeCount()) {
+      long eventTimeUs = subtitle.getEventTime(nextEventTimeIndex);
+      if (eventTimeUs > horizonUs) {
+        break;
+      }
+      maybeAddUpcomingCueGroup(
+          subtitle.getCues(eventTimeUs),
+          eventTimeUs,
+          seenPresentationTimesUs,
+          out);
+      nextEventTimeIndex++;
+    }
+  }
+
+  private void maybeAddUpcomingCueGroup(
+      List<Cue> cues,
+      long eventTimeUs,
+      Set<Long> seenPresentationTimesUs,
+      List<CueGroup> out) {
+    if (!isTranslatableCueList(cues)) {
+      return;
+    }
+    long presentationTimeUs = getPresentationTimeUs(eventTimeUs);
+    if (!seenPresentationTimesUs.add(presentationTimeUs)) {
+      return;
+    }
+    out.add(new CueGroup(cues, presentationTimeUs));
+  }
+
+  private boolean isTranslatableCueList(List<Cue> cues) {
+    if (cues.isEmpty()) {
+      return false;
+    }
+    for (int i = 0; i < cues.size(); i++) {
+      Cue cue = cues.get(i);
+      if (cue.bitmap != null || cue.text == null || cue.text.toString().trim().isEmpty()) {
+        return false;
+      }
+    }
+    return true;
+  }
+
+  private void resetCueGroupTranslations() {
+    clearCueGroupTranslations();
+    cueGroupTranslationToken = null;
+  }
+
+  private void clearCueGroupTranslations() {
+    synchronized (cueGroupTranslationLock) {
+      translatedCueGroupsByPresentationTimeUs.clear();
+      pendingTranslationPresentationTimesUs.clear();
+      cueGroupTranslationGeneration++;
+    }
   }
 
   @RequiresNonNull("subtitle")
   @SideEffectFree
   private long getCurrentEventTimeUs(long positionUs) {
+    return getCurrentEventTimeUs(subtitle, positionUs);
+  }
+
+  @SideEffectFree
+  private long getCurrentEventTimeUs(Subtitle subtitle, long positionUs) {
     int nextEventTimeIndex = subtitle.getNextEventTimeIndex(positionUs);
     if (nextEventTimeIndex == 0 || subtitle.getEventTimeCount() == 0) {
-      return subtitle.timeUs;
+      return subtitle instanceof SubtitleOutputBuffer
+          ? ((SubtitleOutputBuffer) subtitle).timeUs
+          : positionUs;
     }
 
     return nextEventTimeIndex == C.INDEX_UNSET
