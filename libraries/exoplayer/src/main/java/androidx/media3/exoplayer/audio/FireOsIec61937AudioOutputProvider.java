@@ -131,29 +131,7 @@ public final class FireOsIec61937AudioOutputProvider extends ForwardingAudioOutp
     if (plan == null) {
       return passthroughConfig;
     }
-
-    int carrierChannelMask = plan.packer.getCarrierChannelMask(passthroughConfig.channelMask);
-    int minBufferSize =
-        AudioTrack.getMinBufferSize(
-            plan.packer.getCarrierSampleRateHz(), carrierChannelMask, AudioFormat.ENCODING_PCM_16BIT);
-    int bufferSize =
-        max(
-            passthroughConfig.bufferSize,
-            max(
-                plan.packer.getMaximumPacketSizeBytes(),
-                minBufferSize > 0
-                    ? minBufferSize * 4
-                    : plan.packer.getMaximumPacketSizeBytes() * 4));
-
-    OutputConfig carrierConfig =
-        passthroughConfig.buildUpon()
-            .setEncoding(C.ENCODING_PCM_16BIT)
-            .setSampleRate(plan.packer.getCarrierSampleRateHz())
-            .setChannelMask(carrierChannelMask)
-            .setEncapsulationMode(AudioTrack.ENCAPSULATION_MODE_NONE)
-            .setBufferSize(bufferSize)
-            .build();
-    carrierPlans.put(carrierConfig, plan);
+    carrierPlans.put(passthroughConfig, plan);
     Log.i(
         TAG,
         "Using Fire OS IEC carrier"
@@ -162,12 +140,12 @@ public final class FireOsIec61937AudioOutputProvider extends ForwardingAudioOutp
             + " mime="
             + formatConfig.format.sampleMimeType
             + " carrierRate="
-            + carrierConfig.sampleRate
+            + plan.carrierConfig.sampleRate
             + " channelMask="
-            + carrierConfig.channelMask
+            + plan.carrierConfig.channelMask
             + " bufferSize="
-            + carrierConfig.bufferSize);
-    return carrierConfig;
+            + plan.carrierConfig.bufferSize);
+    return passthroughConfig;
   }
 
   @Override
@@ -177,7 +155,7 @@ public final class FireOsIec61937AudioOutputProvider extends ForwardingAudioOutp
       return passthroughProvider.getAudioOutput(config);
     }
     try {
-      AudioOutput carrierOutput = iecCarrierProvider.getAudioOutput(config);
+      AudioOutput carrierOutput = iecCarrierProvider.getAudioOutput(plan.carrierConfig);
       return new FireOsIec61937AudioOutput(carrierOutput, plan.kind, plan.packer, this);
     } catch (InitializationException e) {
       requestFallback(plan.kind);
@@ -203,12 +181,12 @@ public final class FireOsIec61937AudioOutputProvider extends ForwardingAudioOutp
       return null;
     }
     if (MimeTypes.AUDIO_DTS.equals(sampleMimeType)) {
-      return new CarrierPlan(PackerKind.DTS_CORE, new DtsCoreIecPacker(), passthroughConfig);
+      return buildCarrierPlan(PackerKind.DTS_CORE, new DtsCoreIecPacker(), passthroughConfig);
     }
     if (MimeTypes.AUDIO_DTS_HD.equals(sampleMimeType)
         || MimeTypes.AUDIO_DTS_X.equals(sampleMimeType)
         || MimeTypes.AUDIO_DTS_EXPRESS.equals(sampleMimeType)) {
-      return new CarrierPlan(
+      return buildCarrierPlan(
           PackerKind.DTS_HD,
           new DtsHdIecPacker(
               format.sampleRate != Format.NO_VALUE ? format.sampleRate : 48_000,
@@ -216,10 +194,34 @@ public final class FireOsIec61937AudioOutputProvider extends ForwardingAudioOutp
           passthroughConfig);
     }
     if (MimeTypes.AUDIO_TRUEHD.equals(sampleMimeType)) {
-      return new CarrierPlan(
+      return buildCarrierPlan(
           PackerKind.TRUEHD, new TrueHdIecPacker(format.channelCount > 2), passthroughConfig);
     }
     return null;
+  }
+
+  private static CarrierPlan buildCarrierPlan(
+      PackerKind kind, IecPacker packer, OutputConfig passthroughConfig) {
+    int carrierChannelMask = packer.getCarrierChannelMask(passthroughConfig.channelMask);
+    int minBufferSize =
+        AudioTrack.getMinBufferSize(
+            packer.getCarrierSampleRateHz(), carrierChannelMask, AudioFormat.ENCODING_PCM_16BIT);
+    int bufferSize =
+        max(
+            passthroughConfig.bufferSize,
+            max(
+                packer.getMaximumPacketSizeBytes(),
+                minBufferSize > 0 ? minBufferSize * 4 : packer.getMaximumPacketSizeBytes() * 4));
+
+    OutputConfig carrierConfig =
+        passthroughConfig.buildUpon()
+            .setEncoding(C.ENCODING_PCM_16BIT)
+            .setSampleRate(packer.getCarrierSampleRateHz())
+            .setChannelMask(carrierChannelMask)
+            .setEncapsulationMode(AudioTrack.ENCAPSULATION_MODE_NONE)
+            .setBufferSize(bufferSize)
+            .build();
+    return new CarrierPlan(kind, packer, passthroughConfig, carrierConfig);
   }
 
   private static void overrideToIec61937(AudioTrack.Builder builder, OutputConfig config) {
@@ -285,11 +287,17 @@ public final class FireOsIec61937AudioOutputProvider extends ForwardingAudioOutp
     public final PackerKind kind;
     public final IecPacker packer;
     public final OutputConfig passthroughConfig;
+    public final OutputConfig carrierConfig;
 
-    public CarrierPlan(PackerKind kind, IecPacker packer, OutputConfig passthroughConfig) {
+    public CarrierPlan(
+        PackerKind kind,
+        IecPacker packer,
+        OutputConfig passthroughConfig,
+        OutputConfig carrierConfig) {
       this.kind = kind;
       this.packer = packer;
       this.passthroughConfig = passthroughConfig;
+      this.carrierConfig = carrierConfig;
     }
   }
 
