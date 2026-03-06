@@ -79,6 +79,14 @@ public final class AmazonQuirks {
     return model.startsWith("AFT");
   }
 
+  public static boolean shouldAttemptExperimentalFireOsIecPassthrough() {
+    if (!shouldApplyAudioQuirks()) {
+      return false;
+    }
+    String model = Build.MODEL != null ? Build.MODEL : "";
+    return model.startsWith("AFT");
+  }
+
   public static boolean shouldUseSurroundSoundFlag(ContentResolver resolver) {
     if (!shouldApplyAudioQuirks() || Util.SDK_INT < 17) {
       return false;
