@@ -349,6 +349,8 @@ public final class AudioCapabilities {
     int encoding =
         sampleMimeType == null ? C.ENCODING_INVALID : MimeTypes.getEncoding(sampleMimeType, codecs);
     @C.Encoding int requestedEncoding = encoding;
+    boolean allowExperimentalFireOsIecPassthrough =
+        AmazonQuirks.shouldAttemptExperimentalFireOsIecPassthrough();
     boolean forceLimitedFireTvDtsCoreFallback =
         AmazonQuirks.shouldForceLimitedFireTvDtsCoreFallback()
             && isDtsHdLike(sampleMimeType, codecs, encoding);
@@ -370,7 +372,7 @@ public final class AudioCapabilities {
       // E-AC3 receivers support E-AC3 JOC streams (but decode only the base layer).
       encoding = C.ENCODING_E_AC3;
     } else if ((encoding == C.ENCODING_DTS_HD || encoding == C.ENCODING_DTS_UHD_P2)
-        && (forceLimitedFireTvDtsCoreFallback
+        && ((!allowExperimentalFireOsIecPassthrough && forceLimitedFireTvDtsCoreFallback)
             || (encoding == C.ENCODING_DTS_HD && !supportsEncoding(C.ENCODING_DTS_HD))
             || (encoding == C.ENCODING_DTS_UHD_P2 && !supportsEncoding(C.ENCODING_DTS_UHD_P2)))) {
       // DTS receivers support DTS-HD streams (but decode only the core layer).
@@ -381,6 +383,10 @@ public final class AudioCapabilities {
     }
 
     AudioProfile audioProfile = checkNotNull(encodingToAudioProfile.get(encoding));
+    boolean useExperimentalFireOsIecPassthrough =
+        allowExperimentalFireOsIecPassthrough
+            && isDtsHdFamilyEncoding(encoding)
+            && audioProfile.supportsIec61937Encapsulation();
     int channelCount;
     if (format.channelCount == Format.NO_VALUE || encoding == C.ENCODING_E_AC3_JOC) {
       // In HLS chunkless preparation, the format channel count and sample rate may be unset. See
@@ -392,7 +398,9 @@ public final class AudioCapabilities {
           audioProfile.getMaxSupportedChannelCountForPassthrough(sampleRate, audioAttributes);
     } else {
       channelCount = format.channelCount;
-      if (forceLimitedFireTvDtsCoreFallback && channelCount > 6) {
+      if (forceLimitedFireTvDtsCoreFallback
+          && !useExperimentalFireOsIecPassthrough
+          && channelCount > 6) {
         channelCount = 6;
       }
       if (MimeTypes.AUDIO_DTS_X.equals(format.sampleMimeType) && SDK_INT < 33) {
@@ -429,6 +437,24 @@ public final class AudioCapabilities {
               + channelCount
               + " channelConfig="
               + channelConfig);
+    } else if (useExperimentalFireOsIecPassthrough) {
+      android.util.Log.i(
+          TAG,
+          "FIREOS_IEC_ATTEMPT"
+              + " model="
+              + Build.MODEL
+              + " mime="
+              + sampleMimeType
+              + " codecs="
+              + codecs
+              + " encoding="
+              + encoding
+              + " channels="
+              + channelCount
+              + " channelConfig="
+              + channelConfig
+              + " encapsulation="
+              + audioProfile.encapsulationType);
     }
     return new PassthroughConfig(
         encoding, channelConfig, audioProfile.getAudioTrackEncapsulationMode());
@@ -467,6 +493,10 @@ public final class AudioCapabilities {
         || normalizedCodecs.contains("dtsx")
         || normalizedCodecs.contains("dts:x")
         || normalizedCodecs.contains("dtsuhd");
+  }
+
+  private static boolean isDtsHdFamilyEncoding(@C.Encoding int encoding) {
+    return encoding == C.ENCODING_DTS_HD || encoding == C.ENCODING_DTS_UHD_P2;
   }
 
   private static String normalizeLower(@Nullable String value) {
@@ -538,8 +568,7 @@ public final class AudioCapabilities {
       android.media.AudioProfile audioProfile = audioProfiles.get(i);
       if ((audioProfile.getEncapsulationType()
               == android.media.AudioProfile.AUDIO_ENCAPSULATION_TYPE_IEC61937)
-          && (!AmazonQuirks.isExperimentalFireOsAudioQuirksEnabled()
-              || AmazonQuirks.shouldForceLimitedFireTvDtsCoreFallback())) {
+          && !shouldKeepIec61937AudioProfile(audioProfile.getFormat())) {
         // Skip the IEC61937 encapsulation because we don't support it yet.
         continue;
       }
@@ -576,6 +605,19 @@ public final class AudioCapabilities {
               formatAndChannelMasks.getKey(), formatAndChannelMasks.getValue(), encapsulationType));
     }
     return localAudioProfiles.build();
+  }
+
+  private static boolean shouldKeepIec61937AudioProfile(@C.Encoding int encoding) {
+    if (!AmazonQuirks.isExperimentalFireOsAudioQuirksEnabled()) {
+      return false;
+    }
+    if (!AmazonQuirks.shouldAttemptExperimentalFireOsIecPassthrough()) {
+      return false;
+    }
+    return encoding == C.ENCODING_DTS
+        || encoding == C.ENCODING_DTS_HD
+        || encoding == C.ENCODING_DTS_UHD_P2
+        || encoding == C.ENCODING_DOLBY_TRUEHD;
   }
 
   private static ImmutableList<AudioProfile> getAudioProfiles(
@@ -676,6 +718,10 @@ public final class AudioCapabilities {
         return AudioTrack.ENCAPSULATION_MODE_ELEMENTARY_STREAM;
       }
       return AudioTrack.ENCAPSULATION_MODE_NONE;
+    }
+
+    public boolean supportsIec61937Encapsulation() {
+      return encapsulationType == android.media.AudioProfile.AUDIO_ENCAPSULATION_TYPE_IEC61937;
     }
 
     public boolean supportsChannelCount(int channelCount) {
