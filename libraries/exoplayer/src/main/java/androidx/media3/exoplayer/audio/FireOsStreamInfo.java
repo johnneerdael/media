@@ -175,13 +175,15 @@ public final class FireOsStreamInfo {
       String diagnostics) {
     int outputRateHz = getDtsOutputRate(dtsStreamType, inputSampleRateHz);
     int outputChannelCount = getDtsOutputChannelCount(dtsStreamType);
+    int resolvedDtsPeriodFrames =
+        getKodiDtsPeriodFrames(dtsStreamType, dtsPeriodFrames);
     return new FireOsStreamInfo(
         sampleMimeType != null ? sampleMimeType : MimeTypes.AUDIO_DTS,
         StreamFamily.DTS,
         dtsStreamType,
         inputSampleRateHz,
         inputChannelCount,
-        dtsPeriodFrames,
+        resolvedDtsPeriodFrames,
         outputRateHz,
         outputChannelCount,
         outputChannelCount >= 8
@@ -245,6 +247,24 @@ public final class FireOsStreamInfo {
       case UNKNOWN:
       default:
         return 2;
+    }
+  }
+
+  private static int getKodiDtsPeriodFrames(
+      DtsStreamType dtsStreamType, int dtsPeriodFrames) {
+    if (dtsStreamType != DtsStreamType.DTSHD_MA || dtsPeriodFrames == C.LENGTH_UNSET) {
+      return dtsPeriodFrames;
+    }
+    // Kodi scales DTS-HD MA by the 8-channel IEC carrier width, while DTS-HD HRA keeps the
+    // stereo-width repetition period.
+    switch (dtsPeriodFrames) {
+      case 512:
+      case 1024:
+      case 2048:
+      case 4096:
+        return dtsPeriodFrames * 4;
+      default:
+        return dtsPeriodFrames;
     }
   }
 

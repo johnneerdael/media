@@ -197,6 +197,7 @@ public final class FireOsDtsClassifierTest {
             /* hasUhd= */ false);
 
     assertThat(streamInfo.dtsStreamType).isEqualTo(FireOsStreamInfo.DtsStreamType.DTSHD_MA);
+    assertThat(streamInfo.dtsPeriodFrames).isEqualTo(16_384);
     assertThat(streamInfo.outputChannelCount).isEqualTo(8);
     assertThat(streamInfo.outputRateHz).isEqualTo(192_000);
   }
