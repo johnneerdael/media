@@ -33,16 +33,30 @@ public final class AmazonQuirks {
   private static final int AUDIO_HARDWARE_LATENCY_FOR_TABLETS_US = 90_000;
 
   private static volatile boolean experimentalFireOsAudioQuirksEnabled;
+  private static volatile boolean limitedFireTvDtsCoreFallbackEnabled;
   private static volatile boolean skipProfileLevelCheck;
 
   private AmazonQuirks() {}
 
   public static void setExperimentalFireOsAudioQuirksEnabled(boolean enabled) {
     experimentalFireOsAudioQuirksEnabled = enabled;
+    limitedFireTvDtsCoreFallbackEnabled = enabled;
   }
 
   public static boolean isExperimentalFireOsAudioQuirksEnabled() {
     return experimentalFireOsAudioQuirksEnabled;
+  }
+
+  public static void setExperimentalFireOsIecPassthroughEnabled(boolean enabled) {
+    experimentalFireOsAudioQuirksEnabled = enabled;
+  }
+
+  public static void setLimitedFireTvDtsCoreFallbackEnabled(boolean enabled) {
+    limitedFireTvDtsCoreFallbackEnabled = enabled;
+  }
+
+  public static boolean isLimitedFireTvDtsCoreFallbackEnabled() {
+    return limitedFireTvDtsCoreFallbackEnabled;
   }
 
   public static boolean isAmazonDevice() {
@@ -71,7 +85,7 @@ public final class AmazonQuirks {
   }
 
   public static boolean shouldForceLimitedFireTvDtsCoreFallback() {
-    if (!shouldApplyAudioQuirks()) {
+    if (!limitedFireTvDtsCoreFallbackEnabled || !isAmazonDevice()) {
       return false;
     }
     String model = Build.MODEL != null ? Build.MODEL : "";

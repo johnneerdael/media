@@ -1026,6 +1026,11 @@ public final class FireOsDefaultAudioSink implements AudioSink {
       applyAudioProcessorPlaybackParametersAndSkipSilence(presentationTimeUs);
     }
 
+    if (!isAudioOutputInitialized() && inputBuffer == null) {
+      maybePrimeFireOsStreamInfoBeforeInitialization(
+          buffer, encodedAccessUnitCount, presentationTimeUs);
+    }
+
     if (!isAudioOutputInitialized()) {
       try {
         if (!initializeAudioOutput()) {
@@ -1041,11 +1046,6 @@ public final class FireOsDefaultAudioSink implements AudioSink {
       }
     }
     initializationExceptionPendingExceptionHolder.clear();
-
-    if (!isAudioOutputInitialized() && inputBuffer == null) {
-      maybePrimeFireOsStreamInfoBeforeInitialization(
-          buffer, encodedAccessUnitCount, presentationTimeUs);
-    }
 
     if (startMediaTimeUsNeedsInit) {
       startMediaTimeUs = max(0, presentationTimeUs);

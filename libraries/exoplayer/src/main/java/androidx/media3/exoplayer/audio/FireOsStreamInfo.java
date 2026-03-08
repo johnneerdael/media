@@ -54,6 +54,7 @@ public final class FireOsStreamInfo {
   public final int outputRateHz;
   public final int outputChannelCount;
   public final int logicalPassthroughChannelMask;
+  public final boolean requireMultichannelIecCarrier;
   public final boolean preferMultichannelIecCarrier;
   public final boolean allowDtsCoreRawFallback;
   public final boolean passthroughCandidate;
@@ -70,6 +71,7 @@ public final class FireOsStreamInfo {
       int outputRateHz,
       int outputChannelCount,
       int logicalPassthroughChannelMask,
+      boolean requireMultichannelIecCarrier,
       boolean preferMultichannelIecCarrier,
       boolean allowDtsCoreRawFallback,
       boolean passthroughCandidate,
@@ -84,6 +86,7 @@ public final class FireOsStreamInfo {
     this.outputRateHz = outputRateHz;
     this.outputChannelCount = outputChannelCount;
     this.logicalPassthroughChannelMask = logicalPassthroughChannelMask;
+    this.requireMultichannelIecCarrier = requireMultichannelIecCarrier;
     this.preferMultichannelIecCarrier = preferMultichannelIecCarrier;
     this.allowDtsCoreRawFallback = allowDtsCoreRawFallback;
     this.passthroughCandidate = passthroughCandidate;
@@ -112,6 +115,8 @@ public final class FireOsStreamInfo {
         + outputChannelCount
         + ",logicalMask="
         + logicalPassthroughChannelMask
+        + ",requireMultiIec="
+        + requireMultichannelIecCarrier
         + ",multiIec="
         + preferMultichannelIecCarrier
         + ",dtsCoreRawFallback="
@@ -140,6 +145,7 @@ public final class FireOsStreamInfo {
         outputRateHz,
         /* outputChannelCount= */ 2,
         AudioFormat.CHANNEL_OUT_STEREO,
+        /* requireMultichannelIecCarrier= */ false,
         /* preferMultichannelIecCarrier= */ false,
         /* allowDtsCoreRawFallback= */ false,
         /* passthroughCandidate= */ true,
@@ -159,11 +165,31 @@ public final class FireOsStreamInfo {
         outputRateHz,
         /* outputChannelCount= */ 8,
         AudioFormat.CHANNEL_OUT_7POINT1_SURROUND,
+        /* requireMultichannelIecCarrier= */ true,
         /* preferMultichannelIecCarrier= */ true,
         /* allowDtsCoreRawFallback= */ false,
         /* passthroughCandidate= */ true,
         /* highBitrateCandidate= */ inputSampleRateHz >= 96_000,
         "truehd");
+  }
+
+  public static FireOsStreamInfo createForUnknownTrueHd() {
+    return new FireOsStreamInfo(
+        MimeTypes.AUDIO_TRUEHD,
+        StreamFamily.TRUEHD,
+        DtsStreamType.NONE,
+        /* inputSampleRateHz= */ C.RATE_UNSET_INT,
+        /* inputChannelCount= */ Format.NO_VALUE,
+        /* dtsPeriodFrames= */ C.LENGTH_UNSET,
+        /* outputRateHz= */ 192_000,
+        /* outputChannelCount= */ 8,
+        AudioFormat.CHANNEL_OUT_7POINT1_SURROUND,
+        /* requireMultichannelIecCarrier= */ true,
+        /* preferMultichannelIecCarrier= */ true,
+        /* allowDtsCoreRawFallback= */ false,
+        /* passthroughCandidate= */ true,
+        /* highBitrateCandidate= */ true,
+        "truehd-unknown");
   }
 
   public static FireOsStreamInfo createForDts(
@@ -189,6 +215,7 @@ public final class FireOsStreamInfo {
         outputChannelCount >= 8
             ? AudioFormat.CHANNEL_OUT_7POINT1_SURROUND
             : AudioFormat.CHANNEL_OUT_STEREO,
+        /* requireMultichannelIecCarrier= */ dtsStreamType == DtsStreamType.DTSHD_MA,
         /* preferMultichannelIecCarrier= */ outputChannelCount >= 8,
         /* allowDtsCoreRawFallback= */ dtsStreamType != DtsStreamType.DTS_512
             && dtsStreamType != DtsStreamType.DTS_1024
@@ -210,6 +237,7 @@ public final class FireOsStreamInfo {
         /* outputRateHz= */ C.RATE_UNSET_INT,
         /* outputChannelCount= */ Format.NO_VALUE,
         AudioFormat.CHANNEL_OUT_STEREO,
+        /* requireMultichannelIecCarrier= */ false,
         /* preferMultichannelIecCarrier= */ false,
         /* allowDtsCoreRawFallback= */ false,
         /* passthroughCandidate= */ false,
