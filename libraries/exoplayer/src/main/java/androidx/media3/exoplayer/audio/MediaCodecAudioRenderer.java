@@ -871,7 +871,8 @@ public class MediaCodecAudioRenderer extends MediaCodecRenderer implements Media
 
     boolean fullyConsumed;
     try {
-      fullyConsumed = audioSink.handleBuffer(buffer, bufferPresentationTimeUs, sampleCount);
+      fullyConsumed =
+          handleBufferWithAudioSink(buffer, bufferPresentationTimeUs, sampleCount, format);
     } catch (InitializationException e) {
       throw createRendererException(
           e,
@@ -914,6 +915,12 @@ public class MediaCodecAudioRenderer extends MediaCodecRenderer implements Media
     }
 
     return false;
+  }
+
+  protected boolean handleBufferWithAudioSink(
+      ByteBuffer buffer, long bufferPresentationTimeUs, int sampleCount, Format format)
+      throws InitializationException, WriteException {
+    return audioSink.handleBuffer(buffer, bufferPresentationTimeUs, sampleCount);
   }
 
   @Override

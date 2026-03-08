@@ -72,7 +72,8 @@ public class AudioTrackPositionTrackerTest {
             audioTrack,
             C.ENCODING_PCM_16BIT,
             OUTPUT_PCM_FRAME_SIZE,
-            MIN_BUFFER_SIZE);
+            MIN_BUFFER_SIZE,
+            /* applyLegacyDolbyPassthroughQuirk= */ false);
     audioTrackPositionTracker.start();
     audioTrack.play();
     // Advance and write to audio track at least twice to move rawHeadPosition past wrap point.
@@ -97,7 +98,8 @@ public class AudioTrackPositionTrackerTest {
             audioTrack,
             C.ENCODING_PCM_16BIT,
             OUTPUT_PCM_FRAME_SIZE,
-            MIN_BUFFER_SIZE);
+            MIN_BUFFER_SIZE,
+            /* applyLegacyDolbyPassthroughQuirk= */ false);
     audioTrackPositionTracker.start();
     audioTrack.play();
     // Advance and write to audio track at least twice to move rawHeadPosition past wrap point.
@@ -125,7 +127,8 @@ public class AudioTrackPositionTrackerTest {
             audioTrack,
             C.ENCODING_PCM_16BIT,
             OUTPUT_PCM_FRAME_SIZE,
-            MIN_BUFFER_SIZE);
+            MIN_BUFFER_SIZE,
+            /* applyLegacyDolbyPassthroughQuirk= */ false);
     audioTrackPositionTracker.start();
     audioTrack.play();
     // Advance and write to audio track at least twice to move rawHeadPosition past wrap point.
@@ -158,7 +161,8 @@ public class AudioTrackPositionTrackerTest {
             audioTrack,
             C.ENCODING_PCM_16BIT,
             OUTPUT_PCM_FRAME_SIZE,
-            MIN_BUFFER_SIZE);
+            MIN_BUFFER_SIZE,
+            /* applyLegacyDolbyPassthroughQuirk= */ false);
     audioTrackPositionTracker.start();
     audioTrack.play();
     // Advance and write to audio track at least twice to move rawHeadPosition past wrap point.
@@ -193,7 +197,8 @@ public class AudioTrackPositionTrackerTest {
             audioTrack,
             C.ENCODING_PCM_16BIT,
             OUTPUT_PCM_FRAME_SIZE,
-            MIN_BUFFER_SIZE);
+            MIN_BUFFER_SIZE,
+            /* applyLegacyDolbyPassthroughQuirk= */ false);
     audioTrackPositionTracker.start();
     audioTrack.play();
 
@@ -218,7 +223,8 @@ public class AudioTrackPositionTrackerTest {
             audioTrack,
             C.ENCODING_PCM_16BIT,
             OUTPUT_PCM_FRAME_SIZE,
-            MIN_BUFFER_SIZE);
+            MIN_BUFFER_SIZE,
+            /* applyLegacyDolbyPassthroughQuirk= */ false);
     audioTrackPositionTracker.start();
     audioTrack.play();
     for (int i = 0; i < 2; i++) {
@@ -243,7 +249,8 @@ public class AudioTrackPositionTrackerTest {
             audioTrack,
             C.ENCODING_PCM_16BIT,
             OUTPUT_PCM_FRAME_SIZE,
-            MIN_BUFFER_SIZE);
+            MIN_BUFFER_SIZE,
+            /* applyLegacyDolbyPassthroughQuirk= */ false);
     audioTrackPositionTracker.start();
     audioTrack.play();
     for (int i = 0; i < 2; i++) {
@@ -272,7 +279,8 @@ public class AudioTrackPositionTrackerTest {
             audioTrack,
             C.ENCODING_PCM_16BIT,
             OUTPUT_PCM_FRAME_SIZE,
-            MIN_BUFFER_SIZE);
+            MIN_BUFFER_SIZE,
+            /* applyLegacyDolbyPassthroughQuirk= */ false);
     // Start the tracker to set the initial position for advancing check.
     audioTrackPositionTracker.start();
     audioTrack.play();
@@ -295,7 +303,8 @@ public class AudioTrackPositionTrackerTest {
             audioTrack,
             C.ENCODING_PCM_16BIT,
             OUTPUT_PCM_FRAME_SIZE,
-            MIN_BUFFER_SIZE);
+            MIN_BUFFER_SIZE,
+            /* applyLegacyDolbyPassthroughQuirk= */ false);
     // Start the tracker to set the initial position for advancing check.
     audioTrackPositionTracker.start();
     audioTrack.play();
@@ -321,7 +330,8 @@ public class AudioTrackPositionTrackerTest {
             audioTrack,
             C.ENCODING_PCM_16BIT,
             OUTPUT_PCM_FRAME_SIZE,
-            MIN_BUFFER_SIZE);
+            MIN_BUFFER_SIZE,
+            /* applyLegacyDolbyPassthroughQuirk= */ false);
     // Start the tracker to set the initial position for advancing check.
     audioTrackPositionTracker.start();
     audioTrack.play();
@@ -356,7 +366,8 @@ public class AudioTrackPositionTrackerTest {
             audioTrack,
             C.ENCODING_PCM_16BIT,
             OUTPUT_PCM_FRAME_SIZE,
-            MIN_BUFFER_SIZE);
+            MIN_BUFFER_SIZE,
+            /* applyLegacyDolbyPassthroughQuirk= */ false);
     // Start the tracker to set the initial position for advancing check.
     audioTrackPositionTracker.start();
     audioTrack.play();
@@ -383,7 +394,8 @@ public class AudioTrackPositionTrackerTest {
             audioTrack,
             C.ENCODING_PCM_16BIT,
             OUTPUT_PCM_FRAME_SIZE,
-            MIN_BUFFER_SIZE);
+            MIN_BUFFER_SIZE,
+            /* applyLegacyDolbyPassthroughQuirk= */ false);
     // Start the tracker to set the initial position for advancing check.
     audioTrackPositionTracker.start();
     audioTrack.play();
@@ -418,7 +430,8 @@ public class AudioTrackPositionTrackerTest {
             audioTrack,
             C.ENCODING_PCM_16BIT,
             OUTPUT_PCM_FRAME_SIZE,
-            MIN_BUFFER_SIZE);
+            MIN_BUFFER_SIZE,
+            /* applyLegacyDolbyPassthroughQuirk= */ false);
     audioTrackPositionTracker.start();
     audioTrack.play();
     for (int i = 0; i < 3; i++) {
@@ -444,7 +457,8 @@ public class AudioTrackPositionTrackerTest {
             audioTrack,
             C.ENCODING_PCM_16BIT,
             OUTPUT_PCM_FRAME_SIZE,
-            MIN_BUFFER_SIZE);
+            MIN_BUFFER_SIZE,
+            /* applyLegacyDolbyPassthroughQuirk= */ false);
     audioTrackPositionTracker.start();
     audioTrack.play();
     for (int i = 0; i < 3; i++) {
