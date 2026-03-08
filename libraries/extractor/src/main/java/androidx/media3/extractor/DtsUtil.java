@@ -78,6 +78,37 @@ public final class DtsUtil {
     }
   }
 
+  /** Parsed DTS-HD extension asset information needed for exact DTS subtype classification. */
+  public static final class DtsHdAssetInfo {
+    public final int codingMode;
+    public final int extensionMask;
+    public final boolean xllPresent;
+    public final boolean lbrPresent;
+    public final boolean xbrPresent;
+    public final boolean xxchPresent;
+    public final boolean x96Present;
+    public final int maxSampleRate;
+
+    private DtsHdAssetInfo(
+        int codingMode,
+        int extensionMask,
+        boolean xllPresent,
+        boolean lbrPresent,
+        boolean xbrPresent,
+        boolean xxchPresent,
+        boolean x96Present,
+        int maxSampleRate) {
+      this.codingMode = codingMode;
+      this.extensionMask = extensionMask;
+      this.xllPresent = xllPresent;
+      this.lbrPresent = lbrPresent;
+      this.xbrPresent = xbrPresent;
+      this.xxchPresent = xxchPresent;
+      this.x96Present = x96Present;
+      this.maxSampleRate = maxSampleRate;
+    }
+  }
+
   /**
    * The possible MIME types for DTS that can be used.
    *
@@ -235,6 +266,13 @@ public final class DtsUtil {
 
   /** Header size length table for DTS UHD. See ETSI TS 103 491 V1.2.1 (2019-05), Section 6.4.3. */
   private static final int[] UHD_HEADER_SIZE_LENGTH_TABLE = new int[] {5, 8, 10, 12};
+
+  private static final int DCA_EXSS_CORE = 0x010;
+  private static final int DCA_EXSS_XBR = 0x020;
+  private static final int DCA_EXSS_XXCH = 0x040;
+  private static final int DCA_EXSS_X96 = 0x080;
+  private static final int DCA_EXSS_LBR = 0x100;
+  private static final int DCA_EXSS_XLL = 0x200;
 
   /**
    * Returns the {@link FrameType} if {@code word} is a DTS sync word, otherwise {@link
@@ -524,6 +562,233 @@ public final class DtsUtil {
   }
 
   /**
+   * Parses DTS-HD extension-substream asset information closely following FFmpeg's
+   * {@code ff_dca_exss_parse}/{@code parse_descriptor} path.
+   */
+  public static DtsHdAssetInfo parseDtsHdAssetInfo(byte[] frame) throws ParserException {
+    ParsableBitArray bits = getNormalizedFrame(frame);
+    bits.skipBits(32 + 8); // SYNCEXTSSH, UserDefinedBits
+
+    int extensionSubstreamIndex = bits.readBits(2);
+    boolean wideHeader = bits.readBit();
+    int headerSize = bits.readBits(8 + (wideHeader ? 4 : 0)) + 1;
+    int extensionSubstreamFrameSizeBits = 16 + (wideHeader ? 4 : 0);
+    int extensionSubstreamSize = bits.readBits(extensionSubstreamFrameSizeBits) + 1;
+    if (extensionSubstreamSize > frame.length) {
+      throw ParserException.createForMalformedContainer(
+          /* message= */ "Packet too short for DTS-HD extension substream", /* cause= */ null);
+    }
+
+    boolean staticFieldsPresent = bits.readBit();
+    boolean mixMetadataEnabled = false;
+    int mixOutputConfigCount = 0;
+    int[] mixOutputChannelCounts = new int[4];
+    int assetCount = 1;
+    if (staticFieldsPresent) {
+      bits.skipBits(2); // reference clock code
+      bits.skipBits(3); // frame duration
+      if (bits.readBit()) {
+        bits.skipBits(36); // timestamp
+      }
+      int presentationCount = bits.readBits(3) + 1;
+      assetCount = bits.readBits(3) + 1;
+      if (presentationCount != 1 || assetCount != 1) {
+        throw ParserException.createForUnsupportedContainerFeature(
+            /* message= */ "Multiple audio presentations or assets not supported");
+      }
+      int activeExtensionMask = bits.readBits(extensionSubstreamIndex + 1);
+      skipBitsLong(bits, Integer.bitCount(activeExtensionMask) * 8);
+      mixMetadataEnabled = bits.readBit();
+      if (mixMetadataEnabled) {
+        bits.skipBits(2); // mixing metadata adjustment level
+        int speakerMaskBits = (bits.readBits(2) + 1) << 2;
+        mixOutputConfigCount = bits.readBits(2) + 1;
+        for (int i = 0; i < mixOutputConfigCount; i++) {
+          mixOutputChannelCounts[i] = countChannelsForMask(bits.readBits(speakerMaskBits));
+        }
+      }
+    }
+
+    int assetOffset = headerSize;
+    int assetSize = bits.readBits(extensionSubstreamFrameSizeBits) + 1;
+    assetOffset += assetSize;
+    if (assetOffset > extensionSubstreamSize) {
+      throw ParserException.createForMalformedContainer(
+          /* message= */ "DTS-HD asset out of bounds", /* cause= */ null);
+    }
+
+    int descriptorStart = bits.getPosition();
+    int descriptorSize = bits.readBits(9) + 1;
+    bits.skipBits(3); // asset index
+
+    int maxSampleRate = C.RATE_UNSET_INT;
+    int totalChannelCount = C.LENGTH_UNSET;
+    boolean embeddedStereo = false;
+    boolean embedded6ch = false;
+    if (staticFieldsPresent) {
+      if (bits.readBit()) {
+        bits.skipBits(4); // asset type descriptor
+      }
+      if (bits.readBit()) {
+        bits.skipBits(24); // language descriptor
+      }
+      if (bits.readBit()) {
+        int textSize = bits.readBits(10) + 1;
+        skipBitsLong(bits, textSize * 8L);
+      }
+      bits.skipBits(5); // PCM bit resolution
+      maxSampleRate = SAMPLE_RATE_BY_INDEX[bits.readBits(4)];
+      totalChannelCount = bits.readBits(8) + 1;
+      boolean oneToOneMap = bits.readBit();
+      if (oneToOneMap) {
+        embeddedStereo = totalChannelCount > 2 && bits.readBit();
+        embedded6ch = totalChannelCount > 6 && bits.readBit();
+        int speakerMaskBits = 0;
+        if (bits.readBit()) {
+          speakerMaskBits = (bits.readBits(2) + 1) << 2;
+          bits.readBits(speakerMaskBits); // speaker mask
+        }
+        int speakerRemapSetCount = bits.readBits(3);
+        if (speakerRemapSetCount != 0 && speakerMaskBits == 0) {
+          throw ParserException.createForMalformedContainer(
+              /* message= */ "Speaker remap set without speaker mask", /* cause= */ null);
+        }
+        int[] remapSpeakerCounts = new int[speakerRemapSetCount];
+        for (int i = 0; i < speakerRemapSetCount; i++) {
+          remapSpeakerCounts[i] = countChannelsForMask(bits.readBits(speakerMaskBits));
+        }
+        for (int i = 0; i < speakerRemapSetCount; i++) {
+          int channelsForRemap = bits.readBits(5) + 1;
+          for (int j = 0; j < remapSpeakerCounts[i]; j++) {
+            long remapChannelMask = bits.readBitsToLong(channelsForRemap);
+            skipBitsLong(bits, Long.bitCount(remapChannelMask) * 5L);
+          }
+        }
+      } else {
+        bits.skipBits(3); // representation type
+      }
+    }
+
+    boolean drcPresent = bits.readBit();
+    if (drcPresent) {
+      bits.skipBits(8);
+    }
+    if (bits.readBit()) {
+      bits.skipBits(5); // dialog normalization
+    }
+    if (drcPresent && embeddedStereo) {
+      bits.skipBits(8);
+    }
+    if (mixMetadataEnabled && bits.readBit()) {
+      bits.skipBit(); // external mixing flag
+      bits.skipBits(6); // post mixing gain adjustment
+      int drcCode = bits.readBits(2);
+      if (drcCode == 3) {
+        bits.skipBits(8);
+      } else {
+        bits.skipBits(3);
+      }
+      if (bits.readBit()) {
+        for (int i = 0; i < mixOutputConfigCount; i++) {
+          skipBitsLong(bits, 6L * mixOutputChannelCounts[i]);
+        }
+      } else {
+        skipBitsLong(bits, 6L * mixOutputConfigCount);
+      }
+      int downmixChannelCount = totalChannelCount;
+      if (embedded6ch) {
+        downmixChannelCount += 6;
+      }
+      if (embeddedStereo) {
+        downmixChannelCount += 2;
+      }
+      for (int i = 0; i < mixOutputConfigCount; i++) {
+        if (mixOutputChannelCounts[i] <= 0) {
+          throw ParserException.createForMalformedContainer(
+              /* message= */ "Invalid DTS-HD mixing configuration", /* cause= */ null);
+        }
+        for (int j = 0; j < downmixChannelCount; j++) {
+          int mixMapMask = bits.readBits(mixOutputChannelCounts[i]);
+          skipBitsLong(bits, Integer.bitCount(mixMapMask) * 6L);
+        }
+      }
+    }
+
+    int codingMode = bits.readBits(2);
+    int extensionMask;
+    switch (codingMode) {
+      case 0:
+        extensionMask = bits.readBits(12);
+        if ((extensionMask & DCA_EXSS_CORE) != 0) {
+          bits.skipBits(14);
+          if (bits.readBit()) {
+            bits.skipBits(2);
+          }
+        }
+        if ((extensionMask & DCA_EXSS_XBR) != 0) {
+          bits.skipBits(14);
+        }
+        if ((extensionMask & DCA_EXSS_XXCH) != 0) {
+          bits.skipBits(14);
+        }
+        if ((extensionMask & DCA_EXSS_X96) != 0) {
+          bits.skipBits(12);
+        }
+        if ((extensionMask & DCA_EXSS_LBR) != 0) {
+          parseDtsHdLbrParameters(bits);
+        }
+        if ((extensionMask & DCA_EXSS_XLL) != 0) {
+          parseDtsHdXllParameters(bits, extensionSubstreamFrameSizeBits);
+        }
+        if ((extensionMask & 0x400) != 0) {
+          bits.skipBits(16);
+        }
+        if ((extensionMask & 0x800) != 0) {
+          bits.skipBits(16);
+        }
+        break;
+      case 1:
+        extensionMask = DCA_EXSS_XLL;
+        parseDtsHdXllParameters(bits, extensionSubstreamFrameSizeBits);
+        break;
+      case 2:
+        extensionMask = DCA_EXSS_LBR;
+        parseDtsHdLbrParameters(bits);
+        break;
+      case 3:
+      default:
+        extensionMask = 0;
+        bits.skipBits(14);
+        bits.skipBits(8);
+        if (bits.readBit()) {
+          bits.skipBits(3);
+        }
+        break;
+    }
+
+    if ((extensionMask & DCA_EXSS_XLL) != 0) {
+      bits.skipBits(3); // DTS-HD stream ID
+    }
+
+    int descriptorEnd = descriptorStart + descriptorSize * 8;
+    if (descriptorEnd > headerSize * 8) {
+      throw ParserException.createForMalformedContainer(
+          /* message= */ "Read past end of DTS-HD asset descriptor", /* cause= */ null);
+    }
+    bits.setPosition(descriptorEnd);
+
+    return new DtsHdAssetInfo(
+        codingMode,
+        extensionMask,
+        (extensionMask & DCA_EXSS_XLL) != 0,
+        (extensionMask & DCA_EXSS_LBR) != 0,
+        (extensionMask & DCA_EXSS_XBR) != 0,
+        (extensionMask & DCA_EXSS_XXCH) != 0,
+        (extensionMask & DCA_EXSS_X96) != 0,
+        maxSampleRate);
+  }
+
+  /**
    * Returns the size of the extension substream header in a DTS-HD frame according to ETSI TS 102
    * 114 V1.6.1 (2019-08), Section 7.5.2.
    *
@@ -746,6 +1011,36 @@ public final class DtsUtil {
       }
     }
     return value + frameBits.readBits(lengths[index]);
+  }
+
+  private static void parseDtsHdLbrParameters(ParsableBitArray bits) {
+    bits.skipBits(14); // size of LBR component
+    if (bits.readBit()) {
+      bits.skipBits(2); // LBR sync distance
+    }
+  }
+
+  private static void parseDtsHdXllParameters(
+      ParsableBitArray bits, int extensionSubstreamFrameSizeBits) {
+    bits.skipBits(extensionSubstreamFrameSizeBits); // size of XLL data
+    if (bits.readBit()) {
+      bits.skipBits(4); // peak bit rate smoothing buffer size
+      int delayBits = bits.readBits(5) + 1;
+      skipBitsLong(bits, delayBits); // XLL decoding delay in frames
+      bits.skipBits(extensionSubstreamFrameSizeBits); // offset to XLL sync
+    }
+  }
+
+  private static int countChannelsForMask(int mask) {
+    return Integer.bitCount((mask & 0xffff) | ((mask & 0xae66) << 16));
+  }
+
+  private static void skipBitsLong(ParsableBitArray bits, long numBits) {
+    while (numBits > 0) {
+      int chunk = (int) Math.min(numBits, Integer.MAX_VALUE);
+      bits.skipBits(chunk);
+      numBits -= chunk;
+    }
   }
 
   private static ParsableBitArray getNormalizedFrame(byte[] frame) {

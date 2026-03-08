@@ -24,6 +24,7 @@ import android.content.Context;
 import android.media.AudioFormat;
 import android.media.AudioManager;
 import android.media.AudioTrack;
+import android.os.SystemClock;
 import androidx.annotation.Nullable;
 import androidx.media3.common.AudioAttributes;
 import androidx.media3.common.C;
@@ -31,6 +32,7 @@ import androidx.media3.common.Format;
 import androidx.media3.common.MimeTypes;
 import androidx.media3.common.ParserException;
 import androidx.media3.common.util.Log;
+import androidx.media3.common.util.ParsableBitArray;
 import androidx.media3.common.util.UnstableApi;
 import androidx.media3.common.util.Util;
 import androidx.media3.extractor.Ac3Util;
@@ -41,6 +43,7 @@ import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.EnumMap;
 import java.util.HashMap;
+import java.util.IdentityHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
@@ -56,6 +59,8 @@ public final class FireOsIec61937AudioOutputProvider extends ForwardingAudioOutp
   private static final String TAG = "FireOsIecProvider";
 
   private static final int IEC61937_PACKET_HEADER_BYTES = 8;
+  private static final int FIRE_OS_OUTPUT_RETRY_DELAY_MS = 200;
+  private static final int FIRE_OS_SMALLER_BUFFER_RETRY_SIZE = 1_000_000;
   private static final int IEC61937_PACKET_SYNC_WORD_1 = 0xF872;
   private static final int IEC61937_PACKET_SYNC_WORD_2 = 0x4E1F;
   private static final int IEC61937_AC3 = 0x01;
@@ -72,6 +77,9 @@ public final class FireOsIec61937AudioOutputProvider extends ForwardingAudioOutp
   private static final int IEC61937_TRUEHD_LENGTH_CODE = 61_424;
   private static final int IEC61937_DTS_CORE_MAX_PACKET_BYTES = 8_192;
   private static final int IEC61937_DTS_HD_MAX_PACKET_BYTES = 65_536;
+  private static final int IEC61937_MULTICHANNEL_RAW_CARRIER_MASK =
+      AudioFormat.CHANNEL_OUT_7POINT1_SURROUND;
+  private static final int SYNTHETIC_PASSTHROUGH_BUFFER_SIZE_BYTES = 256 * 1024;
   private static final int TRUEHD_FORMAT_MAJOR_SYNC = 0xF8726FBA;
   private static final int TRUEHD_MAT_BUFFER_LIMIT = IEC61937_TRUEHD_PACKET_BYTES - 24;
   private static final int TRUEHD_MAT_MIDDLE_POSITION = 30_708 + IEC61937_PACKET_HEADER_BYTES;
@@ -103,8 +111,11 @@ public final class FireOsIec61937AudioOutputProvider extends ForwardingAudioOutp
   private final AudioOutputProvider iecCarrierProvider;
   private final Map<OutputConfig, CarrierPlan> carrierPlans;
   private final Map<IecProbeConfig, Boolean> iecSupportCache;
+  private final Map<EncodedProbeConfig, Boolean> encodedSupportCache;
   private final Map<Integer, CapabilityMatrix> capabilityMatrices;
   private final EnumMap<PackerKind, FallbackMode> fallbackModes;
+  private final Map<ByteBuffer, PreparedEncodedPacket> preparedPackets;
+  @Nullable private FireOsStreamInfo activeStreamInfo;
 
   public FireOsIec61937AudioOutputProvider(Context context) {
     this(
@@ -123,8 +134,36 @@ public final class FireOsIec61937AudioOutputProvider extends ForwardingAudioOutp
     this.iecCarrierProvider = iecCarrierProvider;
     this.carrierPlans = new HashMap<>();
     this.iecSupportCache = new HashMap<>();
+    this.encodedSupportCache = new HashMap<>();
     this.capabilityMatrices = new HashMap<>();
     this.fallbackModes = new EnumMap<>(PackerKind.class);
+    this.preparedPackets = new IdentityHashMap<>();
+    this.activeStreamInfo = null;
+  }
+
+  @Override
+  public FormatSupport getFormatSupport(FormatConfig formatConfig) {
+    FormatSupport passthroughSupport = passthroughProvider.getFormatSupport(formatConfig);
+    @Nullable PackerKind kind = getPackerKind(formatConfig.format);
+    if (kind == null) {
+      return passthroughSupport;
+    }
+    @Nullable CarrierPlan carrierPlan =
+        maybeCreateCarrierPlan(
+            formatConfig.format,
+            buildLogicalPassthroughOutputConfig(
+                formatConfig,
+                /* preferWrappedConfig= */ false,
+                getActiveStreamInfo(formatConfig.format)));
+    if (carrierPlan == null) {
+      return passthroughSupport;
+    }
+    return passthroughSupport.buildUpon()
+        .setFormatSupportLevel(FORMAT_SUPPORTED_DIRECTLY)
+        .setIsFormatSupportedForOffload(false)
+        .setIsGaplessSupportedForOffload(false)
+        .setIsSpeedChangeSupportedForOffload(false)
+        .build();
   }
 
   @Override
@@ -134,17 +173,41 @@ public final class FireOsIec61937AudioOutputProvider extends ForwardingAudioOutp
       @Nullable FallbackMode fallbackMode = fallbackModes.get(kind);
       if (fallbackMode == FallbackMode.RAW_PASSTHROUGH) {
         Log.w(TAG, "IEC packer disabled after recoverable failure for " + kind);
-        return passthroughProvider.getOutputConfig(formatConfig);
+        return getPassthroughOutputConfigWithFireOsQuirks(formatConfig);
       }
       if (fallbackMode == FallbackMode.DTS_CORE_RAW) {
         Log.w(TAG, "Falling back to raw DTS core after IEC failure");
-        return passthroughProvider.getOutputConfig(copyFormatConfig(formatConfig, downgradeToDtsCore(formatConfig.format)));
+        return getPassthroughOutputConfigWithFireOsQuirks(
+            copyFormatConfig(formatConfig, downgradeToDtsCore(formatConfig.format)));
       }
     }
 
-    OutputConfig passthroughConfig = passthroughProvider.getOutputConfig(formatConfig);
+    OutputConfig passthroughConfig;
+    boolean usedSyntheticLogicalConfig = false;
+    try {
+      passthroughConfig = getPassthroughOutputConfigWithFireOsQuirks(formatConfig);
+    } catch (ConfigurationException e) {
+      if (kind == null) {
+        throw e;
+      }
+      Log.w(
+          TAG,
+          "Falling back to synthetic logical passthrough config for "
+              + formatConfig.format.sampleMimeType,
+          e);
+      passthroughConfig =
+          buildLogicalPassthroughOutputConfig(
+              formatConfig,
+              /* preferWrappedConfig= */ false,
+              getActiveStreamInfo(formatConfig.format));
+      usedSyntheticLogicalConfig = true;
+    }
     @Nullable CarrierPlan plan = maybeCreateCarrierPlan(formatConfig.format, passthroughConfig);
     if (plan == null) {
+      if (usedSyntheticLogicalConfig) {
+        throw new ConfigurationException(
+            "Unable to configure Fire OS IEC carrier for: " + formatConfig.format);
+      }
       return passthroughConfig;
     }
     carrierPlans.put(passthroughConfig, plan);
@@ -168,20 +231,26 @@ public final class FireOsIec61937AudioOutputProvider extends ForwardingAudioOutp
   public AudioOutput getAudioOutput(OutputConfig config) throws InitializationException {
     @Nullable CarrierPlan plan = carrierPlans.get(config);
     if (plan == null) {
-      return passthroughProvider.getAudioOutput(config);
+      return getAudioOutputWithRetry(passthroughProvider, config);
     }
     try {
-      AudioOutput carrierOutput = iecCarrierProvider.getAudioOutput(plan.carrierConfig);
-      return new FireOsIec61937AudioOutput(carrierOutput, plan.kind, plan.packer, this);
+      AudioOutput carrierOutput = getAudioOutputWithRetry(iecCarrierProvider, plan.carrierConfig);
+      return new FireOsIec61937AudioOutput(
+          carrierOutput, plan.kind, plan.normalizer, plan.packer, this);
     } catch (InitializationException e) {
       @Nullable CarrierPlan fallbackPlan = maybeCreateStereoCarrierFallback(plan);
       if (fallbackPlan != null) {
         carrierPlans.put(config, fallbackPlan);
         try {
-          AudioOutput carrierOutput = iecCarrierProvider.getAudioOutput(fallbackPlan.carrierConfig);
+          AudioOutput carrierOutput =
+              getAudioOutputWithRetry(iecCarrierProvider, fallbackPlan.carrierConfig);
           requestFallback(plan.kind, /* multichannelCarrierFailed= */ true);
           return new FireOsIec61937AudioOutput(
-              carrierOutput, fallbackPlan.kind, fallbackPlan.packer, this);
+              carrierOutput,
+              fallbackPlan.kind,
+              fallbackPlan.normalizer,
+              fallbackPlan.packer,
+              this);
         } catch (InitializationException ignored) {
           // Fall through to normal fallback handling below.
         }
@@ -197,6 +266,9 @@ public final class FireOsIec61937AudioOutputProvider extends ForwardingAudioOutp
       newMode = FallbackMode.STEREO_IEC;
     } else if (kind == PackerKind.DTS_HD) {
       newMode = FallbackMode.DTS_CORE_RAW;
+    } else if ((kind == PackerKind.AC3 || kind == PackerKind.E_AC3)
+        && !supportsRawPassthrough(kind)) {
+      newMode = FallbackMode.STEREO_IEC;
     } else {
       newMode = FallbackMode.RAW_PASSTHROUGH;
     }
@@ -219,6 +291,7 @@ public final class FireOsIec61937AudioOutputProvider extends ForwardingAudioOutp
     if (sampleMimeType == null || passthroughConfig.isOffload || passthroughConfig.isTunneling) {
       return null;
     }
+    @Nullable FireOsStreamInfo streamInfo = getActiveStreamInfo(format);
     @Nullable PackerKind kind = getPackerKind(format);
     @Nullable FallbackMode fallbackMode = kind != null ? fallbackModes.get(kind) : null;
     CapabilityMatrix capabilityMatrix = getCapabilityMatrix(passthroughConfig.channelMask);
@@ -228,7 +301,10 @@ public final class FireOsIec61937AudioOutputProvider extends ForwardingAudioOutp
         return null;
       }
       return buildCarrierPlanIfSupported(
-          PackerKind.AC3, new Ac3IecPacker(inputSampleRateHz), passthroughConfig);
+          PackerKind.AC3,
+          new Ac3BufferNormalizer(inputSampleRateHz, /* expectEac3= */ false),
+          new Ac3IecPacker(inputSampleRateHz),
+          passthroughConfig);
     }
     if (MimeTypes.AUDIO_E_AC3.equals(sampleMimeType)
         || MimeTypes.AUDIO_E_AC3_JOC.equals(sampleMimeType)) {
@@ -236,32 +312,58 @@ public final class FireOsIec61937AudioOutputProvider extends ForwardingAudioOutp
         return null;
       }
       return buildCarrierPlanIfSupported(
-          PackerKind.E_AC3, new EAc3IecPacker(inputSampleRateHz), passthroughConfig);
+          PackerKind.E_AC3,
+          new Ac3BufferNormalizer(inputSampleRateHz, /* expectEac3= */ true),
+          new EAc3IecPacker(inputSampleRateHz),
+          passthroughConfig);
     }
     if (MimeTypes.AUDIO_DTS.equals(sampleMimeType)) {
-      if (!capabilityMatrix.supportsStereoCarrier(48_000, this)) {
+      if (!capabilityMatrix.supportsStereoCarrier(inputSampleRateHz, this)) {
         return null;
       }
       return buildCarrierPlanIfSupported(
-          PackerKind.DTS_CORE, new DtsCoreIecPacker(), passthroughConfig);
+          PackerKind.DTS_CORE,
+          new DtsBufferNormalizer(inputSampleRateHz, /* hd= */ false),
+          new DtsCoreIecPacker(inputSampleRateHz),
+          passthroughConfig);
     }
     if (MimeTypes.AUDIO_DTS_HD.equals(sampleMimeType)
         || MimeTypes.AUDIO_DTS_X.equals(sampleMimeType)
         || MimeTypes.AUDIO_DTS_EXPRESS.equals(sampleMimeType)) {
+      if (streamInfo != null
+          && (streamInfo.dtsStreamType == FireOsStreamInfo.DtsStreamType.DTS_512
+              || streamInfo.dtsStreamType == FireOsStreamInfo.DtsStreamType.DTS_1024
+              || streamInfo.dtsStreamType == FireOsStreamInfo.DtsStreamType.DTS_2048
+              || streamInfo.dtsStreamType == FireOsStreamInfo.DtsStreamType.DTSHD_CORE)) {
+        if (!capabilityMatrix.supportsStereoCarrier(streamInfo.outputRateHz, this)) {
+          return null;
+        }
+        return buildCarrierPlanIfSupported(
+            PackerKind.DTS_CORE,
+            new DtsBufferNormalizer(inputSampleRateHz, /* hd= */ true),
+            new DtsCoreIecPacker(inputSampleRateHz),
+            passthroughConfig);
+      }
+      int dtsCarrierRateHz =
+          streamInfo != null && streamInfo.outputRateHz != Format.NO_VALUE
+              ? streamInfo.outputRateHz
+              : IEC61937_DTS_HD_CARRIER_RATE_HZ;
       boolean keepMultichannelCarrier =
-          capabilityMatrix.supportsMultichannelCarrier(IEC61937_DTS_HD_CARRIER_RATE_HZ, this)
-              && shouldUseMultichannelDtsHdCarrier(format, passthroughConfig.channelMask);
+          capabilityMatrix.supportsMultichannelCarrier(dtsCarrierRateHz, this)
+              && shouldUseMultichannelDtsHdCarrier(format, passthroughConfig.channelMask, streamInfo);
       if (fallbackMode == FallbackMode.STEREO_IEC) {
         keepMultichannelCarrier = false;
       }
-      if (!capabilityMatrix.supportsStereoCarrier(IEC61937_DTS_HD_CARRIER_RATE_HZ, this)) {
+      if (!capabilityMatrix.supportsStereoCarrier(dtsCarrierRateHz, this)) {
         return null;
       }
       return buildCarrierPlanIfSupported(
           PackerKind.DTS_HD,
+          new DtsBufferNormalizer(inputSampleRateHz, /* hd= */ true),
           new DtsHdIecPacker(
               inputSampleRateHz,
-              keepMultichannelCarrier),
+              keepMultichannelCarrier,
+              streamInfo != null ? streamInfo.dtsPeriodFrames : C.LENGTH_UNSET),
           passthroughConfig);
     }
     if (MimeTypes.AUDIO_TRUEHD.equals(sampleMimeType)) {
@@ -271,12 +373,14 @@ public final class FireOsIec61937AudioOutputProvider extends ForwardingAudioOutp
       }
       boolean keepMultichannelCarrier =
           capabilityMatrix.supportsMultichannelCarrier(carrierRateHz, this)
-              && shouldUseMultichannelTrueHdCarrier(inputSampleRateHz, passthroughConfig.channelMask);
+              && shouldUseMultichannelTrueHdCarrier(
+                  inputSampleRateHz, passthroughConfig.channelMask, streamInfo);
       if (fallbackMode == FallbackMode.STEREO_IEC) {
         keepMultichannelCarrier = false;
       }
       return buildCarrierPlanIfSupported(
           PackerKind.TRUEHD,
+          new TrueHdBufferNormalizer(inputSampleRateHz),
           new TrueHdIecPacker(
               inputSampleRateHz,
               keepMultichannelCarrier),
@@ -285,37 +389,56 @@ public final class FireOsIec61937AudioOutputProvider extends ForwardingAudioOutp
     return null;
   }
 
-  private boolean shouldUseMultichannelDtsHdCarrier(Format format, int passthroughChannelMask) {
-    if (!looksLikeDtsHdMa(format) || passthroughChannelMask == AudioFormat.CHANNEL_OUT_STEREO) {
+  private boolean shouldUseMultichannelDtsHdCarrier(
+      Format format,
+      int passthroughChannelMask,
+      @Nullable FireOsStreamInfo streamInfo) {
+    if (streamInfo != null) {
+      if (!streamInfo.preferMultichannelIecCarrier
+          || passthroughChannelMask == AudioFormat.CHANNEL_OUT_STEREO) {
+        return false;
+      }
+      return supportsIec61937Config(
+          streamInfo.outputRateHz, IEC61937_MULTICHANNEL_RAW_CARRIER_MASK);
+    }
+    @Nullable String sampleMimeType = format.sampleMimeType;
+    if (!MimeTypes.AUDIO_DTS_X.equals(sampleMimeType)
+        || passthroughChannelMask == AudioFormat.CHANNEL_OUT_STEREO) {
       return false;
     }
-    if (!supportsIec61937Config(IEC61937_DTS_HD_CARRIER_RATE_HZ, passthroughChannelMask)) {
+    if (!supportsIec61937Config(
+        IEC61937_DTS_HD_CARRIER_RATE_HZ, IEC61937_MULTICHANNEL_RAW_CARRIER_MASK)) {
       Log.w(
           TAG,
           "Falling back to stereo IEC carrier for DTS-HD; multichannel IEC config unsupported"
               + " codecs="
               + format.codecs
               + " channelMask="
-              + passthroughChannelMask);
+              + IEC61937_MULTICHANNEL_RAW_CARRIER_MASK);
       return false;
     }
     return true;
   }
 
   private boolean shouldUseMultichannelTrueHdCarrier(
-      int inputSampleRateHz, int passthroughChannelMask) {
+      int inputSampleRateHz,
+      int passthroughChannelMask,
+      @Nullable FireOsStreamInfo streamInfo) {
+    if (streamInfo != null && !streamInfo.preferMultichannelIecCarrier) {
+      return false;
+    }
     if (passthroughChannelMask == AudioFormat.CHANNEL_OUT_STEREO) {
       return false;
     }
     int carrierRateHz = getTrueHdCarrierRateHz(inputSampleRateHz);
-    if (!supportsIec61937Config(carrierRateHz, passthroughChannelMask)) {
+    if (!supportsIec61937Config(carrierRateHz, IEC61937_MULTICHANNEL_RAW_CARRIER_MASK)) {
       Log.w(
           TAG,
           "Falling back to stereo IEC carrier for TrueHD; multichannel IEC config unsupported"
               + " sampleRate="
               + carrierRateHz
               + " channelMask="
-              + passthroughChannelMask);
+              + IEC61937_MULTICHANNEL_RAW_CARRIER_MASK);
       return false;
     }
     return true;
@@ -332,6 +455,17 @@ public final class FireOsIec61937AudioOutputProvider extends ForwardingAudioOutp
     return supported;
   }
 
+  private boolean supportsEncodedConfig(int sampleRateHz, int channelMask, int encoding) {
+    EncodedProbeConfig probeConfig = new EncodedProbeConfig(sampleRateHz, channelMask, encoding);
+    @Nullable Boolean cached = encodedSupportCache.get(probeConfig);
+    if (cached != null) {
+      return cached;
+    }
+    boolean supported = verifyEncodedTrack(sampleRateHz, channelMask, encoding);
+    encodedSupportCache.put(probeConfig, supported);
+    return supported;
+  }
+
   private CapabilityMatrix getCapabilityMatrix(int passthroughChannelMask) {
     Integer key = passthroughChannelMask;
     @Nullable CapabilityMatrix cached = capabilityMatrices.get(key);
@@ -343,10 +477,11 @@ public final class FireOsIec61937AudioOutputProvider extends ForwardingAudioOutp
             supportsIec61937Config(48_000, AudioFormat.CHANNEL_OUT_STEREO),
             supportsIec61937Config(192_000, AudioFormat.CHANNEL_OUT_STEREO),
             supportsIec61937Config(176_400, AudioFormat.CHANNEL_OUT_STEREO),
-            passthroughChannelMask != AudioFormat.CHANNEL_OUT_STEREO
-                && supportsIec61937Config(192_000, passthroughChannelMask),
-            passthroughChannelMask != AudioFormat.CHANNEL_OUT_STEREO
-                && supportsIec61937Config(176_400, passthroughChannelMask));
+            supportsEncodedConfig(48_000, AudioFormat.CHANNEL_OUT_STEREO, AudioFormat.ENCODING_AC3),
+            supportsEncodedConfig(
+                48_000, AudioFormat.CHANNEL_OUT_STEREO, AudioFormat.ENCODING_E_AC3),
+            supportsIec61937Config(192_000, IEC61937_MULTICHANNEL_RAW_CARRIER_MASK),
+            supportsIec61937Config(176_400, IEC61937_MULTICHANNEL_RAW_CARRIER_MASK));
     capabilityMatrices.put(key, created);
     Log.i(
         TAG,
@@ -357,18 +492,353 @@ public final class FireOsIec61937AudioOutputProvider extends ForwardingAudioOutp
             + created.stereo192Supported
             + " stereo176="
             + created.stereo176Supported
+            + " rawAc3="
+            + created.rawAc3Supported
+            + " rawEac3="
+            + created.rawEac3Supported
             + " multi192="
             + created.multichannel192Supported
             + " multi176="
             + created.multichannel176Supported
             + " channelMask="
-            + passthroughChannelMask);
+            + passthroughChannelMask
+            + " rawCarrierMask="
+            + IEC61937_MULTICHANNEL_RAW_CARRIER_MASK);
     return created;
+  }
+
+  /* package */ @Nullable BufferMetadata inspectEncodedBuffer(
+      Format format, ByteBuffer buffer, int encodedAccessUnitCount) {
+    @Nullable PreparedEncodedPacket preparedPacket = peekPreparedPacket(buffer);
+    if (preparedPacket != null && preparedPacket.encodedAccessUnitCount == encodedAccessUnitCount) {
+      return preparedPacket.metadata;
+    }
+    @Nullable PreparedEncodedPacket freshlyPrepared =
+        prepareEncodedPacket(format, buffer, encodedAccessUnitCount);
+    return freshlyPrepared != null ? freshlyPrepared.metadata : null;
+  }
+
+  /* package */ @Nullable PreparedEncodedPacket prepareEncodedPacket(
+      Format format, ByteBuffer buffer, int encodedAccessUnitCount) {
+    @Nullable EncodedBufferNormalizer normalizer = maybeCreateNormalizer(format);
+    @Nullable PackerKind kind = getPackerKind(format);
+    if (normalizer == null || kind == null) {
+      return null;
+    }
+    NormalizedPacketBatch batch = normalizer.normalize(buffer.duplicate(), encodedAccessUnitCount);
+    FireOsStreamInfo streamInfo = deriveStreamInfo(format, batch);
+    PackerKind effectiveKind = getEffectivePackerKind(kind, streamInfo);
+    return new PreparedEncodedPacket(
+        new BufferMetadata(
+            effectiveKind,
+            batch.accessUnits.size(),
+            getTotalFrames(batch.accessUnits),
+            format.sampleRate != Format.NO_VALUE ? format.sampleRate : 48_000,
+            streamInfo),
+        batch,
+        encodedAccessUnitCount);
+  }
+
+  private static PackerKind getEffectivePackerKind(
+      PackerKind detectedKind, FireOsStreamInfo streamInfo) {
+    if (streamInfo.family != FireOsStreamInfo.StreamFamily.DTS) {
+      return detectedKind;
+    }
+    switch (streamInfo.dtsStreamType) {
+      case DTS_512:
+      case DTS_1024:
+      case DTS_2048:
+      case DTSHD_CORE:
+        return PackerKind.DTS_CORE;
+      case DTSHD:
+      case DTSHD_MA:
+        return PackerKind.DTS_HD;
+      case NONE:
+      case UNKNOWN:
+      default:
+        return detectedKind;
+    }
+  }
+
+  /* package */ synchronized void updateStreamInfo(Format format, FireOsStreamInfo streamInfo) {
+    if (streamInfo.matchesFormat(format)) {
+      activeStreamInfo = streamInfo;
+    }
+  }
+
+  /* package */ synchronized void resetSessionState() {
+    activeStreamInfo = null;
+    fallbackModes.clear();
+    clearPreparedPackets();
+  }
+
+  /* package */ synchronized void registerPreparedPacket(
+      ByteBuffer buffer, PreparedEncodedPacket preparedPacket) {
+    preparedPackets.put(buffer, preparedPacket);
+  }
+
+  /* package */ synchronized void discardPreparedPacket(ByteBuffer buffer) {
+    preparedPackets.remove(buffer);
+  }
+
+  /* package */ synchronized void clearPreparedPackets() {
+    preparedPackets.clear();
+  }
+
+  private synchronized @Nullable PreparedEncodedPacket peekPreparedPacket(ByteBuffer buffer) {
+    return preparedPackets.get(buffer);
+  }
+
+  private synchronized @Nullable PreparedEncodedPacket consumePreparedPacket(ByteBuffer buffer) {
+    return preparedPackets.remove(buffer);
+  }
+
+  private synchronized @Nullable FireOsStreamInfo getActiveStreamInfo(Format format) {
+    return activeStreamInfo != null && activeStreamInfo.matchesFormat(format) ? activeStreamInfo : null;
+  }
+
+  private static int getTotalFrames(List<NormalizedAccessUnit> accessUnits) {
+    int totalFrames = 0;
+    for (NormalizedAccessUnit accessUnit : accessUnits) {
+      totalFrames += max(accessUnit.sampleCount, 0);
+    }
+    return totalFrames;
+  }
+
+  /* package */ String getCapabilitySummary(int channelMask) {
+    CapabilityMatrix matrix = getCapabilityMatrix(channelMask);
+    return "stereo48="
+        + matrix.stereo48Supported
+        + ",stereo192="
+        + matrix.stereo192Supported
+        + ",stereo176="
+        + matrix.stereo176Supported
+        + ",rawAc3="
+        + matrix.rawAc3Supported
+        + ",rawEac3="
+        + matrix.rawEac3Supported
+        + ",multi192="
+        + matrix.multichannel192Supported
+        + ",multi176="
+        + matrix.multichannel176Supported;
+  }
+
+  private OutputConfig getPassthroughOutputConfigWithFireOsQuirks(FormatConfig formatConfig)
+      throws ConfigurationException {
+    FormatConfig effectiveConfig = maybeApplyRawFireOsQuirk(formatConfig);
+    return passthroughProvider.getOutputConfig(effectiveConfig);
+  }
+
+  private OutputConfig buildLogicalPassthroughOutputConfig(
+      FormatConfig formatConfig,
+      boolean preferWrappedConfig,
+      @Nullable FireOsStreamInfo streamInfo) {
+    if (preferWrappedConfig) {
+      try {
+        return getPassthroughOutputConfigWithFireOsQuirks(formatConfig);
+      } catch (ConfigurationException e) {
+        throw new IllegalStateException("Wrapped passthrough config unexpectedly unavailable", e);
+      }
+    }
+    return new OutputConfig.Builder()
+        .setEncoding(
+            MimeTypes.getEncoding(
+                checkNotNull(formatConfig.format.sampleMimeType), formatConfig.format.codecs))
+        .setSampleRate(
+            formatConfig.format.sampleRate != Format.NO_VALUE ? formatConfig.format.sampleRate : 48_000)
+        .setChannelMask(getLogicalPassthroughChannelMask(formatConfig.format, streamInfo))
+        .setBufferSize(
+            formatConfig.preferredBufferSize != C.LENGTH_UNSET
+                ? formatConfig.preferredBufferSize
+                : SYNTHETIC_PASSTHROUGH_BUFFER_SIZE_BYTES)
+        .setAudioAttributes(formatConfig.audioAttributes)
+        .setAudioSessionId(formatConfig.audioSessionId)
+        .setVirtualDeviceId(formatConfig.virtualDeviceId)
+        .setIsTunneling(formatConfig.enableTunneling)
+        .setEncapsulationMode(AudioTrack.ENCAPSULATION_MODE_NONE)
+        .setIsOffload(false)
+        .setUsePlaybackParameters(formatConfig.enablePlaybackParameters)
+        .setUseOffloadGapless(false)
+        .build();
+  }
+
+  private static int getLogicalPassthroughChannelMask(
+      Format format, @Nullable FireOsStreamInfo streamInfo) {
+    if (streamInfo != null) {
+      return streamInfo.logicalPassthroughChannelMask;
+    }
+    @Nullable String sampleMimeType = format.sampleMimeType;
+    if (MimeTypes.AUDIO_TRUEHD.equals(sampleMimeType)) {
+      return IEC61937_MULTICHANNEL_RAW_CARRIER_MASK;
+    }
+    if (MimeTypes.AUDIO_DTS_X.equals(sampleMimeType)) {
+      return IEC61937_MULTICHANNEL_RAW_CARRIER_MASK;
+    }
+    if (MimeTypes.AUDIO_DTS_HD.equals(sampleMimeType)) {
+      return AudioFormat.CHANNEL_OUT_STEREO;
+    }
+    if (MimeTypes.AUDIO_DTS_EXPRESS.equals(sampleMimeType)) {
+      return AudioFormat.CHANNEL_OUT_STEREO;
+    }
+    if (MimeTypes.AUDIO_AC3.equals(sampleMimeType)
+        || MimeTypes.AUDIO_E_AC3.equals(sampleMimeType)
+        || MimeTypes.AUDIO_E_AC3_JOC.equals(sampleMimeType)
+        || MimeTypes.AUDIO_DTS.equals(sampleMimeType)) {
+      return AudioFormat.CHANNEL_OUT_STEREO;
+    }
+    int channelCount = format.channelCount;
+    if (channelCount == Format.NO_VALUE) {
+      return AudioFormat.CHANNEL_OUT_STEREO;
+    }
+    if (channelCount > 6) {
+      return IEC61937_MULTICHANNEL_RAW_CARRIER_MASK;
+    }
+    if (channelCount > 2) {
+      return AudioFormat.CHANNEL_OUT_5POINT1;
+    }
+    return AudioFormat.CHANNEL_OUT_STEREO;
+  }
+
+  private FireOsStreamInfo deriveStreamInfo(Format format, NormalizedPacketBatch batch) {
+    @Nullable String sampleMimeType = format.sampleMimeType;
+    int inputSampleRateHz = format.sampleRate != Format.NO_VALUE ? format.sampleRate : 48_000;
+    int inputChannelCount = format.channelCount != Format.NO_VALUE ? format.channelCount : 2;
+    if (MimeTypes.AUDIO_AC3.equals(sampleMimeType)
+        || MimeTypes.AUDIO_E_AC3.equals(sampleMimeType)
+        || MimeTypes.AUDIO_E_AC3_JOC.equals(sampleMimeType)) {
+      return FireOsStreamInfo.createForAc3Family(sampleMimeType, inputSampleRateHz, inputChannelCount);
+    }
+    if (MimeTypes.AUDIO_TRUEHD.equals(sampleMimeType)) {
+      return FireOsStreamInfo.createForTrueHd(inputSampleRateHz, inputChannelCount);
+    }
+    if (MimeTypes.AUDIO_DTS.equals(sampleMimeType)
+        || MimeTypes.AUDIO_DTS_HD.equals(sampleMimeType)
+        || MimeTypes.AUDIO_DTS_X.equals(sampleMimeType)
+        || MimeTypes.AUDIO_DTS_EXPRESS.equals(sampleMimeType)) {
+      NormalizedAccessUnit accessUnit =
+          batch.accessUnits.isEmpty() ? null : batch.accessUnits.get(0);
+      if (accessUnit == null) {
+        return FireOsStreamInfo.createForUnknown(sampleMimeType);
+      }
+      return FireOsDtsClassifier.classify(
+          format,
+          accessUnit.data,
+          accessUnit.sampleCount,
+          accessUnit.repetitionPeriodFrames,
+          accessUnit.inputSampleRateHz,
+          format.channelCount != Format.NO_VALUE
+              ? format.channelCount
+              : (accessUnit.dtsUhdHeader != null
+                  ? accessUnit.dtsUhdHeader.channelCount
+                  : (accessUnit.dtsHdHeader != null
+                      ? accessUnit.dtsHdHeader.channelCount
+                      : 2)),
+          getPreviousDtsStreamType(format),
+          accessUnit.dtsHdHeader,
+          accessUnit.dtsUhdHeader);
+    }
+    return FireOsStreamInfo.createForUnknown(sampleMimeType);
+  }
+
+  private FireOsStreamInfo.DtsStreamType getPreviousDtsStreamType(Format format) {
+    @Nullable FireOsStreamInfo previousStreamInfo = getActiveStreamInfo(format);
+    if (previousStreamInfo == null || previousStreamInfo.family != FireOsStreamInfo.StreamFamily.DTS) {
+      return FireOsStreamInfo.DtsStreamType.NONE;
+    }
+    return previousStreamInfo.dtsStreamType;
+  }
+
+  private FormatConfig maybeApplyRawFireOsQuirk(FormatConfig formatConfig) {
+    @Nullable String sampleMimeType = formatConfig.format.sampleMimeType;
+    if (!MimeTypes.AUDIO_AC3.equals(sampleMimeType)) {
+      return formatConfig;
+    }
+    CapabilityMatrix capabilityMatrix =
+        getCapabilityMatrix(Util.getAudioTrackChannelConfig(formatConfig.format.channelCount));
+    if (capabilityMatrix.rawAc3Supported || !capabilityMatrix.rawEac3Supported) {
+      return formatConfig;
+    }
+    Log.w(TAG, "Using Fire OS AC3->E-AC3 raw quirk fallback");
+    return copyFormatConfig(
+        formatConfig,
+        formatConfig.format.buildUpon().setSampleMimeType(MimeTypes.AUDIO_E_AC3).setCodecs(null).build());
+  }
+
+  private boolean supportsRawPassthrough(PackerKind kind) {
+    CapabilityMatrix capabilityMatrix = getCapabilityMatrix(AudioFormat.CHANNEL_OUT_STEREO);
+    switch (kind) {
+      case AC3:
+        return capabilityMatrix.rawAc3Supported || capabilityMatrix.rawEac3Supported;
+      case E_AC3:
+        return capabilityMatrix.rawEac3Supported;
+      default:
+        return true;
+    }
+  }
+
+  private AudioOutput getAudioOutputWithRetry(AudioOutputProvider provider, OutputConfig config)
+      throws InitializationException {
+    try {
+      return provider.getAudioOutput(config);
+    } catch (InitializationException firstFailure) {
+      sleepQuietly(FIRE_OS_OUTPUT_RETRY_DELAY_MS);
+      try {
+        return provider.getAudioOutput(config);
+      } catch (InitializationException retryFailure) {
+        firstFailure.addSuppressed(retryFailure);
+      }
+      if (config.bufferSize > FIRE_OS_SMALLER_BUFFER_RETRY_SIZE) {
+        OutputConfig smallerConfig =
+            config.buildUpon().setBufferSize(FIRE_OS_SMALLER_BUFFER_RETRY_SIZE).build();
+        try {
+          return provider.getAudioOutput(smallerConfig);
+        } catch (InitializationException smallerFailure) {
+          firstFailure.addSuppressed(smallerFailure);
+        }
+      }
+      throw firstFailure;
+    }
+  }
+
+  @Nullable
+  private EncodedBufferNormalizer maybeCreateNormalizer(Format format) {
+    @Nullable String sampleMimeType = format.sampleMimeType;
+    int inputSampleRateHz = format.sampleRate != Format.NO_VALUE ? format.sampleRate : 48_000;
+    if (MimeTypes.AUDIO_AC3.equals(sampleMimeType)) {
+      return new Ac3BufferNormalizer(inputSampleRateHz, /* expectEac3= */ false);
+    }
+    if (MimeTypes.AUDIO_E_AC3.equals(sampleMimeType)
+        || MimeTypes.AUDIO_E_AC3_JOC.equals(sampleMimeType)) {
+      return new Ac3BufferNormalizer(inputSampleRateHz, /* expectEac3= */ true);
+    }
+    if (MimeTypes.AUDIO_DTS.equals(sampleMimeType)) {
+      return new DtsBufferNormalizer(inputSampleRateHz, /* hd= */ false);
+    }
+    if (MimeTypes.AUDIO_DTS_HD.equals(sampleMimeType)
+        || MimeTypes.AUDIO_DTS_EXPRESS.equals(sampleMimeType)
+        || MimeTypes.AUDIO_DTS_X.equals(sampleMimeType)) {
+      return new DtsBufferNormalizer(inputSampleRateHz, /* hd= */ true);
+    }
+    if (MimeTypes.AUDIO_TRUEHD.equals(sampleMimeType)) {
+      return new TrueHdBufferNormalizer(inputSampleRateHz);
+    }
+    return null;
+  }
+
+  private static void sleepQuietly(int millis) {
+    try {
+      Thread.sleep(millis);
+    } catch (InterruptedException e) {
+      Thread.currentThread().interrupt();
+    }
   }
 
   @Nullable
   private CarrierPlan buildCarrierPlanIfSupported(
-      PackerKind kind, IecPacker packer, OutputConfig passthroughConfig) {
+      PackerKind kind,
+      EncodedBufferNormalizer normalizer,
+      IecPacker packer,
+      OutputConfig passthroughConfig) {
     int carrierChannelMask = packer.getCarrierChannelMask(passthroughConfig.channelMask);
     if (!supportsIec61937Config(packer.getCarrierSampleRateHz(), carrierChannelMask)) {
       Log.w(
@@ -400,7 +870,7 @@ public final class FireOsIec61937AudioOutputProvider extends ForwardingAudioOutp
             .setEncapsulationMode(AudioTrack.ENCAPSULATION_MODE_NONE)
             .setBufferSize(bufferSize)
             .build();
-    return new CarrierPlan(kind, packer, passthroughConfig, carrierConfig);
+    return new CarrierPlan(kind, normalizer, packer, passthroughConfig, carrierConfig);
   }
 
   @Nullable
@@ -412,7 +882,8 @@ public final class FireOsIec61937AudioOutputProvider extends ForwardingAudioOutp
     if (stereoPacker == plan.packer) {
       return null;
     }
-    return buildCarrierPlanIfSupported(plan.kind, stereoPacker, plan.passthroughConfig);
+    return buildCarrierPlanIfSupported(
+        plan.kind, plan.normalizer, stereoPacker, plan.passthroughConfig);
   }
 
   private static FormatConfig copyFormatConfig(FormatConfig formatConfig, Format format) {
@@ -431,18 +902,6 @@ public final class FireOsIec61937AudioOutputProvider extends ForwardingAudioOutp
 
   private static Format downgradeToDtsCore(Format format) {
     return format.buildUpon().setSampleMimeType(MimeTypes.AUDIO_DTS).setCodecs(null).build();
-  }
-
-  private static boolean looksLikeDtsHdMa(Format format) {
-    @Nullable String codecs = format.codecs;
-    if (codecs == null) {
-      return false;
-    }
-    String normalizedCodecs = codecs.toLowerCase();
-    return normalizedCodecs.contains("dtsl")
-        || normalizedCodecs.contains("dtsma")
-        || normalizedCodecs.contains("dts-hd ma")
-        || normalizedCodecs.contains("dts_hd_ma");
   }
 
   private boolean verifyIec61937Track(int sampleRateHz, int channelMask) {
@@ -485,6 +944,45 @@ public final class FireOsIec61937AudioOutputProvider extends ForwardingAudioOutp
     }
   }
 
+  private boolean verifyEncodedTrack(int sampleRateHz, int channelMask, int encoding) {
+    int minBufferSize = AudioTrack.getMinBufferSize(sampleRateHz, channelMask, encoding);
+    if (minBufferSize <= 0) {
+      return false;
+    }
+    AudioTrack audioTrack = null;
+    try {
+      AudioFormat format =
+          new AudioFormat.Builder()
+              .setSampleRate(sampleRateHz)
+              .setChannelMask(channelMask)
+              .setEncoding(encoding)
+              .build();
+      android.media.AudioAttributes attributes =
+          new android.media.AudioAttributes.Builder()
+              .setContentType(android.media.AudioAttributes.CONTENT_TYPE_MOVIE)
+              .setUsage(android.media.AudioAttributes.USAGE_MEDIA)
+              .build();
+      audioTrack =
+          new AudioTrack(
+              attributes,
+              format,
+              max(minBufferSize, 16 * 1024),
+              AudioTrack.MODE_STREAM,
+              AudioManager.AUDIO_SESSION_ID_GENERATE);
+      return audioTrack.getState() == AudioTrack.STATE_INITIALIZED;
+    } catch (IllegalArgumentException | UnsupportedOperationException e) {
+      return false;
+    } finally {
+      if (audioTrack != null) {
+        try {
+          audioTrack.release();
+        } catch (RuntimeException e) {
+          Log.w(TAG, "Failed releasing encoded probe track", e);
+        }
+      }
+    }
+  }
+
   @Nullable
   private static PackerKind getPackerKind(Format format) {
     @Nullable String sampleMimeType = format.sampleMimeType;
@@ -493,6 +991,13 @@ public final class FireOsIec61937AudioOutputProvider extends ForwardingAudioOutp
     }
     if (MimeTypes.AUDIO_DTS.equals(sampleMimeType)) {
       return PackerKind.DTS_CORE;
+    }
+    if (MimeTypes.AUDIO_AC3.equals(sampleMimeType)) {
+      return PackerKind.AC3;
+    }
+    if (MimeTypes.AUDIO_E_AC3.equals(sampleMimeType)
+        || MimeTypes.AUDIO_E_AC3_JOC.equals(sampleMimeType)) {
+      return PackerKind.E_AC3;
     }
     if (MimeTypes.AUDIO_DTS_HD.equals(sampleMimeType)
         || MimeTypes.AUDIO_DTS_X.equals(sampleMimeType)
@@ -550,6 +1055,8 @@ public final class FireOsIec61937AudioOutputProvider extends ForwardingAudioOutp
     public final boolean stereo48Supported;
     public final boolean stereo192Supported;
     public final boolean stereo176Supported;
+    public final boolean rawAc3Supported;
+    public final boolean rawEac3Supported;
     public final boolean multichannel192Supported;
     public final boolean multichannel176Supported;
 
@@ -557,11 +1064,15 @@ public final class FireOsIec61937AudioOutputProvider extends ForwardingAudioOutp
         boolean stereo48Supported,
         boolean stereo192Supported,
         boolean stereo176Supported,
+        boolean rawAc3Supported,
+        boolean rawEac3Supported,
         boolean multichannel192Supported,
         boolean multichannel176Supported) {
       this.stereo48Supported = stereo48Supported;
       this.stereo192Supported = stereo192Supported;
       this.stereo176Supported = stereo176Supported;
+      this.rawAc3Supported = rawAc3Supported;
+      this.rawEac3Supported = rawEac3Supported;
       this.multichannel192Supported = multichannel192Supported;
       this.multichannel176Supported = multichannel176Supported;
     }
@@ -599,18 +1110,86 @@ public final class FireOsIec61937AudioOutputProvider extends ForwardingAudioOutp
     }
   }
 
+  /* package */ static final class BufferMetadata {
+    public final PackerKind kind;
+    public final int normalizedAccessUnitCount;
+    public final int totalFrames;
+    public final int inputSampleRateHz;
+    public final FireOsStreamInfo streamInfo;
+
+    public BufferMetadata(
+        PackerKind kind,
+        int normalizedAccessUnitCount,
+        int totalFrames,
+        int inputSampleRateHz,
+        FireOsStreamInfo streamInfo) {
+      this.kind = kind;
+      this.normalizedAccessUnitCount = normalizedAccessUnitCount;
+      this.totalFrames = totalFrames;
+      this.inputSampleRateHz = inputSampleRateHz;
+      this.streamInfo = streamInfo;
+    }
+  }
+
+  /* package */ static final class PreparedEncodedPacket {
+    public final BufferMetadata metadata;
+    public final NormalizedPacketBatch normalizedBatch;
+    public final int encodedAccessUnitCount;
+
+    public PreparedEncodedPacket(
+        BufferMetadata metadata, NormalizedPacketBatch normalizedBatch, int encodedAccessUnitCount) {
+      this.metadata = metadata;
+      this.normalizedBatch = normalizedBatch;
+      this.encodedAccessUnitCount = encodedAccessUnitCount;
+    }
+  }
+
+  private static final class EncodedProbeConfig {
+    public final int sampleRateHz;
+    public final int channelMask;
+    public final int encoding;
+
+    public EncodedProbeConfig(int sampleRateHz, int channelMask, int encoding) {
+      this.sampleRateHz = sampleRateHz;
+      this.channelMask = channelMask;
+      this.encoding = encoding;
+    }
+
+    @Override
+    public boolean equals(@Nullable Object obj) {
+      if (this == obj) {
+        return true;
+      }
+      if (!(obj instanceof EncodedProbeConfig)) {
+        return false;
+      }
+      EncodedProbeConfig other = (EncodedProbeConfig) obj;
+      return sampleRateHz == other.sampleRateHz
+          && channelMask == other.channelMask
+          && encoding == other.encoding;
+    }
+
+    @Override
+    public int hashCode() {
+      return Objects.hash(sampleRateHz, channelMask, encoding);
+    }
+  }
+
   private static final class CarrierPlan {
     public final PackerKind kind;
+    public final EncodedBufferNormalizer normalizer;
     public final IecPacker packer;
     public final OutputConfig passthroughConfig;
     public final OutputConfig carrierConfig;
 
     public CarrierPlan(
         PackerKind kind,
+        EncodedBufferNormalizer normalizer,
         IecPacker packer,
         OutputConfig passthroughConfig,
         OutputConfig carrierConfig) {
       this.kind = kind;
+      this.normalizer = normalizer;
       this.packer = packer;
       this.passthroughConfig = passthroughConfig;
       this.carrierConfig = carrierConfig;
@@ -696,6 +1275,61 @@ public final class FireOsIec61937AudioOutputProvider extends ForwardingAudioOutp
     }
   }
 
+  private interface EncodedBufferNormalizer {
+    NormalizedPacketBatch normalize(ByteBuffer inputBuffer, int encodedAccessUnitCount);
+  }
+
+  private static final class NormalizedPacketBatch {
+    public final PackerKind kind;
+    public final int reportedAccessUnitCount;
+    public final int inputSampleRateHz;
+    public final List<NormalizedAccessUnit> accessUnits;
+
+    public NormalizedPacketBatch(
+        PackerKind kind,
+        int reportedAccessUnitCount,
+        int inputSampleRateHz,
+        List<NormalizedAccessUnit> accessUnits) {
+      this.kind = kind;
+      this.reportedAccessUnitCount = reportedAccessUnitCount;
+      this.inputSampleRateHz = inputSampleRateHz;
+      this.accessUnits = accessUnits;
+    }
+  }
+
+  private static final class NormalizedAccessUnit {
+    public final byte[] data;
+    public final int inputSampleRateHz;
+    public final int sampleCount;
+    public final int payloadSize;
+    public final int repetitionPeriodFrames;
+    public final int bitstreamMode;
+    public final boolean littleEndian;
+    @Nullable public final DtsUtil.DtsHeader dtsHdHeader;
+    @Nullable public final DtsUtil.DtsHeader dtsUhdHeader;
+
+    public NormalizedAccessUnit(
+        byte[] data,
+        int inputSampleRateHz,
+        int sampleCount,
+        int payloadSize,
+        int repetitionPeriodFrames,
+        int bitstreamMode,
+        boolean littleEndian,
+        @Nullable DtsUtil.DtsHeader dtsHdHeader,
+        @Nullable DtsUtil.DtsHeader dtsUhdHeader) {
+      this.data = data;
+      this.inputSampleRateHz = inputSampleRateHz;
+      this.sampleCount = sampleCount;
+      this.payloadSize = payloadSize;
+      this.repetitionPeriodFrames = repetitionPeriodFrames;
+      this.bitstreamMode = bitstreamMode;
+      this.littleEndian = littleEndian;
+      this.dtsHdHeader = dtsHdHeader;
+      this.dtsUhdHeader = dtsUhdHeader;
+    }
+  }
+
   private interface IecPacker {
     int getCarrierSampleRateHz();
 
@@ -703,13 +1337,131 @@ public final class FireOsIec61937AudioOutputProvider extends ForwardingAudioOutp
 
     int getMaximumPacketSizeBytes();
 
-    ByteBuffer pack(ByteBuffer inputBuffer, int encodedAccessUnitCount);
+    ByteBuffer pack(NormalizedPacketBatch batch);
 
     ByteBuffer createPauseBurst(int millis);
 
     boolean usesMultichannelCarrier();
 
     IecPacker withMultichannelCarrier(boolean keepMultichannelCarrier);
+  }
+
+  private static final class Ac3BufferNormalizer implements EncodedBufferNormalizer {
+    private final int inputSampleRateHz;
+    private final boolean expectEac3;
+
+    public Ac3BufferNormalizer(int inputSampleRateHz, boolean expectEac3) {
+      this.inputSampleRateHz = inputSampleRateHz;
+      this.expectEac3 = expectEac3;
+    }
+
+    @Override
+    public NormalizedPacketBatch normalize(ByteBuffer inputBuffer, int encodedAccessUnitCount) {
+      byte[] input = toArray(inputBuffer);
+      List<FrameSlice> accessUnits = splitAc3AccessUnits(input, encodedAccessUnitCount);
+      ArrayList<NormalizedAccessUnit> normalizedUnits = new ArrayList<>(accessUnits.size());
+      for (FrameSlice accessUnit : accessUnits) {
+        byte[] bytes = copyRange(input, accessUnit.offset, accessUnit.length);
+        Ac3Util.SyncFrameInfo syncFrameInfo =
+            Ac3Util.parseAc3SyncframeInfo(new ParsableBitArray(bytes));
+        boolean isEac3 = MimeTypes.AUDIO_E_AC3.equals(syncFrameInfo.mimeType)
+            || MimeTypes.AUDIO_E_AC3_JOC.equals(syncFrameInfo.mimeType);
+        if (expectEac3 != isEac3) {
+          Log.w(
+              TAG,
+              "Fire OS AC3 normalizer detected unexpected syncframe type"
+                  + " expectEac3="
+                  + expectEac3
+                  + " mime="
+                  + syncFrameInfo.mimeType);
+        }
+        int effectiveSampleRateHz =
+            syncFrameInfo.sampleRate != Format.NO_VALUE ? syncFrameInfo.sampleRate : inputSampleRateHz;
+        int bitstreamMode = !isEac3 && bytes.length > 5 ? bytes[5] & 0x7 : 0;
+        normalizedUnits.add(
+            new NormalizedAccessUnit(
+                bytes,
+                effectiveSampleRateHz,
+                syncFrameInfo.sampleCount,
+                bytes.length,
+                C.LENGTH_UNSET,
+                bitstreamMode,
+                /* littleEndian= */ false,
+                /* dtsHdHeader= */ null,
+                /* dtsUhdHeader= */ null));
+      }
+      return new NormalizedPacketBatch(
+          expectEac3 ? PackerKind.E_AC3 : PackerKind.AC3,
+          encodedAccessUnitCount,
+          inputSampleRateHz,
+          normalizedUnits);
+    }
+  }
+
+  private static final class DtsBufferNormalizer implements EncodedBufferNormalizer {
+    private final int inputSampleRateHz;
+    private final boolean hd;
+
+    public DtsBufferNormalizer(int inputSampleRateHz, boolean hd) {
+      this.inputSampleRateHz = inputSampleRateHz;
+      this.hd = hd;
+    }
+
+    @Override
+    public NormalizedPacketBatch normalize(ByteBuffer inputBuffer, int encodedAccessUnitCount) {
+      byte[] input = toArray(inputBuffer);
+      List<FrameSlice> accessUnits = splitDtsAccessUnits(input, encodedAccessUnitCount);
+      ArrayList<NormalizedAccessUnit> normalizedUnits = new ArrayList<>(accessUnits.size());
+      for (FrameSlice accessUnit : accessUnits) {
+        byte[] bytes = copyRange(input, accessUnit.offset, accessUnit.length);
+        DtsDerivedParameters parameters = deriveDtsAccessUnitParameters(bytes, inputSampleRateHz, hd);
+        normalizedUnits.add(
+            new NormalizedAccessUnit(
+                bytes,
+                parameters.sampleRateHz,
+                parameters.sampleCount,
+                parameters.payloadSize,
+                parameters.repetitionPeriodFrames,
+                /* bitstreamMode= */ 0,
+                parameters.littleEndian,
+                parameters.dtsHdHeader,
+                parameters.dtsUhdHeader));
+      }
+      return new NormalizedPacketBatch(
+          hd ? PackerKind.DTS_HD : PackerKind.DTS_CORE,
+          encodedAccessUnitCount,
+          inputSampleRateHz,
+          normalizedUnits);
+    }
+  }
+
+  private static final class TrueHdBufferNormalizer implements EncodedBufferNormalizer {
+    private final int inputSampleRateHz;
+
+    public TrueHdBufferNormalizer(int inputSampleRateHz) {
+      this.inputSampleRateHz = inputSampleRateHz;
+    }
+
+    @Override
+    public NormalizedPacketBatch normalize(ByteBuffer inputBuffer, int encodedAccessUnitCount) {
+      byte[] input = toArray(inputBuffer);
+      ArrayList<NormalizedAccessUnit> normalizedUnits = new ArrayList<>(1);
+      normalizedUnits.add(
+          new NormalizedAccessUnit(
+              input,
+              inputSampleRateHz,
+              /* sampleCount= */ input.length >= Ac3Util.TRUEHD_SYNCFRAME_PREFIX_LENGTH
+                  ? Ac3Util.parseTrueHdSyncframeAudioSampleCount(input)
+                  : 0,
+              input.length,
+              C.LENGTH_UNSET,
+              /* bitstreamMode= */ 0,
+              /* littleEndian= */ false,
+              /* dtsHdHeader= */ null,
+              /* dtsUhdHeader= */ null));
+      return new NormalizedPacketBatch(
+          PackerKind.TRUEHD, encodedAccessUnitCount, inputSampleRateHz, normalizedUnits);
+    }
   }
 
   private static final class Ac3IecPacker implements IecPacker {
@@ -735,13 +1487,11 @@ public final class FireOsIec61937AudioOutputProvider extends ForwardingAudioOutp
     }
 
     @Override
-    public ByteBuffer pack(ByteBuffer inputBuffer, int encodedAccessUnitCount) {
-      byte[] input = toArray(inputBuffer);
-      List<FrameSlice> accessUnits = splitAc3AccessUnits(input, encodedAccessUnitCount);
-      List<ByteBuffer> packets = new ArrayList<>(accessUnits.size());
+    public ByteBuffer pack(NormalizedPacketBatch batch) {
+      List<ByteBuffer> packets = new ArrayList<>(batch.accessUnits.size());
       int totalSize = 0;
-      for (FrameSlice accessUnit : accessUnits) {
-        ByteBuffer packet = packSingleAccessUnit(input, accessUnit.offset, accessUnit.length);
+      for (NormalizedAccessUnit accessUnit : batch.accessUnits) {
+        ByteBuffer packet = packSingleAccessUnit(accessUnit);
         totalSize += packet.remaining();
         packets.add(packet);
       }
@@ -768,14 +1518,15 @@ public final class FireOsIec61937AudioOutputProvider extends ForwardingAudioOutp
       return this;
     }
 
-    private static ByteBuffer packSingleAccessUnit(byte[] input, int offset, int length) {
-      byte[] accessUnit = copyRange(input, offset, length);
+    private static ByteBuffer packSingleAccessUnit(NormalizedAccessUnit accessUnit) {
       int packetSize = IEC61937_AC3_PACKET_BYTES;
-      int payloadSize = min(accessUnit.length + (accessUnit.length & 1), packetSize - IEC61937_PACKET_HEADER_BYTES);
-      int bitstreamMode = accessUnit.length > 5 ? accessUnit[5] & 0x7 : 0;
+      int payloadSize =
+          min(
+              accessUnit.data.length + (accessUnit.data.length & 1),
+              packetSize - IEC61937_PACKET_HEADER_BYTES);
       ByteBuffer output = allocatePacket(packetSize);
-      putPreamble(output, IEC61937_AC3 | (bitstreamMode << 8), accessUnit.length << 3);
-      putWordSwapped(output, accessUnit, 0, min(accessUnit.length, payloadSize));
+      putPreamble(output, IEC61937_AC3 | (accessUnit.bitstreamMode << 8), accessUnit.data.length << 3);
+      putWordSwapped(output, accessUnit.data, 0, min(accessUnit.data.length, payloadSize));
       zeroFillToLimit(output, packetSize);
       output.flip();
       return output;
@@ -815,11 +1566,9 @@ public final class FireOsIec61937AudioOutputProvider extends ForwardingAudioOutp
     }
 
     @Override
-    public ByteBuffer pack(ByteBuffer inputBuffer, int encodedAccessUnitCount) {
-      byte[] input = toArray(inputBuffer);
-      List<FrameSlice> accessUnits = splitAc3AccessUnits(input, encodedAccessUnitCount);
-      for (FrameSlice accessUnit : accessUnits) {
-        appendAccessUnit(input, accessUnit.offset, accessUnit.length);
+    public ByteBuffer pack(NormalizedPacketBatch batch) {
+      for (NormalizedAccessUnit accessUnit : batch.accessUnits) {
+        appendAccessUnit(accessUnit);
       }
       return drainPendingPackets();
     }
@@ -844,22 +1593,21 @@ public final class FireOsIec61937AudioOutputProvider extends ForwardingAudioOutp
       return this;
     }
 
-    private void appendAccessUnit(byte[] input, int offset, int length) {
-      byte[] accessUnit = copyRange(input, offset, length);
-      int frameSampleCount = Ac3Util.parseAc3SyncframeAudioSampleCount(ByteBuffer.wrap(accessUnit));
-      int nextFramesPerBurst = max(1, 1_536 / max(1, frameSampleCount));
+    private void appendAccessUnit(NormalizedAccessUnit accessUnit) {
+      int frameSampleCount = max(1, accessUnit.sampleCount);
+      int nextFramesPerBurst = max(1, 1_536 / frameSampleCount);
       if (framesPerBurst != 0 && framesPerBurst != nextFramesPerBurst) {
         flushAccumulatedFrames();
       }
       framesPerBurst = nextFramesPerBurst;
-      int newSize = accumulatedSize + accessUnit.length;
+      int newSize = accumulatedSize + accessUnit.data.length;
       if (newSize > IEC61937_E_AC3_PACKET_BYTES - IEC61937_PACKET_HEADER_BYTES) {
         flushAccumulatedFrames();
-        newSize = accessUnit.length;
+        newSize = accessUnit.data.length;
       }
       ensureAccumulatedCapacity(newSize);
-      System.arraycopy(accessUnit, 0, accumulatedFrames, accumulatedSize, accessUnit.length);
-      accumulatedSize += accessUnit.length;
+      System.arraycopy(accessUnit.data, 0, accumulatedFrames, accumulatedSize, accessUnit.data.length);
+      accumulatedSize += accessUnit.data.length;
       accumulatedFrameCount++;
       if (accumulatedFrameCount >= max(1, framesPerBurst)) {
         flushAccumulatedFrames();
@@ -911,9 +1659,15 @@ public final class FireOsIec61937AudioOutputProvider extends ForwardingAudioOutp
 
   private static final class DtsCoreIecPacker implements IecPacker {
 
+    private final int inputSampleRateHz;
+
+    public DtsCoreIecPacker(int inputSampleRateHz) {
+      this.inputSampleRateHz = inputSampleRateHz;
+    }
+
     @Override
     public int getCarrierSampleRateHz() {
-      return 48_000;
+      return inputSampleRateHz;
     }
 
     @Override
@@ -927,13 +1681,11 @@ public final class FireOsIec61937AudioOutputProvider extends ForwardingAudioOutp
     }
 
     @Override
-    public ByteBuffer pack(ByteBuffer inputBuffer, int encodedAccessUnitCount) {
-      byte[] input = toArray(inputBuffer);
-      List<FrameSlice> accessUnits = splitDtsAccessUnits(input, encodedAccessUnitCount);
-      List<ByteBuffer> packets = new ArrayList<>(accessUnits.size());
+    public ByteBuffer pack(NormalizedPacketBatch batch) {
+      List<ByteBuffer> packets = new ArrayList<>(batch.accessUnits.size());
       int totalSize = 0;
-      for (FrameSlice accessUnit : accessUnits) {
-        ByteBuffer packet = packSingleAccessUnit(input, accessUnit.offset, accessUnit.length);
+      for (NormalizedAccessUnit accessUnit : batch.accessUnits) {
+        ByteBuffer packet = packSingleAccessUnit(accessUnit);
         totalSize += packet.remaining();
         packets.add(packet);
       }
@@ -946,7 +1698,7 @@ public final class FireOsIec61937AudioOutputProvider extends ForwardingAudioOutp
           /* channelCount= */ 2,
           /* outputRateHz= */ getCarrierSampleRateHz(),
           /* repetitionPeriodFrames= */ 3,
-          /* encodedRateHz= */ getCarrierSampleRateHz(),
+          /* encodedRateHz= */ inputSampleRateHz,
           millis);
     }
 
@@ -960,19 +1712,19 @@ public final class FireOsIec61937AudioOutputProvider extends ForwardingAudioOutp
       return this;
     }
 
-    private static ByteBuffer packSingleAccessUnit(byte[] input, int offset, int length) {
-      byte[] accessUnit = copyRange(input, offset, length);
-      int coreSize = DtsUtil.getDtsFrameSize(accessUnit);
-      int sampleCount = DtsUtil.parseDtsAudioSampleCount(accessUnit);
-      int dataType = getDtsCoreDataType(sampleCount);
-      int packetSize = sampleCount * 4;
-      int payloadSize = coreSize > 0 && coreSize < accessUnit.length ? coreSize : accessUnit.length;
+    private static ByteBuffer packSingleAccessUnit(NormalizedAccessUnit accessUnit) {
+      int dataType = getDtsCoreDataType(accessUnit.sampleCount);
+      int packetSize = accessUnit.sampleCount * 4;
+      int payloadSize =
+          accessUnit.payloadSize > 0 && accessUnit.payloadSize < accessUnit.data.length
+              ? accessUnit.payloadSize
+              : accessUnit.data.length;
       boolean omitPreamble = payloadSize == packetSize;
       ByteBuffer output = allocatePacket(packetSize);
       if (!omitPreamble) {
         putPreamble(output, dataType, payloadSize << 3);
       }
-      putMaybeWordSwapped(output, accessUnit, 0, payloadSize, !isLittleEndianDtsCoreFrame(accessUnit));
+      putMaybeWordSwapped(output, accessUnit.data, 0, payloadSize, !accessUnit.littleEndian);
       zeroFillToLimit(output, packetSize);
       output.flip();
       return output;
@@ -983,10 +1735,13 @@ public final class FireOsIec61937AudioOutputProvider extends ForwardingAudioOutp
 
     private final int inputSampleRateHz;
     private final boolean keepMultichannelCarrier;
+    private final int streamDtsPeriodFrames;
 
-    public DtsHdIecPacker(int inputSampleRateHz, boolean keepMultichannelCarrier) {
+    public DtsHdIecPacker(
+        int inputSampleRateHz, boolean keepMultichannelCarrier, int streamDtsPeriodFrames) {
       this.inputSampleRateHz = inputSampleRateHz;
       this.keepMultichannelCarrier = keepMultichannelCarrier;
+      this.streamDtsPeriodFrames = streamDtsPeriodFrames;
     }
 
     @Override
@@ -996,7 +1751,9 @@ public final class FireOsIec61937AudioOutputProvider extends ForwardingAudioOutp
 
     @Override
     public int getCarrierChannelMask(int passthroughChannelMask) {
-      return keepMultichannelCarrier ? passthroughChannelMask : AudioFormat.CHANNEL_OUT_STEREO;
+      return keepMultichannelCarrier
+          ? IEC61937_MULTICHANNEL_RAW_CARRIER_MASK
+          : AudioFormat.CHANNEL_OUT_STEREO;
     }
 
     @Override
@@ -1005,16 +1762,14 @@ public final class FireOsIec61937AudioOutputProvider extends ForwardingAudioOutp
     }
 
     @Override
-    public ByteBuffer pack(ByteBuffer inputBuffer, int encodedAccessUnitCount) {
-      byte[] input = toArray(inputBuffer);
-      List<FrameSlice> accessUnits = splitDtsAccessUnits(input, encodedAccessUnitCount);
-      if (accessUnits.size() == 1) {
-        return packSingleAccessUnit(input, 0, input.length);
+    public ByteBuffer pack(NormalizedPacketBatch batch) {
+      if (batch.accessUnits.size() == 1) {
+        return packSingleAccessUnit(batch.accessUnits.get(0));
       }
-      List<ByteBuffer> packets = new ArrayList<>(accessUnits.size());
+      List<ByteBuffer> packets = new ArrayList<>(batch.accessUnits.size());
       int totalSize = 0;
-      for (FrameSlice accessUnit : accessUnits) {
-        ByteBuffer packet = packSingleAccessUnit(input, accessUnit.offset, accessUnit.length);
+      for (NormalizedAccessUnit accessUnit : batch.accessUnits) {
+        ByteBuffer packet = packSingleAccessUnit(accessUnit);
         totalSize += packet.remaining();
         packets.add(packet);
       }
@@ -1041,21 +1796,33 @@ public final class FireOsIec61937AudioOutputProvider extends ForwardingAudioOutp
       if (this.keepMultichannelCarrier == keepMultichannelCarrier) {
         return this;
       }
-      return new DtsHdIecPacker(inputSampleRateHz, keepMultichannelCarrier);
+      return new DtsHdIecPacker(
+          inputSampleRateHz, keepMultichannelCarrier, streamDtsPeriodFrames);
     }
 
-    private ByteBuffer packSingleAccessUnit(byte[] input, int offset, int length) {
-      byte[] accessUnit = copyRange(input, offset, length);
-      int coreSize = DtsUtil.getDtsFrameSize(accessUnit);
-      int sampleCount = DtsUtil.parseDtsAudioSampleCount(ByteBuffer.wrap(accessUnit));
-      int repetitionPeriod = computeDtsHdRepetitionPeriod(sampleCount, inputSampleRateHz);
+    private ByteBuffer packSingleAccessUnit(NormalizedAccessUnit accessUnit) {
+      int repetitionPeriod =
+          streamDtsPeriodFrames != C.LENGTH_UNSET
+              ? streamDtsPeriodFrames
+              : (accessUnit.repetitionPeriodFrames != C.LENGTH_UNSET
+              ? accessUnit.repetitionPeriodFrames
+              : tryComputeDtsHdRepetitionPeriod(
+                  accessUnit.sampleCount, accessUnit.inputSampleRateHz));
+      if (repetitionPeriod == C.LENGTH_UNSET) {
+        throw new IllegalArgumentException(
+            "Unsupported DTS-HD repetition period"
+                + " sampleCount="
+                + accessUnit.sampleCount
+                + " sampleRate="
+                + accessUnit.inputSampleRateHz);
+      }
       int subtype = getDtsHdSubtype(repetitionPeriod);
       int packetSize = repetitionPeriod * 4;
-      int payloadSize = accessUnit.length;
+      int payloadSize = accessUnit.data.length;
       if (DTS_HD_START_CODE.length + 2 + payloadSize > packetSize - IEC61937_PACKET_HEADER_BYTES
-          && coreSize > 0) {
+          && accessUnit.payloadSize > 0) {
         Log.w(TAG, "DTS-HD burst overflow, sending DTS core for access unit");
-        return DtsCoreIecPacker.packSingleAccessUnit(accessUnit, 0, accessUnit.length);
+        return DtsCoreIecPacker.packSingleAccessUnit(accessUnit);
       }
       int outBytes = DTS_HD_START_CODE.length + 2 + payloadSize;
       int lengthCode = alignTo16(outBytes + IEC61937_PACKET_HEADER_BYTES) - IEC61937_PACKET_HEADER_BYTES;
@@ -1063,7 +1830,7 @@ public final class FireOsIec61937AudioOutputProvider extends ForwardingAudioOutp
       System.arraycopy(DTS_HD_START_CODE, 0, payload, 0, DTS_HD_START_CODE.length);
       payload[DTS_HD_START_CODE.length] = (byte) ((payloadSize >>> 8) & 0xFF);
       payload[DTS_HD_START_CODE.length + 1] = (byte) (payloadSize & 0xFF);
-      System.arraycopy(accessUnit, 0, payload, DTS_HD_START_CODE.length + 2, payloadSize);
+      System.arraycopy(accessUnit.data, 0, payload, DTS_HD_START_CODE.length + 2, payloadSize);
       ByteBuffer output = allocatePacket(packetSize);
       putPreamble(output, IEC61937_DTSHD | (subtype << 8), lengthCode);
       putWordSwapped(output, payload, 0, payload.length);
@@ -1098,7 +1865,9 @@ public final class FireOsIec61937AudioOutputProvider extends ForwardingAudioOutp
 
     @Override
     public int getCarrierChannelMask(int passthroughChannelMask) {
-      return keepMultichannelCarrier ? passthroughChannelMask : AudioFormat.CHANNEL_OUT_STEREO;
+      return keepMultichannelCarrier
+          ? IEC61937_MULTICHANNEL_RAW_CARRIER_MASK
+          : AudioFormat.CHANNEL_OUT_STEREO;
     }
 
     @Override
@@ -1107,17 +1876,18 @@ public final class FireOsIec61937AudioOutputProvider extends ForwardingAudioOutp
     }
 
     @Override
-    public ByteBuffer pack(ByteBuffer inputBuffer, int encodedAccessUnitCount) {
-      byte[] accessUnit = toArray(inputBuffer);
-      if (encodedAccessUnitCount != Ac3Util.TRUEHD_RECHUNK_SAMPLE_COUNT) {
+    public ByteBuffer pack(NormalizedPacketBatch batch) {
+      if (batch.reportedAccessUnitCount != Ac3Util.TRUEHD_RECHUNK_SAMPLE_COUNT) {
         Log.w(
             TAG,
             "Unexpected TrueHD access unit count="
-                + encodedAccessUnitCount
+                + batch.reportedAccessUnitCount
                 + ", expected="
                 + Ac3Util.TRUEHD_RECHUNK_SAMPLE_COUNT);
       }
-      packTrueHd(accessUnit);
+      for (NormalizedAccessUnit accessUnit : batch.accessUnits) {
+        packTrueHd(accessUnit.data);
+      }
       return drainOutputFrames();
     }
 
@@ -1357,40 +2127,65 @@ public final class FireOsIec61937AudioOutputProvider extends ForwardingAudioOutp
   private static final class FireOsIec61937AudioOutput extends ForwardingAudioOutput {
 
     private final PackerKind kind;
+    private final EncodedBufferNormalizer normalizer;
     private final IecPacker packer;
     private final FireOsIec61937AudioOutputProvider provider;
     @Nullable private ByteBuffer pendingInputBuffer;
     @Nullable private ByteBuffer pendingPackedBuffer;
+    @Nullable private NormalizedPacketBatch pendingNormalizedBatch;
     private int pendingAccessUnitCount;
     private int lastPauseBurstDurationMs;
+    private long syntheticPauseRemainingUs;
+    private long lastPauseUpdateRealtimeMs;
+    private boolean playing;
 
     public FireOsIec61937AudioOutput(
         AudioOutput audioOutput,
         PackerKind kind,
+        EncodedBufferNormalizer normalizer,
         IecPacker packer,
         FireOsIec61937AudioOutputProvider provider) {
       super(audioOutput);
       this.kind = kind;
+      this.normalizer = normalizer;
       this.packer = packer;
       this.provider = provider;
       this.lastPauseBurstDurationMs = C.LENGTH_UNSET;
+      this.syntheticPauseRemainingUs = 0;
+      this.lastPauseUpdateRealtimeMs = SystemClock.elapsedRealtime();
+      this.playing = false;
     }
 
     @Override
     public void play() {
+      updateSyntheticPauseCompensation();
       lastPauseBurstDurationMs = C.LENGTH_UNSET;
+      playing = true;
+      lastPauseUpdateRealtimeMs = SystemClock.elapsedRealtime();
       super.play();
+    }
+
+    @Override
+    public long getPositionUs() {
+      updateSyntheticPauseCompensation();
+      return max(0L, super.getPositionUs() - syntheticPauseRemainingUs);
     }
 
     @Override
     public boolean write(ByteBuffer buffer, int encodedAccessUnitCount, long presentationTimeUs)
         throws WriteException {
+      updateSyntheticPauseCompensation();
       if (pendingInputBuffer == null) {
         pendingInputBuffer = buffer;
         pendingAccessUnitCount = encodedAccessUnitCount;
         lastPauseBurstDurationMs = C.LENGTH_UNSET;
         try {
-          pendingPackedBuffer = packer.pack(buffer.duplicate(), encodedAccessUnitCount);
+          @Nullable PreparedEncodedPacket preparedPacket = provider.consumePreparedPacket(buffer);
+          pendingNormalizedBatch =
+              preparedPacket != null && preparedPacket.encodedAccessUnitCount == encodedAccessUnitCount
+                  ? preparedPacket.normalizedBatch
+                  : normalizer.normalize(buffer.duplicate(), encodedAccessUnitCount);
+          pendingPackedBuffer = packer.pack(checkNotNull(pendingNormalizedBatch));
         } catch (RuntimeException e) {
           provider.requestFallback(kind, packer.usesMultichannelCarrier());
           throw new WriteException(AudioTrack.ERROR_BAD_VALUE, /* isRecoverable= */ true);
@@ -1425,22 +2220,33 @@ public final class FireOsIec61937AudioOutputProvider extends ForwardingAudioOutp
 
     @Override
     public void pause() {
+      updateSyntheticPauseCompensation();
+      playing = false;
       writePauseBurst(getPauseBurstDurationMs());
       super.pause();
     }
 
     @Override
     public void stop() {
+      updateSyntheticPauseCompensation();
+      playing = false;
       writePauseBurst(getPauseBurstDurationMs());
       super.stop();
+      syntheticPauseRemainingUs = 0;
+      lastPauseBurstDurationMs = C.LENGTH_UNSET;
     }
 
     @Override
     public void flush() {
+      updateSyntheticPauseCompensation();
+      playing = false;
       writePauseBurst(getPauseBurstDurationMs());
       clearPendingState();
       super.pause();
       super.flush();
+      syntheticPauseRemainingUs = 0;
+      lastPauseBurstDurationMs = C.LENGTH_UNSET;
+      lastPauseUpdateRealtimeMs = SystemClock.elapsedRealtime();
     }
 
     private void writePauseBurst(int millis) {
@@ -1459,6 +2265,8 @@ public final class FireOsIec61937AudioOutputProvider extends ForwardingAudioOutp
           }
         }
         lastPauseBurstDurationMs = millis;
+        syntheticPauseRemainingUs += millis * 1_000L;
+        lastPauseUpdateRealtimeMs = SystemClock.elapsedRealtime();
       } catch (WriteException e) {
         if (e.isRecoverable) {
           provider.requestFallback(kind, packer.usesMultichannelCarrier());
@@ -1478,8 +2286,20 @@ public final class FireOsIec61937AudioOutputProvider extends ForwardingAudioOutp
 
     private void clearPendingState() {
       pendingInputBuffer = null;
+      pendingNormalizedBatch = null;
       pendingPackedBuffer = null;
       pendingAccessUnitCount = 0;
+    }
+
+    private void updateSyntheticPauseCompensation() {
+      long nowMs = SystemClock.elapsedRealtime();
+      if (!playing || syntheticPauseRemainingUs <= 0) {
+        lastPauseUpdateRealtimeMs = nowMs;
+        return;
+      }
+      long elapsedUs = max(0L, (nowMs - lastPauseUpdateRealtimeMs) * 1_000L);
+      syntheticPauseRemainingUs = max(0L, syntheticPauseRemainingUs - elapsedUs);
+      lastPauseUpdateRealtimeMs = nowMs;
     }
   }
 
@@ -1510,6 +2330,181 @@ public final class FireOsIec61937AudioOutputProvider extends ForwardingAudioOutp
         throw new IllegalArgumentException(
             "Unsupported DTS-HD repetition period: " + period + " sampleCount=" + sampleCount);
     }
+  }
+
+  private static int tryComputeDtsHdRepetitionPeriod(int sampleCount, int inputSampleRateHz) {
+    if (sampleCount <= 0 || inputSampleRateHz <= 0) {
+      return C.LENGTH_UNSET;
+    }
+    try {
+      return computeDtsHdRepetitionPeriod(sampleCount, inputSampleRateHz);
+    } catch (IllegalArgumentException e) {
+      Log.w(
+          TAG,
+          "Unable to derive DTS-HD repetition period"
+              + " sampleCount="
+              + sampleCount
+              + " sampleRate="
+              + inputSampleRateHz,
+          e);
+      return C.LENGTH_UNSET;
+    }
+  }
+
+  private static DtsDerivedParameters deriveDtsAccessUnitParameters(
+      byte[] accessUnit, int inputSampleRateHz, boolean hd) {
+    if (accessUnit.length < 4) {
+      return new DtsDerivedParameters(
+          inputSampleRateHz,
+          /* sampleCount= */ 0,
+          accessUnit.length,
+          C.LENGTH_UNSET,
+          /* littleEndian= */ false,
+          /* dtsHdHeader= */ null,
+          /* dtsUhdHeader= */ null);
+    }
+    int word = Util.getBigEndianInt(ByteBuffer.wrap(accessUnit, 0, 4), 0);
+    @DtsUtil.FrameType int frameType = DtsUtil.getFrameType(word);
+    switch (frameType) {
+      case DtsUtil.FRAME_TYPE_EXTENSION_SUBSTREAM:
+        return deriveDtsHdAccessUnitParameters(accessUnit, inputSampleRateHz);
+      case DtsUtil.FRAME_TYPE_UHD_SYNC:
+      case DtsUtil.FRAME_TYPE_UHD_NON_SYNC:
+        return deriveDtsUhdAccessUnitParameters(accessUnit, inputSampleRateHz);
+      case DtsUtil.FRAME_TYPE_CORE:
+      default:
+        int sampleCount = DtsUtil.parseDtsAudioSampleCount(ByteBuffer.wrap(accessUnit));
+        int payloadSize = DtsUtil.getDtsFrameSize(accessUnit);
+        if (hd && payloadSize > 0 && payloadSize < accessUnit.length) {
+          DtsDerivedParameters extensionParameters =
+              deriveDtsHdExtensionParametersFromCombinedAccessUnit(
+                  accessUnit, payloadSize, inputSampleRateHz);
+          if (extensionParameters.repetitionPeriodFrames != C.LENGTH_UNSET) {
+            return extensionParameters;
+          }
+        }
+        int repetitionPeriodFrames =
+            hd ? tryComputeDtsHdRepetitionPeriod(sampleCount, inputSampleRateHz) : C.LENGTH_UNSET;
+        return new DtsDerivedParameters(
+            inputSampleRateHz,
+            sampleCount,
+            payloadSize > 0 ? payloadSize : accessUnit.length,
+            repetitionPeriodFrames,
+            isLittleEndianDtsCoreFrame(accessUnit),
+            /* dtsHdHeader= */ null,
+            /* dtsUhdHeader= */ null);
+    }
+  }
+
+  private static DtsDerivedParameters deriveDtsHdExtensionParametersFromCombinedAccessUnit(
+      byte[] accessUnit, int coreSize, int inputSampleRateHz) {
+    int extensionOffset = coreSize;
+    int extensionBytesRemaining = accessUnit.length - extensionOffset;
+    if (extensionBytesRemaining < 4) {
+      return new DtsDerivedParameters(
+          inputSampleRateHz,
+          /* sampleCount= */ 0,
+          accessUnit.length,
+          C.LENGTH_UNSET,
+          /* littleEndian= */ false,
+          /* dtsHdHeader= */ null,
+          /* dtsUhdHeader= */ null);
+    }
+    int extensionWord = Util.getBigEndianInt(ByteBuffer.wrap(accessUnit, extensionOffset, 4), 0);
+    @DtsUtil.FrameType int extensionFrameType = DtsUtil.getFrameType(extensionWord);
+    byte[] extensionPayload = copyRange(accessUnit, extensionOffset, extensionBytesRemaining);
+    switch (extensionFrameType) {
+      case DtsUtil.FRAME_TYPE_EXTENSION_SUBSTREAM:
+        return deriveDtsHdAccessUnitParameters(extensionPayload, inputSampleRateHz)
+            .withPayloadSize(accessUnit.length);
+      case DtsUtil.FRAME_TYPE_UHD_SYNC:
+      case DtsUtil.FRAME_TYPE_UHD_NON_SYNC:
+        return deriveDtsUhdAccessUnitParameters(extensionPayload, inputSampleRateHz)
+            .withPayloadSize(accessUnit.length);
+      default:
+        return new DtsDerivedParameters(
+            inputSampleRateHz,
+            /* sampleCount= */ 0,
+            accessUnit.length,
+            C.LENGTH_UNSET,
+            /* littleEndian= */ false,
+            /* dtsHdHeader= */ null,
+            /* dtsUhdHeader= */ null);
+    }
+  }
+
+  private static DtsDerivedParameters deriveDtsHdAccessUnitParameters(
+      byte[] accessUnit, int inputSampleRateHz) {
+    try {
+      int headerSize = DtsUtil.parseDtsHdHeaderSize(accessUnit);
+      if (headerSize <= 0 || headerSize > accessUnit.length) {
+        throw ParserException.createForMalformedContainer(
+            "Invalid DTS-HD header size: " + headerSize, /* cause= */ null);
+      }
+      DtsUtil.DtsHeader header = DtsUtil.parseDtsHdHeader(copyRange(accessUnit, 0, headerSize));
+      int effectiveSampleRateHz =
+          header.sampleRate != Format.NO_VALUE ? header.sampleRate : inputSampleRateHz;
+      int sampleCount = deriveSampleCountFromDurationUs(header.frameDurationUs, effectiveSampleRateHz);
+      return new DtsDerivedParameters(
+          effectiveSampleRateHz,
+          sampleCount,
+          accessUnit.length,
+          tryComputeDtsHdRepetitionPeriod(sampleCount, effectiveSampleRateHz),
+          /* littleEndian= */ false,
+          header,
+          /* dtsUhdHeader= */ null);
+    } catch (ParserException | IllegalArgumentException e) {
+      Log.w(TAG, "Unable to derive DTS-HD access unit parameters", e);
+      return new DtsDerivedParameters(
+          inputSampleRateHz,
+          /* sampleCount= */ 0,
+          accessUnit.length,
+          C.LENGTH_UNSET,
+          /* littleEndian= */ false,
+          /* dtsHdHeader= */ null,
+          /* dtsUhdHeader= */ null);
+    }
+  }
+
+  private static DtsDerivedParameters deriveDtsUhdAccessUnitParameters(
+      byte[] accessUnit, int inputSampleRateHz) {
+    try {
+      int headerSize = DtsUtil.parseDtsUhdHeaderSize(accessUnit);
+      if (headerSize <= 0 || headerSize > accessUnit.length) {
+        throw ParserException.createForMalformedContainer(
+            "Invalid DTS-UHD header size: " + headerSize, /* cause= */ null);
+      }
+      DtsUtil.DtsHeader header =
+          DtsUtil.parseDtsUhdHeader(copyRange(accessUnit, 0, headerSize), new AtomicInteger());
+      int effectiveSampleRateHz =
+          header.sampleRate != Format.NO_VALUE ? header.sampleRate : inputSampleRateHz;
+      int sampleCount = deriveSampleCountFromDurationUs(header.frameDurationUs, effectiveSampleRateHz);
+      return new DtsDerivedParameters(
+          effectiveSampleRateHz,
+          sampleCount,
+          accessUnit.length,
+          tryComputeDtsHdRepetitionPeriod(sampleCount, effectiveSampleRateHz),
+          /* littleEndian= */ false,
+          /* dtsHdHeader= */ null,
+          header);
+    } catch (ParserException | IllegalArgumentException e) {
+      Log.w(TAG, "Unable to derive DTS-UHD access unit parameters", e);
+      return new DtsDerivedParameters(
+          inputSampleRateHz,
+          /* sampleCount= */ 0,
+          accessUnit.length,
+          C.LENGTH_UNSET,
+          /* littleEndian= */ false,
+          /* dtsHdHeader= */ null,
+          /* dtsUhdHeader= */ null);
+    }
+  }
+
+  private static int deriveSampleCountFromDurationUs(long frameDurationUs, int sampleRateHz) {
+    if (frameDurationUs == C.TIME_UNSET || sampleRateHz <= 0) {
+      return 0;
+    }
+    return (int) ((frameDurationUs * sampleRateHz + (C.MICROS_PER_SECOND / 2)) / C.MICROS_PER_SECOND);
   }
 
   private static int getDtsHdSubtype(int repetitionPeriod) {
@@ -1832,6 +2827,44 @@ public final class FireOsIec61937AudioOutputProvider extends ForwardingAudioOutp
   }
 
   private static final ByteBuffer EMPTY_BUFFER = ByteBuffer.allocateDirect(0).order(ByteOrder.LITTLE_ENDIAN);
+
+  private static final class DtsDerivedParameters {
+    public final int sampleRateHz;
+    public final int sampleCount;
+    public final int payloadSize;
+    public final int repetitionPeriodFrames;
+    public final boolean littleEndian;
+    @Nullable public final DtsUtil.DtsHeader dtsHdHeader;
+    @Nullable public final DtsUtil.DtsHeader dtsUhdHeader;
+
+    public DtsDerivedParameters(
+        int sampleRateHz,
+        int sampleCount,
+        int payloadSize,
+        int repetitionPeriodFrames,
+        boolean littleEndian,
+        @Nullable DtsUtil.DtsHeader dtsHdHeader,
+        @Nullable DtsUtil.DtsHeader dtsUhdHeader) {
+      this.sampleRateHz = sampleRateHz;
+      this.sampleCount = sampleCount;
+      this.payloadSize = payloadSize;
+      this.repetitionPeriodFrames = repetitionPeriodFrames;
+      this.littleEndian = littleEndian;
+      this.dtsHdHeader = dtsHdHeader;
+      this.dtsUhdHeader = dtsUhdHeader;
+    }
+
+    public DtsDerivedParameters withPayloadSize(int payloadSize) {
+      return new DtsDerivedParameters(
+          sampleRateHz,
+          sampleCount,
+          payloadSize,
+          repetitionPeriodFrames,
+          littleEndian,
+          dtsHdHeader,
+          dtsUhdHeader);
+    }
+  }
 
   private static final class FrameSlice {
     public final int offset;

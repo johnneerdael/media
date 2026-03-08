@@ -2176,12 +2176,16 @@ public final class BoxParser {
       mimeType = MimeTypes.AUDIO_AC4;
     } else if (atomType == Mp4Box.TYPE_dtsc) {
       mimeType = MimeTypes.AUDIO_DTS;
+      codecs = "dtsc";
     } else if (atomType == Mp4Box.TYPE_dtsh || atomType == Mp4Box.TYPE_dtsl) {
       mimeType = MimeTypes.AUDIO_DTS_HD;
+      codecs = atomType == Mp4Box.TYPE_dtsl ? "dtsl" : "dtsh";
     } else if (atomType == Mp4Box.TYPE_dtse) {
       mimeType = MimeTypes.AUDIO_DTS_EXPRESS;
+      codecs = "dtse";
     } else if (atomType == Mp4Box.TYPE_dtsx) {
       mimeType = MimeTypes.AUDIO_DTS_X;
+      codecs = "dtsx";
     } else if (atomType == Mp4Box.TYPE_samr) {
       mimeType = MimeTypes.AUDIO_AMR_NB;
     } else if (atomType == Mp4Box.TYPE_sawb) {
@@ -2323,6 +2327,7 @@ public final class BoxParser {
             new Format.Builder()
                 .setId(trackId)
                 .setSampleMimeType(mimeType)
+                .setCodecs(codecs)
                 .setChannelCount(channelCount)
                 .setSampleRate(sampleRate)
                 .setDrmInitData(drmInitData)

@@ -1893,7 +1893,23 @@ public class MatroskaExtractor implements Extractor {
     if (track.waitingForDtsAnalysis) {
       checkNotNull(track.format);
       if (DtsUtil.isSampleDtsHd(input, size)) {
-        track.format = track.format.buildUpon().setSampleMimeType(MimeTypes.AUDIO_DTS_HD).build();
+        String analyzedCodecs =
+            CODEC_ID_DTS_EXPRESS.equals(track.codecId) ? "dtse" : "dtsh";
+        track.format =
+            track.format
+                .buildUpon()
+                .setSampleMimeType(MimeTypes.AUDIO_DTS_HD)
+                .setCodecs(analyzedCodecs)
+                .build();
+      } else if (CODEC_ID_DTS_EXPRESS.equals(track.codecId)) {
+        track.format =
+            track.format
+                .buildUpon()
+                .setSampleMimeType(MimeTypes.AUDIO_DTS_EXPRESS)
+                .setCodecs("dtse")
+                .build();
+      } else if (CODEC_ID_DTS.equals(track.codecId)) {
+        track.format = track.format.buildUpon().setCodecs("dtsc").build();
       }
       track.output.format(track.format);
       track.waitingForDtsAnalysis = false;
@@ -2671,12 +2687,18 @@ public class MatroskaExtractor implements Extractor {
           trueHdSampleRechunker = new TrueHdSampleRechunker();
           break;
         case CODEC_ID_DTS:
+          codecs = "dtsc";
+          mimeType = MimeTypes.AUDIO_DTS; // temporary
+          waitingForDtsAnalysis = true;
+          break;
         case CODEC_ID_DTS_EXPRESS:
+          codecs = "dtse";
           mimeType = MimeTypes.AUDIO_DTS; // temporary
           waitingForDtsAnalysis = true;
           break;
         case CODEC_ID_DTS_LOSSLESS:
           mimeType = MimeTypes.AUDIO_DTS_HD;
+          codecs = "dtsl";
           break;
         case CODEC_ID_FLAC:
           mimeType = MimeTypes.AUDIO_FLAC;

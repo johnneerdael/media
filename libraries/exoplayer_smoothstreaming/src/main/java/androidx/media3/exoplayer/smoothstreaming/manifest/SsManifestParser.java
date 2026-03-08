@@ -696,7 +696,9 @@ public class SsManifestParser implements ParsingLoadable.Parser<SsManifest> {
     public void parseStartTag(XmlPullParser parser) throws ParserException {
       Format.Builder formatBuilder = new Format.Builder();
 
-      @Nullable String sampleMimeType = fourCCToMimeType(parseRequiredString(parser, KEY_FOUR_CC));
+      String fourCc = parseRequiredString(parser, KEY_FOUR_CC);
+      @Nullable String sampleMimeType = fourCCToMimeType(fourCc);
+      @Nullable String codecs = fourCCToCodecs(fourCc);
       int type = (Integer) getNormalizedAttribute(KEY_TYPE);
       if (type == C.TRACK_TYPE_VIDEO) {
         List<byte[]> codecSpecificData =
@@ -750,6 +752,7 @@ public class SsManifestParser implements ParsingLoadable.Parser<SsManifest> {
               .setId(parser.getAttributeValue(null, KEY_INDEX))
               .setLabel((String) getNormalizedAttribute(KEY_NAME))
               .setSampleMimeType(sampleMimeType)
+              .setCodecs(codecs)
               .setAverageBitrate(parseRequiredInt(parser, KEY_BITRATE))
               .setLanguage((String) getNormalizedAttribute(KEY_LANGUAGE))
               .build();
@@ -800,6 +803,20 @@ public class SsManifestParser implements ParsingLoadable.Parser<SsManifest> {
         return MimeTypes.AUDIO_DTS_EXPRESS;
       } else if (fourCC.equalsIgnoreCase("opus")) {
         return MimeTypes.AUDIO_OPUS;
+      }
+      return null;
+    }
+
+    @Nullable
+    private static String fourCCToCodecs(String fourCC) {
+      if (fourCC.equalsIgnoreCase("dtsc")) {
+        return "dtsc";
+      } else if (fourCC.equalsIgnoreCase("dtsh")) {
+        return "dtsh";
+      } else if (fourCC.equalsIgnoreCase("dtsl")) {
+        return "dtsl";
+      } else if (fourCC.equalsIgnoreCase("dtse")) {
+        return "dtse";
       }
       return null;
     }
