@@ -18,7 +18,6 @@ package androidx.media3.exoplayer.audio;
 import androidx.annotation.Nullable;
 import androidx.media3.common.C;
 import androidx.media3.common.Format;
-import androidx.media3.common.MimeTypes;
 import androidx.media3.common.ParserException;
 import androidx.media3.common.util.UnstableApi;
 import androidx.media3.extractor.DtsUtil;
@@ -109,9 +108,9 @@ import java.nio.ByteBuffer;
   }
 
   /* package */ static FireOsStreamInfo.DtsStreamType classifyCoreFrame(
-      @Nullable String sampleMimeType, byte[] accessUnit) {
+      byte[] accessUnit) {
     int sampleCount = DtsUtil.parseDtsAudioSampleCount(ByteBuffer.wrap(accessUnit));
-    return classifyCoreFrame(sampleMimeType, sampleCount);
+    return classifyCoreFrame(sampleCount);
   }
 
   private static FireOsStreamInfo.DtsStreamType classifyStreamType(
@@ -122,9 +121,7 @@ import java.nio.ByteBuffer;
       FireOsStreamInfo.DtsStreamType previousStreamType,
       boolean hasExtension,
       boolean hasUhd) {
-    @Nullable String sampleMimeType = format.sampleMimeType;
-    if (hasExtension || hasUhd || MimeTypes.AUDIO_DTS_EXPRESS.equals(sampleMimeType)
-        || MimeTypes.AUDIO_DTS_X.equals(sampleMimeType)) {
+    if (hasExtension || hasUhd) {
       FireOsStreamInfo.DtsStreamType bitstreamDeclaredType =
           classifyBitstreamDeclaredType(accessUnit);
       if (bitstreamDeclaredType != FireOsStreamInfo.DtsStreamType.UNKNOWN) {
@@ -133,9 +130,6 @@ import java.nio.ByteBuffer;
       return previousStreamType != FireOsStreamInfo.DtsStreamType.NONE
               ? previousStreamType
               : FireOsStreamInfo.DtsStreamType.UNKNOWN;
-    }
-    if (MimeTypes.AUDIO_DTS_HD.equals(sampleMimeType)) {
-      return FireOsStreamInfo.DtsStreamType.DTSHD_CORE;
     }
     if (repetitionPeriodFrames != C.LENGTH_UNSET && repetitionPeriodFrames != 0 && sampleCount == 0) {
       switch (repetitionPeriodFrames) {
@@ -149,22 +143,19 @@ import java.nio.ByteBuffer;
           break;
       }
     }
-    return classifyCoreFrame(sampleMimeType, sampleCount);
+    return classifyCoreFrame(sampleCount);
   }
 
-  private static FireOsStreamInfo.DtsStreamType classifyCoreFrame(
-      @Nullable String sampleMimeType, int sampleCount) {
-    if (MimeTypes.AUDIO_DTS_HD.equals(sampleMimeType)) {
-      return FireOsStreamInfo.DtsStreamType.DTSHD_CORE;
-    }
+  private static FireOsStreamInfo.DtsStreamType classifyCoreFrame(int sampleCount) {
     switch (sampleCount) {
       case 512:
         return FireOsStreamInfo.DtsStreamType.DTS_512;
       case 1024:
         return FireOsStreamInfo.DtsStreamType.DTS_1024;
       case 2048:
-      default:
         return FireOsStreamInfo.DtsStreamType.DTS_2048;
+      default:
+        return FireOsStreamInfo.DtsStreamType.UNKNOWN;
     }
   }
 

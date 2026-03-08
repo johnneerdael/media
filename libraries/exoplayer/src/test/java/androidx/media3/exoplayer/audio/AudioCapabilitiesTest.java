@@ -74,7 +74,8 @@ public class AudioCapabilitiesTest {
 
   @After
   public void tearDown() {
-    AudioCapabilities.setExperimentalFireOsAudioQuirksEnabled(false);
+    AudioCapabilities.setExperimentalFireOsIecPassthroughEnabled(false);
+    AudioCapabilities.setLimitedFireTvDtsCoreFallbackEnabled(false);
     ShadowBuild.setManufacturer("Google");
     ShadowBuild.setModel("AOSP");
   }
@@ -473,7 +474,8 @@ public class AudioCapabilitiesTest {
   @Test
   public void
       getEncodingAndChannelConfigForPassthrough_fireTvLimitedDtsHd71ForcesDtsCoreAndClampTo51() {
-    AudioCapabilities.setExperimentalFireOsAudioQuirksEnabled(true);
+    AudioCapabilities.setExperimentalFireOsIecPassthroughEnabled(false);
+    AudioCapabilities.setLimitedFireTvDtsCoreFallbackEnabled(true);
     ShadowBuild.setManufacturer("Amazon");
     ShadowBuild.setModel("AFTMM");
     AudioCapabilities audioCapabilities =
@@ -499,7 +501,8 @@ public class AudioCapabilitiesTest {
   @Test
   public void
       getEncodingAndChannelConfigForPassthrough_fireTvLimitedDtsHdCodecHintStillForcesDtsCoreAndClampTo51() {
-    AudioCapabilities.setExperimentalFireOsAudioQuirksEnabled(true);
+    AudioCapabilities.setExperimentalFireOsIecPassthroughEnabled(false);
+    AudioCapabilities.setLimitedFireTvDtsCoreFallbackEnabled(true);
     ShadowBuild.setManufacturer("Amazon");
     ShadowBuild.setModel("AFTMM");
     AudioCapabilities audioCapabilities =
@@ -521,6 +524,31 @@ public class AudioCapabilitiesTest {
     assertThat(encodingAndChannelConfig).isNotNull();
     assertThat(checkNotNull(encodingAndChannelConfig).first).isEqualTo(C.ENCODING_DTS);
     assertThat(encodingAndChannelConfig.second).isEqualTo(AudioFormat.CHANNEL_OUT_5POINT1);
+  }
+
+  @Test
+  public void
+      getEncodingAndChannelConfigForPassthrough_fireTvExperimentalIecDoesNotForceDtsCoreFallback() {
+    AudioCapabilities.setExperimentalFireOsIecPassthroughEnabled(true);
+    AudioCapabilities.setLimitedFireTvDtsCoreFallbackEnabled(false);
+    ShadowBuild.setManufacturer("Amazon");
+    ShadowBuild.setModel("AFTMM");
+    AudioCapabilities audioCapabilities =
+        new AudioCapabilities(
+            new int[] {AudioFormat.ENCODING_PCM_16BIT, AudioFormat.ENCODING_DTS},
+            /* maxChannelCount= */ 6);
+    Format format =
+        new Format.Builder()
+            .setSampleMimeType(MimeTypes.AUDIO_DTS_HD)
+            .setChannelCount(8)
+            .setSampleRate(48_000)
+            .build();
+
+    Pair<Integer, Integer> encodingAndChannelConfig =
+        audioCapabilities.getEncodingAndChannelConfigForPassthrough(
+            format, AudioAttributes.DEFAULT);
+
+    assertThat(encodingAndChannelConfig).isNull();
   }
 
   // TODO: b/320191198 - Disable the test for API 33, as the

@@ -86,21 +86,41 @@ public final class AudioCapabilities {
     AmazonQuirks.setExperimentalFireOsAudioQuirksEnabled(enabled);
   }
 
+  /** Enables Kodi-style experimental Fire OS IEC passthrough. Disabled by default. */
+  public static void setExperimentalFireOsIecPassthroughEnabled(boolean enabled) {
+    AmazonQuirks.setExperimentalFireOsIecPassthroughEnabled(enabled);
+  }
+
   /** Returns whether experimental Fire OS audio quirks are enabled. */
   public static boolean isExperimentalFireOsAudioQuirksEnabled() {
     return AmazonQuirks.isExperimentalFireOsAudioQuirksEnabled();
   }
 
-  /** @deprecated Use {@link #setExperimentalFireOsAudioQuirksEnabled(boolean)} instead. */
-  @Deprecated
-  public static void setExperimentalIec61937PassthroughEnabled(boolean enabled) {
-    setExperimentalFireOsAudioQuirksEnabled(enabled);
+  /** Returns whether Kodi-style experimental Fire OS IEC passthrough is enabled. */
+  public static boolean isExperimentalFireOsIecPassthroughEnabled() {
+    return AmazonQuirks.isExperimentalFireOsAudioQuirksEnabled();
   }
 
-  /** @deprecated Use {@link #isExperimentalFireOsAudioQuirksEnabled()} instead. */
+  /** Enables the legacy Fire TV DTS-core fallback compatibility path. */
+  public static void setLimitedFireTvDtsCoreFallbackEnabled(boolean enabled) {
+    AmazonQuirks.setLimitedFireTvDtsCoreFallbackEnabled(enabled);
+  }
+
+  /** Returns whether the legacy Fire TV DTS-core fallback compatibility path is enabled. */
+  public static boolean isLimitedFireTvDtsCoreFallbackEnabled() {
+    return AmazonQuirks.isLimitedFireTvDtsCoreFallbackEnabled();
+  }
+
+  /** @deprecated Use {@link #setExperimentalFireOsIecPassthroughEnabled(boolean)} instead. */
+  @Deprecated
+  public static void setExperimentalIec61937PassthroughEnabled(boolean enabled) {
+    setExperimentalFireOsIecPassthroughEnabled(enabled);
+  }
+
+  /** @deprecated Use {@link #isExperimentalFireOsIecPassthroughEnabled()} instead. */
   @Deprecated
   public static boolean isExperimentalIec61937PassthroughEnabled() {
-    return isExperimentalFireOsAudioQuirksEnabled();
+    return isExperimentalFireOsIecPassthroughEnabled();
   }
 
   /* package */ static boolean useSurroundSoundFlagV17(ContentResolver resolver) {
@@ -443,11 +463,13 @@ public final class AudioCapabilities {
     int encoding =
         sampleMimeType == null ? C.ENCODING_INVALID : MimeTypes.getEncoding(sampleMimeType, codecs);
     @C.Encoding int requestedEncoding = encoding;
+    boolean fireOsDtsHdLike = isDtsHdLike(sampleMimeType, codecs, encoding);
     boolean allowExperimentalFireOsIecPassthrough =
         AmazonQuirks.shouldAttemptExperimentalFireOsIecPassthrough();
+    boolean preserveDtsHdEncodingForFireOsIec =
+        allowExperimentalFireOsIecPassthrough && fireOsDtsHdLike;
     boolean forceLimitedFireTvDtsCoreFallback =
-        AmazonQuirks.shouldForceLimitedFireTvDtsCoreFallback()
-            && isDtsHdLike(sampleMimeType, codecs, encoding);
+        AmazonQuirks.shouldForceLimitedFireTvDtsCoreFallback() && fireOsDtsHdLike;
     if (encoding == C.ENCODING_INVALID
         && AmazonQuirks.shouldForceLimitedFireTvDtsCoreFallback()
         && isDtsFamily(sampleMimeType, codecs, encoding)) {
@@ -466,9 +488,13 @@ public final class AudioCapabilities {
       // E-AC3 receivers support E-AC3 JOC streams (but decode only the base layer).
       encoding = C.ENCODING_E_AC3;
     } else if ((encoding == C.ENCODING_DTS_HD || encoding == C.ENCODING_DTS_UHD_P2)
-        && ((!allowExperimentalFireOsIecPassthrough && forceLimitedFireTvDtsCoreFallback)
-            || (encoding == C.ENCODING_DTS_HD && !supportsEncoding(C.ENCODING_DTS_HD))
-            || (encoding == C.ENCODING_DTS_UHD_P2 && !supportsEncoding(C.ENCODING_DTS_UHD_P2)))) {
+        && ((forceLimitedFireTvDtsCoreFallback && !preserveDtsHdEncodingForFireOsIec)
+            || (encoding == C.ENCODING_DTS_HD
+                && !preserveDtsHdEncodingForFireOsIec
+                && !supportsEncoding(C.ENCODING_DTS_HD))
+            || (encoding == C.ENCODING_DTS_UHD_P2
+                && !preserveDtsHdEncodingForFireOsIec
+                && !supportsEncoding(C.ENCODING_DTS_UHD_P2)))) {
       // DTS receivers support DTS-HD streams (but decode only the core layer).
       encoding = C.ENCODING_DTS;
     }
