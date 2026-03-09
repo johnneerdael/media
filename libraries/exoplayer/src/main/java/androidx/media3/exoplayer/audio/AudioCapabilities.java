@@ -91,14 +91,24 @@ public final class AudioCapabilities {
     return AmazonQuirks.isExperimentalFireOsAudioQuirksEnabled();
   }
 
+  /** Enables the Fire OS compatibility fallback path for passthrough recovery and DTS fallback. */
+  public static void setFireOsCompatibilityFallbackEnabled(boolean enabled) {
+    AmazonQuirks.setFireOsCompatibilityFallbackEnabled(enabled);
+  }
+
+  /** Returns whether the Fire OS compatibility fallback path is enabled. */
+  public static boolean isFireOsCompatibilityFallbackEnabled() {
+    return AmazonQuirks.isFireOsCompatibilityFallbackEnabled();
+  }
+
   /** Enables the legacy Fire TV DTS-core fallback compatibility path. */
   public static void setLimitedFireTvDtsCoreFallbackEnabled(boolean enabled) {
-    AmazonQuirks.setLimitedFireTvDtsCoreFallbackEnabled(enabled);
+    setFireOsCompatibilityFallbackEnabled(enabled);
   }
 
   /** Returns whether the legacy Fire TV DTS-core fallback compatibility path is enabled. */
   public static boolean isLimitedFireTvDtsCoreFallbackEnabled() {
-    return AmazonQuirks.isLimitedFireTvDtsCoreFallbackEnabled();
+    return isFireOsCompatibilityFallbackEnabled();
   }
 
   /** @deprecated Use {@link #setExperimentalFireOsIecPassthroughEnabled(boolean)} instead. */

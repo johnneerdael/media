@@ -52,7 +52,7 @@ public class FireOsIec61937AudioOutputProviderTest {
   @Before
   public void setUp() {
     AudioCapabilities.setExperimentalFireOsIecPassthroughEnabled(true);
-    AudioCapabilities.setLimitedFireTvDtsCoreFallbackEnabled(false);
+    AudioCapabilities.setFireOsCompatibilityFallbackEnabled(false);
     ShadowBuild.setManufacturer("Amazon");
     ShadowBuild.setModel("AFTMM");
   }
@@ -60,7 +60,7 @@ public class FireOsIec61937AudioOutputProviderTest {
   @After
   public void tearDown() {
     AudioCapabilities.setExperimentalFireOsIecPassthroughEnabled(false);
-    AudioCapabilities.setLimitedFireTvDtsCoreFallbackEnabled(false);
+    AudioCapabilities.setFireOsCompatibilityFallbackEnabled(false);
     ShadowBuild.setManufacturer("Google");
     ShadowBuild.setModel("AOSP");
   }
@@ -197,14 +197,14 @@ public class FireOsIec61937AudioOutputProviderTest {
   }
 
   @Test
-  public void getOutputConfig_dtsHdKodiModeRequiresParsedClassification() {
+  public void getOutputConfig_dtsHdKodiModeUsesProvisionalClassification() throws Exception {
     FakeAudioOutputProvider passthroughProvider =
         new FakeAudioOutputProvider(
             DIRECT_SUPPORT,
             createOutputConfig(C.ENCODING_DTS_HD, 48_000, AudioFormat.CHANNEL_OUT_STEREO));
     FireOsIec61937AudioOutputProvider provider =
         new FireOsIec61937AudioOutputProvider(passthroughProvider, new FakeAudioOutputProvider());
-    seedKodiProbeMatrix(provider, /* stereo48= */ true, /* stereo192= */ true, /* multi192= */ true);
+    seedKodiProbeMatrix(provider, /* stereo48= */ true, /* stereo192= */ false, /* multi192= */ false);
     AudioOutputProvider.FormatConfig formatConfig =
         new AudioOutputProvider.FormatConfig.Builder(
                 new Format.Builder()
@@ -214,9 +214,88 @@ public class FireOsIec61937AudioOutputProviderTest {
                     .build())
             .build();
 
-    assertThrows(
-        AudioOutputProvider.ConfigurationException.class,
-        () -> provider.getOutputConfig(formatConfig));
+    AudioOutputProvider.OutputConfig outputConfig = provider.getOutputConfig(formatConfig);
+
+    assertThat(outputConfig.encoding).isEqualTo(C.ENCODING_DTS_HD);
+    assertThat(outputConfig.sampleRate).isEqualTo(48_000);
+    assertThat(outputConfig.channelMask).isEqualTo(AudioFormat.CHANNEL_OUT_STEREO);
+  }
+
+  @Test
+  public void getFormatSupport_dtsHdKodiModeUsesProvisionalClassification() {
+    FakeAudioOutputProvider passthroughProvider =
+        new FakeAudioOutputProvider(
+            DIRECT_SUPPORT,
+            createOutputConfig(C.ENCODING_DTS_HD, 48_000, AudioFormat.CHANNEL_OUT_STEREO));
+    FireOsIec61937AudioOutputProvider provider =
+        new FireOsIec61937AudioOutputProvider(passthroughProvider, new FakeAudioOutputProvider());
+    seedKodiProbeMatrix(provider, /* stereo48= */ true, /* stereo192= */ false, /* multi192= */ false);
+    AudioOutputProvider.FormatConfig formatConfig =
+        new AudioOutputProvider.FormatConfig.Builder(
+                new Format.Builder()
+                    .setSampleMimeType(MimeTypes.AUDIO_DTS_HD)
+                    .setSampleRate(48_000)
+                    .setChannelCount(8)
+                    .build())
+            .build();
+
+    AudioOutputProvider.FormatSupport formatSupport = provider.getFormatSupport(formatConfig);
+
+    assertThat(formatSupport.supportLevel)
+        .isEqualTo(AudioOutputProvider.FORMAT_SUPPORTED_DIRECTLY);
+  }
+
+  @Test
+  public void getOutputConfig_dtsHdMaCodecHintUsesProvisionalMultichannelClassification()
+      throws Exception {
+    FakeAudioOutputProvider passthroughProvider =
+        new FakeAudioOutputProvider(
+            DIRECT_SUPPORT,
+            createOutputConfig(
+                C.ENCODING_DTS_HD, 48_000, AudioFormat.CHANNEL_OUT_7POINT1_SURROUND));
+    FireOsIec61937AudioOutputProvider provider =
+        new FireOsIec61937AudioOutputProvider(passthroughProvider, new FakeAudioOutputProvider());
+    seedKodiProbeMatrix(provider, /* stereo48= */ true, /* stereo192= */ true, /* multi192= */ true);
+    AudioOutputProvider.FormatConfig formatConfig =
+        new AudioOutputProvider.FormatConfig.Builder(
+                new Format.Builder()
+                    .setSampleMimeType(MimeTypes.AUDIO_DTS_HD)
+                    .setCodecs("dtsl")
+                    .setSampleRate(48_000)
+                    .setChannelCount(8)
+                    .build())
+            .build();
+
+    AudioOutputProvider.OutputConfig outputConfig = provider.getOutputConfig(formatConfig);
+
+    assertThat(outputConfig.encoding).isEqualTo(C.ENCODING_DTS_HD);
+    assertThat(outputConfig.channelMask).isEqualTo(AudioFormat.CHANNEL_OUT_7POINT1_SURROUND);
+  }
+
+  @Test
+  public void getOutputConfig_dtsXKodiModeFallsBackToKodiCoreClassification() throws Exception {
+    FakeAudioOutputProvider passthroughProvider =
+        new FakeAudioOutputProvider(
+            DIRECT_SUPPORT,
+            createOutputConfig(C.ENCODING_DTS_UHD_P2, 48_000, AudioFormat.CHANNEL_OUT_STEREO));
+    FireOsIec61937AudioOutputProvider provider =
+        new FireOsIec61937AudioOutputProvider(passthroughProvider, new FakeAudioOutputProvider());
+    seedKodiProbeMatrix(provider, /* stereo48= */ true, /* stereo192= */ false, /* multi192= */ false);
+    AudioOutputProvider.FormatConfig formatConfig =
+        new AudioOutputProvider.FormatConfig.Builder(
+                new Format.Builder()
+                    .setSampleMimeType(MimeTypes.AUDIO_DTS_X)
+                    .setSampleRate(48_000)
+                    .setChannelCount(8)
+                    .build())
+            .build();
+
+    AudioOutputProvider.FormatSupport formatSupport = provider.getFormatSupport(formatConfig);
+    AudioOutputProvider.OutputConfig outputConfig = provider.getOutputConfig(formatConfig);
+
+    assertThat(formatSupport.supportLevel)
+        .isEqualTo(AudioOutputProvider.FORMAT_SUPPORTED_DIRECTLY);
+    assertThat(outputConfig.channelMask).isEqualTo(AudioFormat.CHANNEL_OUT_STEREO);
   }
 
   @Test
@@ -306,6 +385,143 @@ public class FireOsIec61937AudioOutputProviderTest {
   }
 
   @Test
+  public void prepareEncodedPacket_trueHdSplitsSubframesAfterMajorSyncAcrossBuffers() {
+    FireOsIec61937AudioOutputProvider provider =
+        new FireOsIec61937AudioOutputProvider(
+            new FakeAudioOutputProvider(), new FakeAudioOutputProvider());
+    Format format =
+        new Format.Builder()
+            .setSampleMimeType(MimeTypes.AUDIO_TRUEHD)
+            .setSampleRate(48_000)
+            .setChannelCount(8)
+            .build();
+
+    provider.prepareEncodedPacket(
+        format,
+        ByteBuffer.wrap(createTrueHdSyncframe(/* frameSizeBytes= */ 234, /* frameTime= */ 0x04D8)),
+        1);
+
+    FireOsIec61937AudioOutputProvider.PreparedEncodedPacket preparedPacket =
+        provider.prepareEncodedPacket(
+            format,
+            ByteBuffer.wrap(
+                join(
+                    createTrueHdSubframe(/* frameSizeBytes= */ 12, /* frameTime= */ 0x0510),
+                    createTrueHdSubframe(/* frameSizeBytes= */ 12, /* frameTime= */ 0x0538))),
+            2);
+
+    assertThat(preparedPacket).isNotNull();
+    assertThat(preparedPacket.metadata.normalizedAccessUnitCount).isEqualTo(2);
+    assertThat(preparedPacket.metadata.totalFrames).isEqualTo(80);
+    assertThat(FireOsIec61937AudioOutputProvider.getNormalizedPayloadSizesForTesting(preparedPacket))
+        .asList()
+        .containsExactly(12, 12)
+        .inOrder();
+    assertThat(FireOsIec61937AudioOutputProvider.getNormalizedSampleCountsForTesting(preparedPacket))
+        .asList()
+        .containsExactly(40, 40)
+        .inOrder();
+  }
+
+  @Test
+  public void prepareEncodedPacket_trueHdRejectsInvalidMajorSyncCrcMetadata() {
+    FireOsIec61937AudioOutputProvider provider =
+        new FireOsIec61937AudioOutputProvider(
+            new FakeAudioOutputProvider(), new FakeAudioOutputProvider());
+    byte[] syncframe = createTrueHdSyncframe(/* frameSizeBytes= */ 234, /* frameTime= */ 0x04D8);
+    syncframe[30] ^= 0x01;
+    Format format =
+        new Format.Builder()
+            .setSampleMimeType(MimeTypes.AUDIO_TRUEHD)
+            .setSampleRate(176_400)
+            .setChannelCount(2)
+            .build();
+
+    FireOsIec61937AudioOutputProvider.PreparedEncodedPacket preparedPacket =
+        provider.prepareEncodedPacket(format, ByteBuffer.wrap(syncframe), 1);
+
+    assertThat(preparedPacket).isNull();
+  }
+
+  @Test
+  public void prepareEncodedPacket_trueHdResynchronizesInsteadOfWholeBufferFallback() {
+    FireOsIec61937AudioOutputProvider provider =
+        new FireOsIec61937AudioOutputProvider(
+            new FakeAudioOutputProvider(), new FakeAudioOutputProvider());
+    byte[] syncframe = createTrueHdSyncframe(/* frameSizeBytes= */ 234, /* frameTime= */ 0x04D8);
+    byte[] input = new byte[syncframe.length + 1];
+    input[0] = 0x55;
+    System.arraycopy(syncframe, 0, input, 1, syncframe.length);
+    Format format =
+        new Format.Builder()
+            .setSampleMimeType(MimeTypes.AUDIO_TRUEHD)
+            .setSampleRate(48_000)
+            .setChannelCount(8)
+            .build();
+
+    FireOsIec61937AudioOutputProvider.PreparedEncodedPacket preparedPacket =
+        provider.prepareEncodedPacket(format, ByteBuffer.wrap(input), 1);
+
+    assertThat(preparedPacket).isNotNull();
+    assertThat(preparedPacket.metadata.normalizedAccessUnitCount).isEqualTo(1);
+    assertThat(FireOsIec61937AudioOutputProvider.getNormalizedPayloadSizesForTesting(preparedPacket))
+        .asList()
+        .containsExactly(syncframe.length);
+  }
+
+  @Test
+  public void getOutputConfig_strictKodiModeDoesNotAllowRecoverableFallback() {
+    FakeAudioOutputProvider passthroughProvider =
+        new FakeAudioOutputProvider(
+            DIRECT_SUPPORT,
+            createOutputConfig(C.ENCODING_AC3, 48_000, AudioFormat.CHANNEL_OUT_STEREO));
+    FireOsIec61937AudioOutputProvider provider =
+        new FireOsIec61937AudioOutputProvider(passthroughProvider, new FakeAudioOutputProvider());
+    provider.requestFallbackForTesting(
+        FireOsIec61937AudioOutputProvider.PackerKind.AC3,
+        /* multichannelCarrierFailed= */ false,
+        /* allowStereoIecFallback= */ true);
+    AudioOutputProvider.FormatConfig formatConfig =
+        new AudioOutputProvider.FormatConfig.Builder(
+                new Format.Builder()
+                    .setSampleMimeType(MimeTypes.AUDIO_AC3)
+                    .setSampleRate(48_000)
+                    .setChannelCount(6)
+                    .build())
+            .build();
+
+    assertThrows(
+        AudioOutputProvider.ConfigurationException.class,
+        () -> provider.getOutputConfig(formatConfig));
+  }
+
+  @Test
+  public void getFormatSupport_strictKodiModeStopsAdvertisingIecAfterRecoverableFallback() {
+    FakeAudioOutputProvider passthroughProvider =
+        new FakeAudioOutputProvider(
+            DIRECT_SUPPORT,
+            createOutputConfig(C.ENCODING_AC3, 48_000, AudioFormat.CHANNEL_OUT_STEREO));
+    FireOsIec61937AudioOutputProvider provider =
+        new FireOsIec61937AudioOutputProvider(passthroughProvider, new FakeAudioOutputProvider());
+    provider.requestFallbackForTesting(
+        FireOsIec61937AudioOutputProvider.PackerKind.AC3,
+        /* multichannelCarrierFailed= */ false,
+        /* allowStereoIecFallback= */ true);
+    AudioOutputProvider.FormatConfig formatConfig =
+        new AudioOutputProvider.FormatConfig.Builder(
+                new Format.Builder()
+                    .setSampleMimeType(MimeTypes.AUDIO_AC3)
+                    .setSampleRate(48_000)
+                    .setChannelCount(6)
+                    .build())
+            .build();
+
+    AudioOutputProvider.FormatSupport formatSupport = provider.getFormatSupport(formatConfig);
+
+    assertThat(formatSupport.supportLevel).isEqualTo(AudioOutputProvider.FORMAT_UNSUPPORTED);
+  }
+
+  @Test
   public void prepareEncodedPacket_eAc3MergesImmediateDependentFrame() {
     FireOsIec61937AudioOutputProvider provider =
         new FireOsIec61937AudioOutputProvider(
@@ -361,6 +577,45 @@ public class FireOsIec61937AudioOutputProviderTest {
     assertThat(preparedPacket.metadata.streamInfo.inputSampleRateHz).isNotEqualTo(format.sampleRate);
   }
 
+  @Test
+  public void prepareEncodedPacket_invalidAc3ReturnsNull() {
+    FireOsIec61937AudioOutputProvider provider =
+        new FireOsIec61937AudioOutputProvider(
+            new FakeAudioOutputProvider(), new FakeAudioOutputProvider());
+    Format format =
+        new Format.Builder()
+            .setSampleMimeType(MimeTypes.AUDIO_AC3)
+            .setSampleRate(48_000)
+            .setChannelCount(6)
+            .build();
+
+    FireOsIec61937AudioOutputProvider.PreparedEncodedPacket preparedPacket =
+        provider.prepareEncodedPacket(format, ByteBuffer.wrap(new byte[] {0x00, 0x11, 0x22, 0x33}), 1);
+
+    assertThat(preparedPacket).isNull();
+  }
+
+  @Test
+  public void prepareEncodedPacket_invalidDtsReturnsNull() {
+    FireOsIec61937AudioOutputProvider provider =
+        new FireOsIec61937AudioOutputProvider(
+            new FakeAudioOutputProvider(), new FakeAudioOutputProvider());
+    Format format =
+        new Format.Builder()
+            .setSampleMimeType(MimeTypes.AUDIO_DTS_HD)
+            .setSampleRate(48_000)
+            .setChannelCount(6)
+            .build();
+
+    FireOsIec61937AudioOutputProvider.PreparedEncodedPacket preparedPacket =
+        provider.prepareEncodedPacket(
+            format,
+            ByteBuffer.wrap(new byte[] {0x00, 0x11, 0x22, 0x33, 0x44, 0x55}),
+            1);
+
+    assertThat(preparedPacket).isNull();
+  }
+
   private static void seedKodiProbeMatrix(
       FireOsIec61937AudioOutputProvider provider,
       boolean stereo48,
@@ -396,7 +651,27 @@ public class FireOsIec61937AudioOutputProviderTest {
     frame[1] = (byte) (frameSizeWords & 0xFF);
     frame[2] = (byte) ((frameTime >>> 8) & 0xFF);
     frame[3] = (byte) (frameTime & 0xFF);
+    FireOsIec61937AudioOutputProvider.writeTrueHdMajorSyncCrcForTesting(frame);
     return frame;
+  }
+
+  private static byte[] createTrueHdSubframe(int frameSizeBytes, int frameTime) {
+    byte[] frame = new byte[frameSizeBytes];
+    int frameSizeWords = frameSizeBytes / 2;
+    int lowNibble = (frameSizeWords >>> 8) & 0x0F;
+    int byte1 = frameSizeWords & 0xFF;
+    frame[1] = (byte) byte1;
+    frame[2] = (byte) ((frameTime >>> 8) & 0xFF);
+    frame[3] = (byte) (frameTime & 0xFF);
+    for (int highNibble = 0; highNibble < 16; highNibble++) {
+      int firstByte = (highNibble << 4) | lowNibble;
+      int check = firstByte ^ byte1 ^ (frame[2] & 0xFF) ^ (frame[3] & 0xFF);
+      if ((((check >> 4) ^ check) & 0x0F) == 0x0F) {
+        frame[0] = (byte) firstByte;
+        return frame;
+      }
+    }
+    throw new IllegalStateException("Unable to construct a valid TrueHD subframe parity header");
   }
 
   private static byte[] createEAc3Syncframe(@Ac3Util.SyncFrameInfo.StreamType int streamType) {

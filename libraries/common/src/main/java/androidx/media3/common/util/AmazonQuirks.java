@@ -40,7 +40,6 @@ public final class AmazonQuirks {
 
   public static void setExperimentalFireOsAudioQuirksEnabled(boolean enabled) {
     experimentalFireOsAudioQuirksEnabled = enabled;
-    limitedFireTvDtsCoreFallbackEnabled = enabled;
   }
 
   public static boolean isExperimentalFireOsAudioQuirksEnabled() {
@@ -51,12 +50,20 @@ public final class AmazonQuirks {
     experimentalFireOsAudioQuirksEnabled = enabled;
   }
 
-  public static void setLimitedFireTvDtsCoreFallbackEnabled(boolean enabled) {
+  public static void setFireOsCompatibilityFallbackEnabled(boolean enabled) {
     limitedFireTvDtsCoreFallbackEnabled = enabled;
   }
 
-  public static boolean isLimitedFireTvDtsCoreFallbackEnabled() {
+  public static boolean isFireOsCompatibilityFallbackEnabled() {
     return limitedFireTvDtsCoreFallbackEnabled;
+  }
+
+  public static void setLimitedFireTvDtsCoreFallbackEnabled(boolean enabled) {
+    setFireOsCompatibilityFallbackEnabled(enabled);
+  }
+
+  public static boolean isLimitedFireTvDtsCoreFallbackEnabled() {
+    return isFireOsCompatibilityFallbackEnabled();
   }
 
   public static boolean isAmazonDevice() {
