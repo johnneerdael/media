@@ -95,7 +95,8 @@ public final class FireOsStreamInfo {
   }
 
   public boolean matchesFormat(Format format) {
-    return sampleMimeType != null && sampleMimeType.equals(format.sampleMimeType);
+    // Stream identity is parser-derived and session-scoped, not MIME-scoped.
+    return true;
   }
 
   public String summary() {
@@ -128,9 +129,9 @@ public final class FireOsStreamInfo {
   }
 
   public static FireOsStreamInfo createForAc3Family(
-      @Nullable String sampleMimeType, int inputSampleRateHz, int inputChannelCount) {
-    StreamFamily family =
-        MimeTypes.AUDIO_AC3.equals(sampleMimeType) ? StreamFamily.AC3 : StreamFamily.E_AC3;
+      boolean isEac3, int inputSampleRateHz, int inputChannelCount) {
+    StreamFamily family = isEac3 ? StreamFamily.E_AC3 : StreamFamily.AC3;
+    String sampleMimeType = isEac3 ? MimeTypes.AUDIO_E_AC3 : MimeTypes.AUDIO_AC3;
     int outputRateHz =
         family == StreamFamily.AC3
             ? inputSampleRateHz
@@ -151,6 +152,13 @@ public final class FireOsStreamInfo {
         /* passthroughCandidate= */ true,
         /* highBitrateCandidate= */ false,
         "ac3-family");
+  }
+
+  @Deprecated
+  public static FireOsStreamInfo createForAc3Family(
+      @Nullable String sampleMimeType, int inputSampleRateHz, int inputChannelCount) {
+    return createForAc3Family(
+        !MimeTypes.AUDIO_AC3.equals(sampleMimeType), inputSampleRateHz, inputChannelCount);
   }
 
   public static FireOsStreamInfo createForTrueHd(int inputSampleRateHz, int inputChannelCount) {
@@ -204,7 +212,7 @@ public final class FireOsStreamInfo {
     int resolvedDtsPeriodFrames =
         getKodiDtsPeriodFrames(dtsStreamType, dtsPeriodFrames);
     return new FireOsStreamInfo(
-        sampleMimeType != null ? sampleMimeType : MimeTypes.AUDIO_DTS,
+        sampleMimeType != null ? sampleMimeType : getCanonicalDtsMimeType(dtsStreamType),
         StreamFamily.DTS,
         dtsStreamType,
         inputSampleRateHz,
@@ -243,6 +251,22 @@ public final class FireOsStreamInfo {
         /* passthroughCandidate= */ false,
         /* highBitrateCandidate= */ false,
         "unknown");
+  }
+
+  private static String getCanonicalDtsMimeType(DtsStreamType dtsStreamType) {
+    switch (dtsStreamType) {
+      case DTSHD:
+      case DTSHD_MA:
+        return MimeTypes.AUDIO_DTS_HD;
+      case NONE:
+      case UNKNOWN:
+      case DTS_512:
+      case DTS_1024:
+      case DTS_2048:
+      case DTSHD_CORE:
+      default:
+        return MimeTypes.AUDIO_DTS;
+    }
   }
 
   private static int getDtsOutputRate(DtsStreamType dtsStreamType, int inputSampleRateHz) {

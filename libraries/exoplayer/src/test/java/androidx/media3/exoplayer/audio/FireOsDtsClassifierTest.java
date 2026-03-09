@@ -18,7 +18,6 @@ package androidx.media3.exoplayer.audio;
 import static com.google.common.truth.Truth.assertThat;
 
 import android.media.AudioFormat;
-import androidx.media3.common.Format;
 import androidx.media3.common.MimeTypes;
 import androidx.test.ext.junit.runners.AndroidJUnit4;
 import org.junit.Test;
@@ -29,16 +28,8 @@ public final class FireOsDtsClassifierTest {
 
   @Test
   public void classifyFromHints_dtsUhd_staysUnknownAndUsesKodiDefaultOutputPolicy() {
-    Format format =
-        new Format.Builder()
-            .setSampleMimeType(MimeTypes.AUDIO_DTS_X)
-            .setSampleRate(48_000)
-            .setChannelCount(8)
-            .build();
-
     FireOsStreamInfo streamInfo =
         FireOsDtsClassifier.classifyFromHints(
-            format,
             /* sampleCount= */ 4096,
             /* repetitionPeriodFrames= */ 4096,
             /* inputSampleRateHz= */ 48_000,
@@ -55,17 +46,8 @@ public final class FireOsDtsClassifierTest {
 
   @Test
   public void classifyFromHints_dtsHdCodecHintWithoutParsedBitstream_staysUnknown() {
-    Format format =
-        new Format.Builder()
-            .setSampleMimeType(MimeTypes.AUDIO_DTS_HD)
-            .setCodecs("dtsl")
-            .setSampleRate(48_000)
-            .setChannelCount(6)
-            .build();
-
     FireOsStreamInfo streamInfo =
         FireOsDtsClassifier.classifyFromHints(
-            format,
             /* sampleCount= */ 4096,
             /* repetitionPeriodFrames= */ 4096,
             /* inputSampleRateHz= */ 48_000,
@@ -77,20 +59,13 @@ public final class FireOsDtsClassifierTest {
     assertThat(streamInfo.dtsStreamType).isEqualTo(FireOsStreamInfo.DtsStreamType.UNKNOWN);
     assertThat(streamInfo.outputChannelCount).isEqualTo(2);
     assertThat(streamInfo.outputRateHz).isEqualTo(48_000);
+    assertThat(streamInfo.sampleMimeType).isEqualTo(MimeTypes.AUDIO_DTS);
   }
 
   @Test
   public void classifyFromHints_dtsHdWithoutCodecHint_staysUnknown() {
-    Format format =
-        new Format.Builder()
-            .setSampleMimeType(MimeTypes.AUDIO_DTS_HD)
-            .setSampleRate(48_000)
-            .setChannelCount(6)
-            .build();
-
     FireOsStreamInfo streamInfo =
         FireOsDtsClassifier.classifyFromHints(
-            format,
             /* sampleCount= */ 4096,
             /* repetitionPeriodFrames= */ 4096,
             /* inputSampleRateHz= */ 48_000,
@@ -106,16 +81,8 @@ public final class FireOsDtsClassifierTest {
 
   @Test
   public void classifyFromHints_dtsExpress_staysUnknownAndUsesKodiDefaultOutputPolicy() {
-    Format format =
-        new Format.Builder()
-            .setSampleMimeType(MimeTypes.AUDIO_DTS_EXPRESS)
-            .setSampleRate(48_000)
-            .setChannelCount(2)
-            .build();
-
     FireOsStreamInfo streamInfo =
         FireOsDtsClassifier.classifyFromHints(
-            format,
             /* sampleCount= */ 4096,
             /* repetitionPeriodFrames= */ 4096,
             /* inputSampleRateHz= */ 48_000,
@@ -133,11 +100,6 @@ public final class FireOsDtsClassifierTest {
   public void classifyCoreFrame_dts1024_usesExactKodiCoreType() {
     FireOsStreamInfo.DtsStreamType streamType =
         FireOsDtsClassifier.classifyFromHints(
-                new Format.Builder()
-                    .setSampleMimeType(MimeTypes.AUDIO_DTS)
-                    .setSampleRate(48_000)
-                    .setChannelCount(2)
-                    .build(),
                 /* sampleCount= */ 1024,
                 /* repetitionPeriodFrames= */ 1024,
                 /* inputSampleRateHz= */ 48_000,
@@ -152,16 +114,8 @@ public final class FireOsDtsClassifierTest {
 
   @Test
   public void classifyFromHints_dtsHdCore_usesCorePath() {
-    Format format =
-        new Format.Builder()
-            .setSampleMimeType(MimeTypes.AUDIO_DTS_HD)
-            .setSampleRate(48_000)
-            .setChannelCount(2)
-            .build();
-
     FireOsStreamInfo streamInfo =
         FireOsDtsClassifier.classifyFromHints(
-            format,
             /* sampleCount= */ 512,
             /* repetitionPeriodFrames= */ 512,
             /* inputSampleRateHz= */ 48_000,
@@ -177,16 +131,8 @@ public final class FireOsDtsClassifierTest {
 
   @Test
   public void classifyFromHints_ambiguousExtension_keepsPreviousKodiType() {
-    Format format =
-        new Format.Builder()
-            .setSampleMimeType(MimeTypes.AUDIO_DTS_HD)
-            .setSampleRate(48_000)
-            .setChannelCount(6)
-            .build();
-
     FireOsStreamInfo streamInfo =
         FireOsDtsClassifier.classifyFromHints(
-            format,
             /* accessUnit= */ new byte[0],
             /* sampleCount= */ 4096,
             /* repetitionPeriodFrames= */ 4096,
@@ -200,5 +146,6 @@ public final class FireOsDtsClassifierTest {
     assertThat(streamInfo.dtsPeriodFrames).isEqualTo(16_384);
     assertThat(streamInfo.outputChannelCount).isEqualTo(8);
     assertThat(streamInfo.outputRateHz).isEqualTo(192_000);
+    assertThat(streamInfo.sampleMimeType).isEqualTo(MimeTypes.AUDIO_DTS_HD);
   }
 }

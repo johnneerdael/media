@@ -30,7 +30,6 @@ import java.nio.ByteBuffer;
   private FireOsDtsClassifier() {}
 
   public static FireOsStreamInfo classify(
-      Format format,
       byte[] accessUnit,
       int sampleCount,
       int repetitionPeriodFrames,
@@ -40,7 +39,6 @@ import java.nio.ByteBuffer;
       @Nullable DtsUtil.DtsHeader extensionHeader,
       @Nullable DtsUtil.DtsHeader uhdHeader) {
     return classifyFromHints(
-        format,
         accessUnit,
         sampleCount,
         repetitionPeriodFrames,
@@ -52,7 +50,6 @@ import java.nio.ByteBuffer;
   }
 
   /* package */ static FireOsStreamInfo classifyFromHints(
-      Format format,
       int sampleCount,
       int repetitionPeriodFrames,
       int inputSampleRateHz,
@@ -61,7 +58,6 @@ import java.nio.ByteBuffer;
       boolean hasExtension,
       boolean hasUhd) {
     return classifyFromHints(
-        format,
         /* accessUnit= */ new byte[0],
         sampleCount,
         repetitionPeriodFrames,
@@ -73,7 +69,6 @@ import java.nio.ByteBuffer;
   }
 
   /* package */ static FireOsStreamInfo classifyFromHints(
-      Format format,
       byte[] accessUnit,
       int sampleCount,
       int repetitionPeriodFrames,
@@ -84,7 +79,6 @@ import java.nio.ByteBuffer;
       boolean hasUhd) {
     FireOsStreamInfo.DtsStreamType dtsStreamType =
         classifyStreamType(
-            format,
             accessUnit,
             sampleCount,
             repetitionPeriodFrames,
@@ -92,7 +86,7 @@ import java.nio.ByteBuffer;
             hasExtension,
             hasUhd);
     return FireOsStreamInfo.createForDts(
-        format.sampleMimeType,
+        /* sampleMimeType= */ null,
         dtsStreamType,
         inputSampleRateHz != Format.NO_VALUE ? inputSampleRateHz : 48_000,
         inputChannelCount != Format.NO_VALUE ? inputChannelCount : 2,
@@ -114,7 +108,6 @@ import java.nio.ByteBuffer;
   }
 
   private static FireOsStreamInfo.DtsStreamType classifyStreamType(
-      Format format,
       byte[] accessUnit,
       int sampleCount,
       int repetitionPeriodFrames,

@@ -385,6 +385,52 @@ public class FireOsIec61937AudioOutputProviderTest {
   }
 
   @Test
+  public void prepareEncodedPacket_trueHdIgnoresMismatchedAc3Mime() {
+    FireOsIec61937AudioOutputProvider provider =
+        new FireOsIec61937AudioOutputProvider(
+            new FakeAudioOutputProvider(), new FakeAudioOutputProvider());
+    byte[] syncframe = createTrueHdSyncframe(/* frameSizeBytes= */ 234, /* frameTime= */ 0x04D8);
+    Format format =
+        new Format.Builder()
+            .setSampleMimeType(MimeTypes.AUDIO_AC3)
+            .setSampleRate(48_000)
+            .setChannelCount(2)
+            .build();
+
+    FireOsIec61937AudioOutputProvider.PreparedEncodedPacket preparedPacket =
+        provider.prepareEncodedPacket(format, ByteBuffer.wrap(syncframe), 1);
+
+    assertThat(preparedPacket).isNotNull();
+    assertThat(preparedPacket.metadata.kind)
+        .isEqualTo(FireOsIec61937AudioOutputProvider.PackerKind.TRUEHD);
+    assertThat(preparedPacket.metadata.streamInfo.family)
+        .isEqualTo(FireOsStreamInfo.StreamFamily.TRUEHD);
+  }
+
+  @Test
+  public void prepareEncodedPacket_eAc3IgnoresMismatchedDtsMime() {
+    FireOsIec61937AudioOutputProvider provider =
+        new FireOsIec61937AudioOutputProvider(
+            new FakeAudioOutputProvider(), new FakeAudioOutputProvider());
+    byte[] mainFrame = createEAc3Syncframe(Ac3Util.SyncFrameInfo.STREAM_TYPE_TYPE0);
+    Format format =
+        new Format.Builder()
+            .setSampleMimeType(MimeTypes.AUDIO_DTS_HD)
+            .setSampleRate(48_000)
+            .setChannelCount(6)
+            .build();
+
+    FireOsIec61937AudioOutputProvider.PreparedEncodedPacket preparedPacket =
+        provider.prepareEncodedPacket(format, ByteBuffer.wrap(mainFrame), 1);
+
+    assertThat(preparedPacket).isNotNull();
+    assertThat(preparedPacket.metadata.kind)
+        .isEqualTo(FireOsIec61937AudioOutputProvider.PackerKind.E_AC3);
+    assertThat(preparedPacket.metadata.streamInfo.family)
+        .isEqualTo(FireOsStreamInfo.StreamFamily.E_AC3);
+  }
+
+  @Test
   public void prepareEncodedPacket_trueHdSplitsSubframesAfterMajorSyncAcrossBuffers() {
     FireOsIec61937AudioOutputProvider provider =
         new FireOsIec61937AudioOutputProvider(

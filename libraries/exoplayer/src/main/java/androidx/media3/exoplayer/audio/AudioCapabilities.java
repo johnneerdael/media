@@ -52,7 +52,6 @@ import com.google.common.primitives.Ints;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
-import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
@@ -383,26 +382,23 @@ public final class AudioCapabilities {
   @Nullable
   /* package */ PassthroughConfig getPassthroughConfigForFormat(
       Format format, AudioAttributes audioAttributes) {
+    boolean allowExperimentalFireOsIecPassthrough =
+        AmazonQuirks.shouldAttemptExperimentalFireOsIecPassthrough();
     @Nullable String sampleMimeType = format.sampleMimeType;
     @Nullable String codecs = format.codecs;
     @C.Encoding
     int encoding =
-        sampleMimeType == null ? C.ENCODING_INVALID : MimeTypes.getEncoding(sampleMimeType, codecs);
+        sampleMimeType == null
+            ? C.ENCODING_INVALID
+            : MimeTypes.getEncoding(
+                sampleMimeType,
+                allowExperimentalFireOsIecPassthrough ? /* codecs= */ null : codecs);
     @C.Encoding int requestedEncoding = encoding;
-    boolean fireOsDtsHdLike = isDtsHdLike(sampleMimeType, codecs, encoding);
-    boolean allowExperimentalFireOsIecPassthrough =
-        AmazonQuirks.shouldAttemptExperimentalFireOsIecPassthrough();
+    boolean fireOsDtsHdLike = isDtsHdFamilyEncoding(encoding);
     boolean preserveDtsHdEncodingForFireOsIec =
         allowExperimentalFireOsIecPassthrough && fireOsDtsHdLike;
     boolean forceLimitedFireTvDtsCoreFallback =
         AmazonQuirks.shouldForceLimitedFireTvDtsCoreFallback() && fireOsDtsHdLike;
-    if (encoding == C.ENCODING_INVALID
-        && AmazonQuirks.shouldForceLimitedFireTvDtsCoreFallback()
-        && isDtsFamily(sampleMimeType, codecs, encoding)) {
-      // Some Fire OS devices report DTS-HD family tracks with non-standard mime/codec descriptors.
-      // Coerce to a known DTS encoding so passthrough config can still be derived.
-      encoding = forceLimitedFireTvDtsCoreFallback ? C.ENCODING_DTS_HD : C.ENCODING_DTS;
-    }
     // Check that this is an encoding known to work for passthrough. This avoids trying to use
     // passthrough with an encoding where the device/app reports it's capable but it is untested or
     // known to be broken (for example AAC-LC).
@@ -506,47 +502,8 @@ public final class AudioCapabilities {
         encoding, channelConfig, audioProfile.getAudioTrackEncapsulationMode());
   }
 
-  private static boolean isDtsFamily(
-      @Nullable String sampleMimeType, @Nullable String codecs, @C.Encoding int encoding) {
-    if (encoding == C.ENCODING_DTS
-        || encoding == C.ENCODING_DTS_HD
-        || encoding == C.ENCODING_DTS_UHD_P2) {
-      return true;
-    }
-    String normalizedMime = normalizeLower(sampleMimeType);
-    if (normalizedMime.contains("audio/vnd.dts")) {
-      return true;
-    }
-    String normalizedCodecs = normalizeLower(codecs);
-    return normalizedCodecs.contains("dts");
-  }
-
-  private static boolean isDtsHdLike(
-      @Nullable String sampleMimeType, @Nullable String codecs, @C.Encoding int encoding) {
-    if (encoding == C.ENCODING_DTS_HD || encoding == C.ENCODING_DTS_UHD_P2) {
-      return true;
-    }
-    String normalizedMime = normalizeLower(sampleMimeType);
-    if (normalizedMime.contains("audio/vnd.dts.hd") || normalizedMime.contains("audio/vnd.dts.uhd")) {
-      return true;
-    }
-    String normalizedCodecs = normalizeLower(codecs);
-    return normalizedCodecs.contains("dtsh")
-        || normalizedCodecs.contains("dtsl")
-        || normalizedCodecs.contains("dtsma")
-        || normalizedCodecs.contains("dts-hd")
-        || normalizedCodecs.contains("dts_hd")
-        || normalizedCodecs.contains("dtsx")
-        || normalizedCodecs.contains("dts:x")
-        || normalizedCodecs.contains("dtsuhd");
-  }
-
   private static boolean isDtsHdFamilyEncoding(@C.Encoding int encoding) {
     return encoding == C.ENCODING_DTS_HD || encoding == C.ENCODING_DTS_UHD_P2;
-  }
-
-  private static String normalizeLower(@Nullable String value) {
-    return value == null ? "" : value.toLowerCase(Locale.US);
   }
 
   @Override
