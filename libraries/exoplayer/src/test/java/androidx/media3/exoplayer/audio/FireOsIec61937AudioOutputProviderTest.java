@@ -66,7 +66,8 @@ public class FireOsIec61937AudioOutputProviderTest {
   }
 
   @Test
-  public void getFormatSupport_kodiModeRejectsWrappedRawPassthroughWhenIecProbeFails() {
+  public void getFormatSupport_kodiModeUsesBootstrapPassthroughBeforeClassification()
+      throws Exception {
     FakeAudioOutputProvider passthroughProvider =
         new FakeAudioOutputProvider(
             DIRECT_SUPPORT,
@@ -84,11 +85,12 @@ public class FireOsIec61937AudioOutputProviderTest {
             .build();
 
     AudioOutputProvider.FormatSupport formatSupport = provider.getFormatSupport(formatConfig);
+    AudioOutputProvider.OutputConfig outputConfig = provider.getOutputConfig(formatConfig);
 
-    assertThat(formatSupport.supportLevel).isEqualTo(AudioOutputProvider.FORMAT_UNSUPPORTED);
-    assertThrows(
-        AudioOutputProvider.ConfigurationException.class,
-        () -> provider.getOutputConfig(formatConfig));
+    assertThat(formatSupport.supportLevel)
+        .isEqualTo(AudioOutputProvider.FORMAT_SUPPORTED_DIRECTLY);
+    assertThat(outputConfig.encoding).isEqualTo(C.ENCODING_DTS);
+    assertThat(outputConfig.channelMask).isEqualTo(AudioFormat.CHANNEL_OUT_STEREO);
   }
 
   @Test
@@ -123,6 +125,12 @@ public class FireOsIec61937AudioOutputProviderTest {
 
   @Test
   public void getOutputConfig_trueHd44k1RejectsWithoutBaseIecProbe() {
+    Format format =
+        new Format.Builder()
+            .setSampleMimeType(MimeTypes.AUDIO_TRUEHD)
+            .setSampleRate(44_100)
+            .setChannelCount(8)
+            .build();
     FakeAudioOutputProvider passthroughProvider =
         new FakeAudioOutputProvider(
             DIRECT_SUPPORT,
@@ -134,13 +142,8 @@ public class FireOsIec61937AudioOutputProviderTest {
         new FireOsIec61937AudioOutputProvider(passthroughProvider, new FakeAudioOutputProvider());
     seedKodiProbeMatrix(provider, /* stereo48= */ false, /* stereo192= */ true, /* multi192= */ true);
     AudioOutputProvider.FormatConfig formatConfig =
-        new AudioOutputProvider.FormatConfig.Builder(
-                new Format.Builder()
-                    .setSampleMimeType(MimeTypes.AUDIO_TRUEHD)
-                    .setSampleRate(44_100)
-                    .setChannelCount(8)
-                    .build())
-            .build();
+        new AudioOutputProvider.FormatConfig.Builder(format).build();
+    provider.updateStreamInfo(format, FireOsStreamInfo.createForTrueHd(44_100, 8));
 
     AudioOutputProvider.FormatSupport formatSupport = provider.getFormatSupport(formatConfig);
 
@@ -152,6 +155,12 @@ public class FireOsIec61937AudioOutputProviderTest {
 
   @Test
   public void getOutputConfig_trueHdRejectsStereoOnlyHighBitrateCarrier() {
+    Format format =
+        new Format.Builder()
+            .setSampleMimeType(MimeTypes.AUDIO_TRUEHD)
+            .setSampleRate(48_000)
+            .setChannelCount(8)
+            .build();
     FakeAudioOutputProvider passthroughProvider =
         new FakeAudioOutputProvider(
             DIRECT_SUPPORT,
@@ -163,13 +172,8 @@ public class FireOsIec61937AudioOutputProviderTest {
         new FireOsIec61937AudioOutputProvider(passthroughProvider, new FakeAudioOutputProvider());
     seedKodiProbeMatrix(provider, /* stereo48= */ true, /* stereo192= */ true, /* multi192= */ false);
     AudioOutputProvider.FormatConfig formatConfig =
-        new AudioOutputProvider.FormatConfig.Builder(
-                new Format.Builder()
-                    .setSampleMimeType(MimeTypes.AUDIO_TRUEHD)
-                    .setSampleRate(48_000)
-                    .setChannelCount(8)
-                    .build())
-            .build();
+        new AudioOutputProvider.FormatConfig.Builder(format).build();
+    provider.updateStreamInfo(format, FireOsStreamInfo.createForTrueHd(48_000, 8));
 
     assertThrows(
         AudioOutputProvider.ConfigurationException.class,
@@ -246,7 +250,7 @@ public class FireOsIec61937AudioOutputProviderTest {
   }
 
   @Test
-  public void getOutputConfig_dtsHdMaCodecHintDefaultsToKodiCoreBeforeParsedClassification()
+  public void getOutputConfig_dtsHdMaCodecHintKeepsBootstrapOutputBeforeParsedClassification()
       throws Exception {
     FakeAudioOutputProvider passthroughProvider =
         new FakeAudioOutputProvider(
@@ -269,7 +273,7 @@ public class FireOsIec61937AudioOutputProviderTest {
     AudioOutputProvider.OutputConfig outputConfig = provider.getOutputConfig(formatConfig);
 
     assertThat(outputConfig.encoding).isEqualTo(C.ENCODING_DTS_HD);
-    assertThat(outputConfig.channelMask).isEqualTo(AudioFormat.CHANNEL_OUT_STEREO);
+    assertThat(outputConfig.channelMask).isEqualTo(AudioFormat.CHANNEL_OUT_7POINT1_SURROUND);
   }
 
   @Test

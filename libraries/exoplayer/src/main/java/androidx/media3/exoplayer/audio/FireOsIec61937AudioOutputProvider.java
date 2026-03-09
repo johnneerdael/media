@@ -157,20 +157,23 @@ public final class FireOsIec61937AudioOutputProvider extends ForwardingAudioOutp
 
   @Override
   public FormatSupport getFormatSupport(FormatConfig formatConfig) {
-    FormatSupport passthroughSupport = passthroughProvider.getFormatSupport(formatConfig);
-    @Nullable FireOsStreamInfo decisionStreamInfo = getStreamInfoForPassthroughDecision(formatConfig.format);
+    boolean useKodiFireOsIecCapabilityModel = shouldUseKodiFireOsIecCapabilityModel();
+    @Nullable FireOsStreamInfo decisionStreamInfo =
+        getStreamInfoForPassthroughDecision(formatConfig.format);
     @Nullable PackerKind kind = getDecisionPackerKind(formatConfig.format, decisionStreamInfo);
+    @Nullable FormatSupport passthroughSupport = null;
     if (kind == null) {
+      passthroughSupport = passthroughProvider.getFormatSupport(formatConfig);
       return passthroughSupport;
     }
     @Nullable FallbackMode fallbackMode = fallbackModes.get(kind);
     if (fallbackMode == FallbackMode.STRICT_FAILURE) {
       return FormatSupport.UNSUPPORTED;
     }
-    boolean useKodiFireOsIecCapabilityModel = shouldUseKodiFireOsIecCapabilityModel();
     OutputConfig passthroughConfig =
         buildLogicalPassthroughOutputConfig(
             formatConfig,
+            kind,
             /* preferWrappedConfig= */ false,
             decisionStreamInfo);
     @Nullable CarrierPlan carrierPlan =
@@ -188,11 +191,14 @@ public final class FireOsIec61937AudioOutputProvider extends ForwardingAudioOutp
             + " carrier="
             + (carrierPlan != null ? describeOutputConfig(carrierPlan.carrierConfig) : "null")
             + " passthroughLevel="
-            + passthroughSupport.supportLevel);
+            + (passthroughSupport != null ? passthroughSupport.supportLevel : "n/a"));
     if (carrierPlan == null) {
+      if (passthroughSupport == null) {
+        passthroughSupport = passthroughProvider.getFormatSupport(formatConfig);
+      }
       return useKodiFireOsIecCapabilityModel ? FormatSupport.UNSUPPORTED : passthroughSupport;
     }
-    return passthroughSupport.buildUpon()
+    return new FormatSupport.Builder()
         .setFormatSupportLevel(FORMAT_SUPPORTED_DIRECTLY)
         .setIsFormatSupportedForOffload(false)
         .setIsGaplessSupportedForOffload(false)
@@ -226,13 +232,14 @@ public final class FireOsIec61937AudioOutputProvider extends ForwardingAudioOutp
         kind != null && shouldUseKodiFireOsIecCapabilityModel();
     OutputConfig passthroughConfig;
     boolean usedSyntheticLogicalConfig = false;
-    if (requireKodiIecCarrierPlan) {
-      passthroughConfig =
-          buildLogicalPassthroughOutputConfig(
-              formatConfig,
-              /* preferWrappedConfig= */ false,
-              decisionStreamInfo);
-      usedSyntheticLogicalConfig = true;
+      if (requireKodiIecCarrierPlan) {
+        passthroughConfig =
+            buildLogicalPassthroughOutputConfig(
+                formatConfig,
+                kind,
+                /* preferWrappedConfig= */ false,
+                decisionStreamInfo);
+        usedSyntheticLogicalConfig = true;
     } else {
       try {
         passthroughConfig = getPassthroughOutputConfigWithFireOsQuirks(formatConfig);
@@ -248,6 +255,7 @@ public final class FireOsIec61937AudioOutputProvider extends ForwardingAudioOutp
         passthroughConfig =
             buildLogicalPassthroughOutputConfig(
                 formatConfig,
+                kind,
                 /* preferWrappedConfig= */ false,
                 decisionStreamInfo);
         usedSyntheticLogicalConfig = true;
@@ -902,6 +910,7 @@ public final class FireOsIec61937AudioOutputProvider extends ForwardingAudioOutp
 
   private OutputConfig buildLogicalPassthroughOutputConfig(
       FormatConfig formatConfig,
+      @Nullable PackerKind kind,
       boolean preferWrappedConfig,
       @Nullable FireOsStreamInfo streamInfo) {
     if (preferWrappedConfig) {
@@ -912,11 +921,10 @@ public final class FireOsIec61937AudioOutputProvider extends ForwardingAudioOutp
       }
     }
     return new OutputConfig.Builder()
-        .setEncoding(
-            getEncodingIgnoringCodecHints(formatConfig.format))
+        .setEncoding(resolveLogicalPassthroughEncoding(formatConfig.format, kind))
         .setSampleRate(
             resolveInputSampleRateHz(formatConfig.format, streamInfo))
-        .setChannelMask(getLogicalPassthroughChannelMask(formatConfig.format, streamInfo))
+        .setChannelMask(getLogicalPassthroughChannelMask(formatConfig.format, streamInfo, kind))
         .setBufferSize(
             formatConfig.preferredBufferSize != C.LENGTH_UNSET
                 ? formatConfig.preferredBufferSize
@@ -933,13 +941,12 @@ public final class FireOsIec61937AudioOutputProvider extends ForwardingAudioOutp
   }
 
   private static int getLogicalPassthroughChannelMask(
-      Format format, @Nullable FireOsStreamInfo streamInfo) {
+      Format format, @Nullable FireOsStreamInfo streamInfo, @Nullable PackerKind kind) {
     if (streamInfo != null) {
       return streamInfo.logicalPassthroughChannelMask;
     }
-    @Nullable PackerKind provisionalKind = getProvisionalPackerKind(format);
-    if (provisionalKind != null) {
-      switch (provisionalKind) {
+    if (kind != null) {
+      switch (kind) {
         case TRUEHD:
           return IEC61937_MULTICHANNEL_RAW_CARRIER_MASK;
         case AC3:
@@ -1598,11 +1605,13 @@ public final class FireOsIec61937AudioOutputProvider extends ForwardingAudioOutp
     }
   }
 
-  @Nullable
-  private static PackerKind getDecisionPackerKind(
+  private @Nullable PackerKind getDecisionPackerKind(
       Format format, @Nullable FireOsStreamInfo streamInfo) {
     @Nullable PackerKind classifiedKind = streamInfo != null ? getPackerKind(streamInfo) : null;
-    return classifiedKind != null ? classifiedKind : getProvisionalPackerKind(format);
+    if (classifiedKind != null) {
+      return classifiedKind;
+    }
+    return shouldUseKodiFireOsIecCapabilityModel() ? null : getProvisionalPackerKind(format);
   }
 
   @Nullable
@@ -1662,6 +1671,27 @@ public final class FireOsIec61937AudioOutputProvider extends ForwardingAudioOutp
     return sampleMimeType == null
         ? C.ENCODING_INVALID
         : MimeTypes.getEncoding(checkNotNull(sampleMimeType), /* codecs= */ null);
+  }
+
+  private static int resolveLogicalPassthroughEncoding(
+      Format format, @Nullable PackerKind kind) {
+    if (kind != null) {
+      switch (kind) {
+        case AC3:
+          return C.ENCODING_AC3;
+        case E_AC3:
+          return C.ENCODING_E_AC3;
+        case DTS_CORE:
+          return C.ENCODING_DTS;
+        case DTS_HD:
+          return C.ENCODING_DTS_HD;
+        case TRUEHD:
+          return C.ENCODING_DOLBY_TRUEHD;
+        default:
+          break;
+      }
+    }
+    return getEncodingIgnoringCodecHints(format);
   }
 
   /* package */ enum PackerKind {
