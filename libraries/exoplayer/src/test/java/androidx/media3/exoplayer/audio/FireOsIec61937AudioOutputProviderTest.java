@@ -246,7 +246,7 @@ public class FireOsIec61937AudioOutputProviderTest {
   }
 
   @Test
-  public void getOutputConfig_dtsHdMaCodecHintUsesProvisionalMultichannelClassification()
+  public void getOutputConfig_dtsHdMaCodecHintDefaultsToKodiCoreBeforeParsedClassification()
       throws Exception {
     FakeAudioOutputProvider passthroughProvider =
         new FakeAudioOutputProvider(
@@ -269,7 +269,7 @@ public class FireOsIec61937AudioOutputProviderTest {
     AudioOutputProvider.OutputConfig outputConfig = provider.getOutputConfig(formatConfig);
 
     assertThat(outputConfig.encoding).isEqualTo(C.ENCODING_DTS_HD);
-    assertThat(outputConfig.channelMask).isEqualTo(AudioFormat.CHANNEL_OUT_7POINT1_SURROUND);
+    assertThat(outputConfig.channelMask).isEqualTo(AudioFormat.CHANNEL_OUT_STEREO);
   }
 
   @Test
@@ -470,13 +470,14 @@ public class FireOsIec61937AudioOutputProviderTest {
   }
 
   @Test
-  public void getOutputConfig_strictKodiModeDoesNotAllowRecoverableFallback() {
+  public void getOutputConfig_strictKodiModeIgnoresRecoverableFallbackState() throws Exception {
     FakeAudioOutputProvider passthroughProvider =
         new FakeAudioOutputProvider(
             DIRECT_SUPPORT,
             createOutputConfig(C.ENCODING_AC3, 48_000, AudioFormat.CHANNEL_OUT_STEREO));
     FireOsIec61937AudioOutputProvider provider =
         new FireOsIec61937AudioOutputProvider(passthroughProvider, new FakeAudioOutputProvider());
+    seedKodiProbeMatrix(provider, /* stereo48= */ true, /* stereo192= */ true, /* multi192= */ true);
     provider.requestFallbackForTesting(
         FireOsIec61937AudioOutputProvider.PackerKind.AC3,
         /* multichannelCarrierFailed= */ false,
@@ -490,19 +491,22 @@ public class FireOsIec61937AudioOutputProviderTest {
                     .build())
             .build();
 
-    assertThrows(
-        AudioOutputProvider.ConfigurationException.class,
-        () -> provider.getOutputConfig(formatConfig));
+    AudioOutputProvider.OutputConfig outputConfig = provider.getOutputConfig(formatConfig);
+
+    assertThat(outputConfig.encoding).isEqualTo(C.ENCODING_AC3);
+    assertThat(outputConfig.sampleRate).isEqualTo(48_000);
+    assertThat(outputConfig.channelMask).isEqualTo(AudioFormat.CHANNEL_OUT_STEREO);
   }
 
   @Test
-  public void getFormatSupport_strictKodiModeStopsAdvertisingIecAfterRecoverableFallback() {
+  public void getFormatSupport_strictKodiModeKeepsAdvertisingIecAfterRecoverableFallback() {
     FakeAudioOutputProvider passthroughProvider =
         new FakeAudioOutputProvider(
             DIRECT_SUPPORT,
             createOutputConfig(C.ENCODING_AC3, 48_000, AudioFormat.CHANNEL_OUT_STEREO));
     FireOsIec61937AudioOutputProvider provider =
         new FireOsIec61937AudioOutputProvider(passthroughProvider, new FakeAudioOutputProvider());
+    seedKodiProbeMatrix(provider, /* stereo48= */ true, /* stereo192= */ true, /* multi192= */ true);
     provider.requestFallbackForTesting(
         FireOsIec61937AudioOutputProvider.PackerKind.AC3,
         /* multichannelCarrierFailed= */ false,
@@ -518,7 +522,8 @@ public class FireOsIec61937AudioOutputProviderTest {
 
     AudioOutputProvider.FormatSupport formatSupport = provider.getFormatSupport(formatConfig);
 
-    assertThat(formatSupport.supportLevel).isEqualTo(AudioOutputProvider.FORMAT_UNSUPPORTED);
+    assertThat(formatSupport.supportLevel)
+        .isEqualTo(AudioOutputProvider.FORMAT_SUPPORTED_DIRECTLY);
   }
 
   @Test

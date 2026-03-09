@@ -101,6 +101,16 @@ public final class AudioCapabilities {
     return AmazonQuirks.isFireOsCompatibilityFallbackEnabled();
   }
 
+  /** Enables verbose Fire OS IEC logging for debugging. */
+  public static void setFireOsIecVerboseLoggingEnabled(boolean enabled) {
+    AmazonQuirks.setFireOsIecVerboseLoggingEnabled(enabled);
+  }
+
+  /** Returns whether verbose Fire OS IEC logging is enabled. */
+  public static boolean isFireOsIecVerboseLoggingEnabled() {
+    return AmazonQuirks.isFireOsIecVerboseLoggingEnabled();
+  }
+
   /** Enables the legacy Fire TV DTS-core fallback compatibility path. */
   public static void setLimitedFireTvDtsCoreFallbackEnabled(boolean enabled) {
     setFireOsCompatibilityFallbackEnabled(enabled);
