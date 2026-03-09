@@ -63,6 +63,10 @@ public final class FireOsIec61937AudioOutputProvider extends ForwardingAudioOutp
   private static final int IEC61937_PACKET_HEADER_BYTES = 8;
   private static final int FIRE_OS_OUTPUT_RETRY_DELAY_MS = 200;
   private static final int FIRE_OS_SMALLER_BUFFER_RETRY_SIZE = 1_000_000;
+  private static final int SUPERVISE_AUDIO_DELAY_MIN_STUCK_MS = 400;
+  private static final int SUPERVISE_AUDIO_DELAY_MAX_BUFFER_MULTIPLIER = 2;
+  private static final long SUPERVISE_AUDIO_DELAY_POSITION_TOLERANCE_US = 2_000L;
+  private static final int SUPERVISE_AUDIO_DELAY_REOPEN_ERROR = AudioTrack.ERROR_INVALID_OPERATION;
   private static final int IEC61937_PACKET_SYNC_WORD_1 = 0xF872;
   private static final int IEC61937_PACKET_SYNC_WORD_2 = 0x4E1F;
   private static final int IEC61937_AC3 = 0x01;
@@ -160,9 +164,17 @@ public final class FireOsIec61937AudioOutputProvider extends ForwardingAudioOutp
     boolean useKodiFireOsIecCapabilityModel = shouldUseKodiFireOsIecCapabilityModel();
     @Nullable FireOsStreamInfo decisionStreamInfo =
         getStreamInfoForPassthroughDecision(formatConfig.format);
-    @Nullable PackerKind kind = getDecisionPackerKind(formatConfig.format, decisionStreamInfo);
+    @Nullable PackerKind kind = getDecisionPackerKind(decisionStreamInfo);
     @Nullable FormatSupport passthroughSupport = null;
     if (kind == null) {
+      if (useKodiFireOsIecCapabilityModel) {
+        logIecDebug(
+            "getFormatSupport rejected (classification unavailable)"
+                + " kodiModel=true format={"
+                + describeFormat(formatConfig.format)
+                + "}");
+        return FormatSupport.UNSUPPORTED;
+      }
       passthroughSupport = passthroughProvider.getFormatSupport(formatConfig);
       return passthroughSupport;
     }
@@ -193,10 +205,13 @@ public final class FireOsIec61937AudioOutputProvider extends ForwardingAudioOutp
             + " passthroughLevel="
             + (passthroughSupport != null ? passthroughSupport.supportLevel : "n/a"));
     if (carrierPlan == null) {
+      if (useKodiFireOsIecCapabilityModel) {
+        return FormatSupport.UNSUPPORTED;
+      }
       if (passthroughSupport == null) {
         passthroughSupport = passthroughProvider.getFormatSupport(formatConfig);
       }
-      return useKodiFireOsIecCapabilityModel ? FormatSupport.UNSUPPORTED : passthroughSupport;
+      return passthroughSupport;
     }
     return new FormatSupport.Builder()
         .setFormatSupportLevel(FORMAT_SUPPORTED_DIRECTLY)
@@ -210,9 +225,19 @@ public final class FireOsIec61937AudioOutputProvider extends ForwardingAudioOutp
   public OutputConfig getOutputConfig(FormatConfig formatConfig) throws ConfigurationException {
     @Nullable FireOsStreamInfo decisionStreamInfo =
         getStreamInfoForPassthroughDecision(formatConfig.format);
-    @Nullable PackerKind kind = getDecisionPackerKind(formatConfig.format, decisionStreamInfo);
+    @Nullable PackerKind kind = getDecisionPackerKind(decisionStreamInfo);
+    if (kind == null && shouldUseKodiFireOsIecCapabilityModel()) {
+      throw new ConfigurationException(
+          "Strict Fire OS IEC mode requires parser-derived stream classification before config");
+    }
     if (kind != null) {
       @Nullable FallbackMode fallbackMode = fallbackModes.get(kind);
+      if (shouldUseKodiFireOsIecCapabilityModel()
+          && fallbackMode != null
+          && fallbackMode != FallbackMode.STRICT_FAILURE) {
+        fallbackModes.remove(kind);
+        fallbackMode = null;
+      }
       if (fallbackMode == FallbackMode.STRICT_FAILURE) {
         throw new ConfigurationException(
             "Strict Fire OS IEC mode rejected recoverable fallback for " + kind);
@@ -232,14 +257,14 @@ public final class FireOsIec61937AudioOutputProvider extends ForwardingAudioOutp
         kind != null && shouldUseKodiFireOsIecCapabilityModel();
     OutputConfig passthroughConfig;
     boolean usedSyntheticLogicalConfig = false;
-      if (requireKodiIecCarrierPlan) {
-        passthroughConfig =
-            buildLogicalPassthroughOutputConfig(
-                formatConfig,
-                kind,
-                /* preferWrappedConfig= */ false,
-                decisionStreamInfo);
-        usedSyntheticLogicalConfig = true;
+    if (requireKodiIecCarrierPlan) {
+      passthroughConfig =
+          buildLogicalPassthroughOutputConfig(
+              formatConfig,
+              kind,
+              /* preferWrappedConfig= */ false,
+              decisionStreamInfo);
+      usedSyntheticLogicalConfig = true;
     } else {
       try {
         passthroughConfig = getPassthroughOutputConfigWithFireOsQuirks(formatConfig);
@@ -315,7 +340,9 @@ public final class FireOsIec61937AudioOutputProvider extends ForwardingAudioOutp
           carrierOutput, plan.kind, plan.normalizer, plan.packer, this);
     } catch (InitializationException e) {
       @Nullable CarrierPlan fallbackPlan =
-          shouldAllowFireOsCompatibilityFallback() ? maybeCreateStereoCarrierFallback(plan) : null;
+          shouldAllowFireOsCompatibilityFallback() && !shouldUseKodiFireOsIecCapabilityModel()
+              ? maybeCreateStereoCarrierFallback(plan)
+              : null;
       if (fallbackPlan != null) {
         carrierPlans.put(config, fallbackPlan);
         try {
@@ -342,9 +369,9 @@ public final class FireOsIec61937AudioOutputProvider extends ForwardingAudioOutp
 
   private synchronized void requestFallback(
       PackerKind kind, boolean multichannelCarrierFailed, boolean allowStereoIecFallback) {
-    if (shouldUseKodiFireOsIecCapabilityModel() && !shouldAllowFireOsCompatibilityFallback()) {
+    if (shouldUseKodiFireOsIecCapabilityModel()) {
       logIecDebug(
-          "requestFallback ignored in strict Kodi IEC mode kind="
+          "requestFallback ignored in Kodi IEC mode kind="
               + kind
               + " multichannelFailed="
               + multichannelCarrierFailed
@@ -413,7 +440,7 @@ public final class FireOsIec61937AudioOutputProvider extends ForwardingAudioOutp
     if (passthroughConfig.isOffload || passthroughConfig.isTunneling) {
       return null;
     }
-    @Nullable PackerKind kind = getDecisionPackerKind(format, streamInfo);
+    @Nullable PackerKind kind = getDecisionPackerKind(streamInfo);
     if (kind == null) {
       return null;
     }
@@ -920,8 +947,9 @@ public final class FireOsIec61937AudioOutputProvider extends ForwardingAudioOutp
         throw new IllegalStateException("Wrapped passthrough config unexpectedly unavailable", e);
       }
     }
+    checkNotNull(kind);
     return new OutputConfig.Builder()
-        .setEncoding(resolveLogicalPassthroughEncoding(formatConfig.format, kind))
+        .setEncoding(resolveLogicalPassthroughEncoding(kind))
         .setSampleRate(
             resolveInputSampleRateHz(formatConfig.format, streamInfo))
         .setChannelMask(getLogicalPassthroughChannelMask(formatConfig.format, streamInfo, kind))
@@ -1367,6 +1395,11 @@ public final class FireOsIec61937AudioOutputProvider extends ForwardingAudioOutp
     return AmazonQuirks.isFireOsCompatibilityFallbackEnabled();
   }
 
+  private boolean shouldSuperviseFireOsIecAudioDelay() {
+    return shouldUseKodiFireOsIecCapabilityModel()
+        && AmazonQuirks.isFireOsIecSuperviseAudioDelayEnabled();
+  }
+
   private static boolean shouldLogIecDetails() {
     return AmazonQuirks.isFireOsIecVerboseLoggingEnabled();
   }
@@ -1605,13 +1638,8 @@ public final class FireOsIec61937AudioOutputProvider extends ForwardingAudioOutp
     }
   }
 
-  private @Nullable PackerKind getDecisionPackerKind(
-      Format format, @Nullable FireOsStreamInfo streamInfo) {
-    @Nullable PackerKind classifiedKind = streamInfo != null ? getPackerKind(streamInfo) : null;
-    if (classifiedKind != null) {
-      return classifiedKind;
-    }
-    return shouldUseKodiFireOsIecCapabilityModel() ? null : getProvisionalPackerKind(format);
+  private @Nullable PackerKind getDecisionPackerKind(@Nullable FireOsStreamInfo streamInfo) {
+    return streamInfo != null ? getPackerKind(streamInfo) : null;
   }
 
   @Nullable
@@ -1644,54 +1672,21 @@ public final class FireOsIec61937AudioOutputProvider extends ForwardingAudioOutp
     }
   }
 
-  @Nullable
-  private static PackerKind getProvisionalPackerKind(Format format) {
-    int encoding = getEncodingIgnoringCodecHints(format);
-    switch (encoding) {
-      case C.ENCODING_AC3:
-        return PackerKind.AC3;
-      case C.ENCODING_E_AC3:
-      case C.ENCODING_E_AC3_JOC:
-        return PackerKind.E_AC3;
-      case C.ENCODING_DTS:
-        return PackerKind.DTS_CORE;
-      case C.ENCODING_DTS_HD:
-      case C.ENCODING_DTS_UHD_P2:
-        return PackerKind.DTS_HD;
-      case C.ENCODING_DOLBY_TRUEHD:
-        return PackerKind.TRUEHD;
+  private static int resolveLogicalPassthroughEncoding(PackerKind kind) {
+    switch (kind) {
+      case AC3:
+        return C.ENCODING_AC3;
+      case E_AC3:
+        return C.ENCODING_E_AC3;
+      case DTS_CORE:
+        return C.ENCODING_DTS;
+      case DTS_HD:
+        return C.ENCODING_DTS_HD;
+      case TRUEHD:
+        return C.ENCODING_DOLBY_TRUEHD;
       default:
-        break;
+        throw new IllegalArgumentException("Unsupported packer kind: " + kind);
     }
-    return null;
-  }
-
-  private static int getEncodingIgnoringCodecHints(Format format) {
-    @Nullable String sampleMimeType = format.sampleMimeType;
-    return sampleMimeType == null
-        ? C.ENCODING_INVALID
-        : MimeTypes.getEncoding(checkNotNull(sampleMimeType), /* codecs= */ null);
-  }
-
-  private static int resolveLogicalPassthroughEncoding(
-      Format format, @Nullable PackerKind kind) {
-    if (kind != null) {
-      switch (kind) {
-        case AC3:
-          return C.ENCODING_AC3;
-        case E_AC3:
-          return C.ENCODING_E_AC3;
-        case DTS_CORE:
-          return C.ENCODING_DTS;
-        case DTS_HD:
-          return C.ENCODING_DTS_HD;
-        case TRUEHD:
-          return C.ENCODING_DOLBY_TRUEHD;
-        default:
-          break;
-      }
-    }
-    return getEncodingIgnoringCodecHints(format);
   }
 
   /* package */ enum PackerKind {
@@ -2911,6 +2906,13 @@ public final class FireOsIec61937AudioOutputProvider extends ForwardingAudioOutp
     private long syntheticPauseRemainingUs;
     private long lastPauseUpdateRealtimeMs;
     private boolean playing;
+    private final boolean superviseAudioDelay;
+    private long lastSupervisedPositionUs;
+    private boolean lastSupervisedPositionValid;
+    private int stuckWriteCounter;
+    private long pendingWriteDurationUs;
+    private long pendingWriteStartedRealtimeMs;
+    private boolean pendingWriteShouldThrottle;
 
     public FireOsIec61937AudioOutput(
         AudioOutput audioOutput,
@@ -2927,6 +2929,13 @@ public final class FireOsIec61937AudioOutputProvider extends ForwardingAudioOutp
       this.syntheticPauseRemainingUs = 0;
       this.lastPauseUpdateRealtimeMs = SystemClock.elapsedRealtime();
       this.playing = false;
+      this.superviseAudioDelay = provider.shouldSuperviseFireOsIecAudioDelay();
+      this.lastSupervisedPositionUs = 0;
+      this.lastSupervisedPositionValid = false;
+      this.stuckWriteCounter = 0;
+      this.pendingWriteDurationUs = 0;
+      this.pendingWriteStartedRealtimeMs = 0;
+      this.pendingWriteShouldThrottle = false;
     }
 
     @Override
@@ -2934,6 +2943,7 @@ public final class FireOsIec61937AudioOutputProvider extends ForwardingAudioOutp
       updateSyntheticPauseCompensation();
       lastPauseBurstDurationMs = C.LENGTH_UNSET;
       playing = true;
+      resetSupervisedAudioDelayState();
       lastPauseUpdateRealtimeMs = SystemClock.elapsedRealtime();
       super.play();
     }
@@ -2976,6 +2986,9 @@ public final class FireOsIec61937AudioOutputProvider extends ForwardingAudioOutp
               provider.allowsStereoIecFallback(kind));
           throw new WriteException(AudioTrack.ERROR_BAD_VALUE, /* isRecoverable= */ true);
         }
+        pendingWriteDurationUs = getCarrierWriteDurationUs(checkNotNull(pendingPackedBuffer).remaining());
+        pendingWriteStartedRealtimeMs = SystemClock.elapsedRealtime();
+        pendingWriteShouldThrottle = evaluateSupervisedAudioDelay(pendingWriteDurationUs);
       } else {
         checkState(pendingInputBuffer == buffer);
         checkState(pendingAccessUnitCount == encodedAccessUnitCount);
@@ -2992,6 +3005,10 @@ public final class FireOsIec61937AudioOutputProvider extends ForwardingAudioOutp
                 /* encodedAccessUnitCount= */ 1,
                 presentationTimeUs);
         if (fullyHandled) {
+          if (pendingWriteShouldThrottle) {
+            maybeThrottleSupervisedAudioDelayWrite(
+                pendingWriteDurationUs, pendingWriteStartedRealtimeMs);
+          }
           buffer.position(buffer.limit());
           clearPendingState();
         }
@@ -3007,7 +3024,7 @@ public final class FireOsIec61937AudioOutputProvider extends ForwardingAudioOutp
                 + e.isRecoverable
                 + " packedRemaining="
                 + (pendingPackedBuffer != null ? pendingPackedBuffer.remaining() : -1));
-        if (e.isRecoverable) {
+        if (e.isRecoverable && !isSupervisedAudioDelayReopen(e)) {
           provider.requestFallback(
               kind,
               packer.usesMultichannelCarrier(),
@@ -3021,6 +3038,7 @@ public final class FireOsIec61937AudioOutputProvider extends ForwardingAudioOutp
     public void pause() {
       updateSyntheticPauseCompensation();
       playing = false;
+      resetSupervisedAudioDelayState();
       writePauseBurst(getPauseBurstDurationMs());
       super.pause();
     }
@@ -3029,6 +3047,7 @@ public final class FireOsIec61937AudioOutputProvider extends ForwardingAudioOutp
     public void stop() {
       updateSyntheticPauseCompensation();
       playing = false;
+      resetSupervisedAudioDelayState();
       writePauseBurst(getPauseBurstDurationMs());
       super.stop();
       syntheticPauseRemainingUs = 0;
@@ -3039,6 +3058,7 @@ public final class FireOsIec61937AudioOutputProvider extends ForwardingAudioOutp
     public void flush() {
       updateSyntheticPauseCompensation();
       playing = false;
+      resetSupervisedAudioDelayState();
       writePauseBurst(getPauseBurstDurationMs());
       clearPendingState();
       super.pause();
@@ -3067,7 +3087,7 @@ public final class FireOsIec61937AudioOutputProvider extends ForwardingAudioOutp
         syntheticPauseRemainingUs += millis * 1_000L;
         lastPauseUpdateRealtimeMs = SystemClock.elapsedRealtime();
       } catch (WriteException e) {
-        if (e.isRecoverable) {
+        if (e.isRecoverable && !isSupervisedAudioDelayReopen(e)) {
           provider.requestFallback(
               kind,
               packer.usesMultichannelCarrier(),
@@ -3086,11 +3106,112 @@ public final class FireOsIec61937AudioOutputProvider extends ForwardingAudioOutp
       return (int) max(50L, min((int) millis, 500));
     }
 
+    private boolean evaluateSupervisedAudioDelay(long writeDurationUs) throws WriteException {
+      if (!superviseAudioDelay || !playing || writeDurationUs <= 0) {
+        return false;
+      }
+      long positionUs = max(0L, super.getPositionUs() - syntheticPauseRemainingUs);
+      if (lastSupervisedPositionValid
+          && positionUs > lastSupervisedPositionUs + SUPERVISE_AUDIO_DELAY_POSITION_TOLERANCE_US) {
+        stuckWriteCounter = 0;
+      } else {
+        stuckWriteCounter++;
+      }
+      lastSupervisedPositionUs = positionUs;
+      lastSupervisedPositionValid = true;
+
+      long bufferDurationUs = getAudioTrackBufferDurationUs();
+      if (bufferDurationUs <= 0) {
+        return false;
+      }
+
+      long maxStuckDurationUs =
+          max(
+              bufferDurationUs * SUPERVISE_AUDIO_DELAY_MAX_BUFFER_MULTIPLIER,
+              SUPERVISE_AUDIO_DELAY_MIN_STUCK_MS * 1_000L);
+      long stuckDurationUs = stuckWriteCounter * writeDurationUs;
+      if (stuckDurationUs > maxStuckDurationUs) {
+        Log.w(
+            TAG,
+            "Supervised IEC audio delay forced sink reopen"
+                + " kind="
+                + kind
+                + " stuckMs="
+                + (stuckDurationUs / 1_000L)
+                + " maxStuckMs="
+                + (maxStuckDurationUs / 1_000L)
+                + " bufferMs="
+                + (bufferDurationUs / 1_000L));
+        clearPendingState();
+        resetSupervisedAudioDelayState();
+        throw new WriteException(SUPERVISE_AUDIO_DELAY_REOPEN_ERROR, /* isRecoverable= */ true);
+      }
+      return stuckDurationUs >= bufferDurationUs;
+    }
+
+    private void maybeThrottleSupervisedAudioDelayWrite(
+        long writeDurationUs, long writeStartedRealtimeMs) {
+      if (writeDurationUs <= 0 || writeStartedRealtimeMs <= 0) {
+        return;
+      }
+      long elapsedUs = max(0L, (SystemClock.elapsedRealtime() - writeStartedRealtimeMs) * 1_000L);
+      long sleepUs = writeDurationUs - elapsedUs;
+      if (sleepUs <= 0) {
+        return;
+      }
+      long sleepMs = (sleepUs + 999L) / 1_000L;
+      logIecDebug(
+          "Supervised IEC audio delay throttling"
+              + " kind="
+              + kind
+              + " sleepMs="
+              + sleepMs
+              + " stuckWrites="
+              + stuckWriteCounter);
+      SystemClock.sleep(sleepMs);
+    }
+
+    private long getAudioTrackBufferDurationUs() {
+      long bufferFrames = getBufferSizeInFrames();
+      int sampleRateHz = getSampleRate();
+      if (bufferFrames <= 0 || sampleRateHz <= 0) {
+        return 0L;
+      }
+      return (bufferFrames * 1_000_000L) / sampleRateHz;
+    }
+
+    private long getCarrierWriteDurationUs(int packetBytes) {
+      int sampleRateHz = getSampleRate();
+      if (packetBytes <= 0 || sampleRateHz <= 0) {
+        return 0L;
+      }
+      int channelCount = packer.usesMultichannelCarrier() ? 8 : 2;
+      int frameSizeBytes = channelCount * 2;
+      long frameCount = packetBytes / frameSizeBytes;
+      if (frameCount <= 0) {
+        return 0L;
+      }
+      return (frameCount * 1_000_000L) / sampleRateHz;
+    }
+
+    private boolean isSupervisedAudioDelayReopen(WriteException error) {
+      return error.isRecoverable && error.errorCode == SUPERVISE_AUDIO_DELAY_REOPEN_ERROR;
+    }
+
+    private void resetSupervisedAudioDelayState() {
+      lastSupervisedPositionUs = 0;
+      lastSupervisedPositionValid = false;
+      stuckWriteCounter = 0;
+    }
+
     private void clearPendingState() {
       pendingInputBuffer = null;
       pendingNormalizedBatch = null;
       pendingPackedBuffer = null;
       pendingAccessUnitCount = 0;
+      pendingWriteDurationUs = 0;
+      pendingWriteStartedRealtimeMs = 0;
+      pendingWriteShouldThrottle = false;
     }
 
     private void updateSyntheticPauseCompensation() {
