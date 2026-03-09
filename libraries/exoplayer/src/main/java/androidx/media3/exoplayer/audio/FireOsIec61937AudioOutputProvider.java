@@ -66,7 +66,7 @@ public final class FireOsIec61937AudioOutputProvider extends ForwardingAudioOutp
   private static final int FIRE_OS_SMALLER_BUFFER_RETRY_SIZE = 1_000_000;
   private static final int SUPERVISE_AUDIO_DELAY_MIN_STUCK_MS = 400;
   private static final int SUPERVISE_AUDIO_DELAY_MAX_BUFFER_MULTIPLIER = 2;
-  private static final long SUPERVISE_AUDIO_DELAY_POSITION_TOLERANCE_US = 2_000L;
+  private static final long SUPERVISE_AUDIO_DELAY_POSITION_TOLERANCE_US = 0L;
   private static final int SUPERVISE_AUDIO_DELAY_REOPEN_ERROR = AudioTrack.ERROR_INVALID_OPERATION;
   private static final int IEC61937_PACKET_SYNC_WORD_1 = 0xF872;
   private static final int IEC61937_PACKET_SYNC_WORD_2 = 0x4E1F;
@@ -2802,11 +2802,13 @@ public final class FireOsIec61937AudioOutputProvider extends ForwardingAudioOutp
     @Override
     public ByteBuffer pack(NormalizedPacketBatch batch) {
       if (batch.reportedAccessUnitCount != Ac3Util.TRUEHD_RECHUNK_SAMPLE_COUNT) {
-        Log.w(
-            TAG,
-            "Unexpected TrueHD access unit count="
+        logIecDebug(
+            "TrueHD reported access unit count differs from rechunk count"
+                + " reported="
                 + batch.reportedAccessUnitCount
-                + ", expected="
+                + " parsed="
+                + batch.accessUnits.size()
+                + " expected="
                 + Ac3Util.TRUEHD_RECHUNK_SAMPLE_COUNT);
       }
       for (NormalizedAccessUnit accessUnit : batch.accessUnits) {
@@ -3069,6 +3071,7 @@ public final class FireOsIec61937AudioOutputProvider extends ForwardingAudioOutp
     private long pendingWriteDurationUs;
     private long pendingWriteStartedRealtimeMs;
     private boolean pendingWriteShouldThrottle;
+    private long supervisedBufferDurationUs;
 
     public FireOsIec61937AudioOutput(
         AudioOutput audioOutput,
@@ -3092,6 +3095,7 @@ public final class FireOsIec61937AudioOutputProvider extends ForwardingAudioOutp
       this.pendingWriteDurationUs = 0;
       this.pendingWriteStartedRealtimeMs = 0;
       this.pendingWriteShouldThrottle = false;
+      this.supervisedBufferDurationUs = 0;
     }
 
     @Override
@@ -3277,13 +3281,18 @@ public final class FireOsIec61937AudioOutputProvider extends ForwardingAudioOutp
       lastSupervisedPositionValid = true;
 
       long bufferDurationUs = getAudioTrackBufferDurationUs();
-      if (bufferDurationUs <= 0) {
+      if (bufferDurationUs <= 0 && supervisedBufferDurationUs <= 0) {
         return false;
       }
+      if (supervisedBufferDurationUs <= 0 && bufferDurationUs > 0) {
+        supervisedBufferDurationUs = bufferDurationUs;
+      }
+      long baselineBufferDurationUs =
+          supervisedBufferDurationUs > 0 ? supervisedBufferDurationUs : bufferDurationUs;
 
       long maxStuckDurationUs =
           max(
-              bufferDurationUs * SUPERVISE_AUDIO_DELAY_MAX_BUFFER_MULTIPLIER,
+              baselineBufferDurationUs * SUPERVISE_AUDIO_DELAY_MAX_BUFFER_MULTIPLIER,
               SUPERVISE_AUDIO_DELAY_MIN_STUCK_MS * 1_000L);
       long stuckDurationUs = stuckWriteCounter * writeDurationUs;
       if (stuckDurationUs > maxStuckDurationUs) {
@@ -3296,13 +3305,17 @@ public final class FireOsIec61937AudioOutputProvider extends ForwardingAudioOutp
                 + (stuckDurationUs / 1_000L)
                 + " maxStuckMs="
                 + (maxStuckDurationUs / 1_000L)
+                + " baselineBufferMs="
+                + (baselineBufferDurationUs / 1_000L)
                 + " bufferMs="
                 + (bufferDurationUs / 1_000L));
+        // Mirror Kodi: wait out the supervision window before reopening.
+        SystemClock.sleep((maxStuckDurationUs + 999L) / 1_000L);
         clearPendingState();
         resetSupervisedAudioDelayState();
         throw new WriteException(SUPERVISE_AUDIO_DELAY_REOPEN_ERROR, /* isRecoverable= */ true);
       }
-      return stuckDurationUs >= bufferDurationUs;
+      return stuckDurationUs >= baselineBufferDurationUs;
     }
 
     private void maybeThrottleSupervisedAudioDelayWrite(
@@ -3368,6 +3381,7 @@ public final class FireOsIec61937AudioOutputProvider extends ForwardingAudioOutp
       pendingWriteDurationUs = 0;
       pendingWriteStartedRealtimeMs = 0;
       pendingWriteShouldThrottle = false;
+      supervisedBufferDurationUs = 0;
     }
 
     private void updateSyntheticPauseCompensation() {
@@ -3688,7 +3702,10 @@ public final class FireOsIec61937AudioOutputProvider extends ForwardingAudioOutp
       byte[] input, int encodedAccessUnitCount, TrueHdSyncParserState parserState) {
     byte[] source = prependPending(input, parserState.pendingBytes);
     ArrayList<ParsedTrueHdFrameSlice> accessUnits = new ArrayList<>();
-    int accessUnitLimit = encodedAccessUnitCount > 0 ? encodedAccessUnitCount : Integer.MAX_VALUE;
+    // Kodi's parser keeps consuming complete syncframes from the parser buffer regardless of
+    // container-reported packet metadata. Some Fire OS paths report encodedAccessUnitCount=1 even
+    // when multiple TrueHD syncframes are present in a single input buffer.
+    int accessUnitLimit = Integer.MAX_VALUE;
     int offset = 0;
     int skippedBytes = 0;
     int possibleOffset = -1;
