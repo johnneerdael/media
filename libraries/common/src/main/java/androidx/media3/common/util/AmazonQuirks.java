@@ -35,6 +35,7 @@ public final class AmazonQuirks {
   private static volatile boolean experimentalFireOsAudioQuirksEnabled;
   private static volatile boolean limitedFireTvDtsCoreFallbackEnabled;
   private static volatile boolean skipProfileLevelCheck;
+  private static volatile boolean fireOsIecVerboseLoggingEnabled;
 
   private AmazonQuirks() {}
 
@@ -52,6 +53,14 @@ public final class AmazonQuirks {
 
   public static void setFireOsCompatibilityFallbackEnabled(boolean enabled) {
     limitedFireTvDtsCoreFallbackEnabled = enabled;
+  }
+
+  public static void setFireOsIecVerboseLoggingEnabled(boolean enabled) {
+    fireOsIecVerboseLoggingEnabled = enabled;
+  }
+
+  public static boolean isFireOsIecVerboseLoggingEnabled() {
+    return fireOsIecVerboseLoggingEnabled;
   }
 
   public static boolean isFireOsCompatibilityFallbackEnabled() {
