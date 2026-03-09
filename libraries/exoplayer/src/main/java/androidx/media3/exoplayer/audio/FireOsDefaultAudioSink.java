@@ -1352,6 +1352,10 @@ public final class FireOsDefaultAudioSink implements AudioSink {
         listener.onAudioSinkError(error);
       }
       if (e.isRecoverable) {
+        if (isStrictKodiIecMode()) {
+          Log.w(TAG, "Strict Fire OS IEC sink reopen after recoverable write failure");
+          flush();
+        }
         throw error; // Do not delay the exception if it can be recovered at a higher level.
       }
       writeExceptionPendingExceptionHolder.throwExceptionIfDeadlineIsReached(error);
@@ -2025,6 +2029,9 @@ public final class FireOsDefaultAudioSink implements AudioSink {
     if (!initialFailure.isRecoverable || fireOsAudioOutputProvider == null || configuration == null) {
       return false;
     }
+    if (isStrictKodiIecMode()) {
+      return false;
+    }
     if (fireOsPassthroughSession != null) {
       fireOsPassthroughSession.onInitializationFailure(initialFailure);
     }
@@ -2055,6 +2062,9 @@ public final class FireOsDefaultAudioSink implements AudioSink {
     if (fireOsAudioOutputProvider == null || configuration == null) {
       return false;
     }
+    if (isStrictKodiIecMode()) {
+      return false;
+    }
     if (fireOsPassthroughSession != null) {
       fireOsPassthroughSession.onWriteFailure(error);
     }
@@ -2079,6 +2089,12 @@ public final class FireOsDefaultAudioSink implements AudioSink {
       Log.w(TAG, "Fire OS sink failed to prepare fallback output config", e);
     }
     return false;
+  }
+
+  private boolean isStrictKodiIecMode() {
+    return fireOsAudioOutputProvider != null
+        && AudioCapabilities.isExperimentalFireOsIecPassthroughEnabled()
+        && !AudioCapabilities.isFireOsCompatibilityFallbackEnabled();
   }
 
   private long getSubmittedFrames() {

@@ -47,6 +47,7 @@ import java.util.EnumMap;
 import java.util.HashMap;
 import java.util.IdentityHashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -89,6 +90,7 @@ public final class FireOsIec61937AudioOutputProvider extends ForwardingAudioOutp
   private static final int TRUEHD_FORMAT_MAJOR_SYNC = 0xF8726FBA;
   private static final int MAX_AC3_PENDING_BYTES = 8 * 1024;
   private static final int MAX_DTS_PENDING_BYTES = 128 * 1024;
+  private static final int MAX_TRUEHD_PENDING_BYTES = 128 * 1024;
   private static final int MAX_AC3_HEADER_SEARCH_BYTES = 64;
   private static final int MAX_DTS_HEADER_SEARCH_BYTES = 64;
   private static final int TRUEHD_MAT_BUFFER_LIMIT = IEC61937_TRUEHD_PACKET_BYTES - 24;
@@ -693,14 +695,16 @@ public final class FireOsIec61937AudioOutputProvider extends ForwardingAudioOutp
 
   /* package */ @Nullable PreparedEncodedPacket prepareEncodedPacket(
       Format format, ByteBuffer buffer, int encodedAccessUnitCount) {
-    @Nullable FireOsStreamInfo streamInfoHint = getActiveStreamInfo();
-    ArrayList<PackerKind> candidateKinds = new ArrayList<>(3);
+    @Nullable FireOsStreamInfo streamInfoHint = getStreamInfoForPassthroughDecision(format);
+    byte[] inspectionBytes = toArray(buffer.duplicate());
+    ArrayList<PackerKind> candidateKinds = new ArrayList<>(4);
+    addCandidateKind(candidateKinds, detectPackerKindKodiStyle(inspectionBytes));
     if (streamInfoHint != null) {
       addCandidateKind(candidateKinds, getPackerKind(streamInfoHint));
     }
-    addCandidateKind(candidateKinds, PackerKind.TRUEHD);
     addCandidateKind(candidateKinds, PackerKind.DTS_HD);
     addCandidateKind(candidateKinds, PackerKind.E_AC3);
+    addCandidateKind(candidateKinds, PackerKind.TRUEHD);
 
     for (PackerKind candidateKind : candidateKinds) {
       @Nullable PreparedEncodedPacket preparedPacket;
@@ -725,6 +729,55 @@ public final class FireOsIec61937AudioOutputProvider extends ForwardingAudioOutp
       }
     }
     return null;
+  }
+
+  private @Nullable PackerKind detectPackerKindKodiStyle(byte[] input) {
+    @Nullable PackerKind possibleKind = null;
+    for (int offset = 0; offset + 8 < input.length; offset++) {
+      int bytesRemaining = input.length - offset;
+
+      if (looksLikeDtsSync(input, offset)) {
+        int dtsSize = parseDtsAccessUnitSize(input, offset, bytesRemaining);
+        if (dtsSize > 0) {
+          return PackerKind.DTS_HD;
+        }
+        if (possibleKind == null) {
+          possibleKind = PackerKind.DTS_HD;
+        }
+      }
+
+      if (isAc3SyncWord(input, offset)) {
+        int ac3Size = parseAc3AccessUnitSize(input, offset, bytesRemaining);
+        if (ac3Size > 0) {
+          return PackerKind.E_AC3;
+        }
+        if (possibleKind == null) {
+          possibleKind = PackerKind.E_AC3;
+        }
+      }
+
+      if (isPotentialTrueHdMajorSync(input, offset)) {
+        TrueHdParseAttempt trueHdAttempt =
+            tryParseTrueHdAccessUnit(input, offset, bytesRemaining, new TrueHdSyncParserState());
+        if (trueHdAttempt.status == TrueHdParseStatus.FRAME) {
+          return PackerKind.TRUEHD;
+        }
+        if (possibleKind == null) {
+          possibleKind = PackerKind.TRUEHD;
+        }
+      }
+    }
+    return possibleKind;
+  }
+
+  private static boolean isPotentialTrueHdMajorSync(byte[] input, int offset) {
+    if (offset + 7 >= input.length) {
+      return false;
+    }
+    return (input[offset + 4] & 0xFF) == 0xF8
+        && (input[offset + 5] & 0xFF) == 0x72
+        && (input[offset + 6] & 0xFF) == 0x6F
+        && (input[offset + 7] & 0xFF) == 0xBA;
   }
 
   private static void addCandidateKind(ArrayList<PackerKind> candidateKinds, @Nullable PackerKind kind) {
@@ -904,7 +957,83 @@ public final class FireOsIec61937AudioOutputProvider extends ForwardingAudioOutp
 
   private synchronized @Nullable FireOsStreamInfo getStreamInfoForPassthroughDecision(
       Format format) {
-    return getActiveStreamInfo();
+    @Nullable FireOsStreamInfo activeStreamInfo = getActiveStreamInfo();
+    if (activeStreamInfo != null) {
+      return activeStreamInfo;
+    }
+    return deriveKodiPrePlaybackStreamInfo(format);
+  }
+
+  private static @Nullable FireOsStreamInfo deriveKodiPrePlaybackStreamInfo(Format format) {
+    @Nullable String codecMimeType = resolveCodecMimeTypeForPrePlayback(format);
+    if (codecMimeType == null) {
+      return null;
+    }
+    int inputSampleRateHz = format.sampleRate != Format.NO_VALUE ? format.sampleRate : 48_000;
+    int inputChannelCount = format.channelCount != Format.NO_VALUE ? format.channelCount : 2;
+    switch (codecMimeType) {
+      case MimeTypes.AUDIO_AC3:
+        return FireOsStreamInfo.createForAc3Family(
+            /* isEac3= */ false, inputSampleRateHz, inputChannelCount);
+      case MimeTypes.AUDIO_E_AC3:
+      case MimeTypes.AUDIO_E_AC3_JOC:
+        return FireOsStreamInfo.createForAc3Family(
+            /* isEac3= */ true, inputSampleRateHz, inputChannelCount);
+      case MimeTypes.AUDIO_TRUEHD:
+        if (format.sampleRate == Format.NO_VALUE || format.channelCount == Format.NO_VALUE) {
+          return FireOsStreamInfo.createForUnknownTrueHd();
+        }
+        return FireOsStreamInfo.createForTrueHd(inputSampleRateHz, inputChannelCount);
+      case MimeTypes.AUDIO_DTS:
+      case MimeTypes.AUDIO_DTS_EXPRESS:
+      case MimeTypes.AUDIO_DTS_HD:
+      case MimeTypes.AUDIO_DTS_X:
+        return FireOsStreamInfo.createForDts(
+            /* sampleMimeType= */ null,
+            deriveKodiPrePlaybackDtsStreamType(codecMimeType, format.codecs),
+            inputSampleRateHz,
+            inputChannelCount,
+            C.LENGTH_UNSET,
+            /* diagnostics= */ "kodi-preplay");
+      default:
+        return null;
+    }
+  }
+
+  private static @Nullable String resolveCodecMimeTypeForPrePlayback(Format format) {
+    @Nullable String codecs = format.codecs;
+    if (codecs != null) {
+      String[] codecIds = codecs.split(",");
+      for (String codecId : codecIds) {
+        @Nullable String codecMimeType = MimeTypes.getMediaMimeType(codecId.trim());
+        if (codecMimeType != null && MimeTypes.isAudio(codecMimeType)) {
+          return codecMimeType;
+        }
+      }
+    }
+    return format.sampleMimeType;
+  }
+
+  private static FireOsStreamInfo.DtsStreamType deriveKodiPrePlaybackDtsStreamType(
+      String codecMimeType, @Nullable String codecs) {
+    if (MimeTypes.AUDIO_DTS_X.equals(codecMimeType)) {
+      // Kodi maps DTS-HD MA X profiles to DTSHD_MA during pre-playback support selection.
+      return FireOsStreamInfo.DtsStreamType.DTSHD_MA;
+    }
+    if (MimeTypes.AUDIO_DTS_HD.equals(codecMimeType)) {
+      String normalizedCodecs = codecs == null ? "" : codecs.toLowerCase(Locale.US);
+      if (normalizedCodecs.contains("dtsl")
+          || normalizedCodecs.contains("dtsx")
+          || normalizedCodecs.contains("ma")) {
+        return FireOsStreamInfo.DtsStreamType.DTSHD_MA;
+      }
+      if (normalizedCodecs.contains("dtsh") || normalizedCodecs.contains("hra")) {
+        return FireOsStreamInfo.DtsStreamType.DTSHD;
+      }
+      // Kodi defaults unknown DTS profile to core before frame parser refinement.
+      return FireOsStreamInfo.DtsStreamType.DTSHD_CORE;
+    }
+    return FireOsStreamInfo.DtsStreamType.DTSHD_CORE;
   }
 
   private static int getTotalFrames(List<NormalizedAccessUnit> accessUnits) {
@@ -1105,11 +1234,10 @@ public final class FireOsIec61937AudioOutputProvider extends ForwardingAudioOutp
       ByteBuffer inputBuffer, int encodedAccessUnitCount) {
     byte[] input = toArray(inputBuffer);
     TrueHdSyncParserState parserState = trueHdSyncParserState.copy();
-    List<ParsedTrueHdFrameSlice> accessUnits =
-        splitTrueHdAccessUnits(input, encodedAccessUnitCount, parserState);
-    ArrayList<NormalizedAccessUnit> normalizedUnits = new ArrayList<>(accessUnits.size());
-    for (ParsedTrueHdFrameSlice accessUnit : accessUnits) {
-      byte[] bytes = copyRange(input, accessUnit.offset, accessUnit.length);
+    TrueHdSplitResult splitResult = splitTrueHdAccessUnits(input, encodedAccessUnitCount, parserState);
+    ArrayList<NormalizedAccessUnit> normalizedUnits = new ArrayList<>(splitResult.accessUnits.size());
+    for (ParsedTrueHdFrameSlice accessUnit : splitResult.accessUnits) {
+      byte[] bytes = copyRange(splitResult.source, accessUnit.offset, accessUnit.length);
       normalizedUnits.add(
           new NormalizedAccessUnit(
               bytes,
@@ -1161,6 +1289,9 @@ public final class FireOsIec61937AudioOutputProvider extends ForwardingAudioOutp
 
   private AudioOutput getAudioOutputWithRetry(AudioOutputProvider provider, OutputConfig config)
       throws InitializationException {
+    if (shouldUseKodiFireOsIecCapabilityModel()) {
+      return provider.getAudioOutput(config);
+    }
     try {
       return provider.getAudioOutput(config);
     } catch (InitializationException firstFailure) {
@@ -2188,11 +2319,10 @@ public final class FireOsIec61937AudioOutputProvider extends ForwardingAudioOutp
     public NormalizedPacketBatch normalize(ByteBuffer inputBuffer, int encodedAccessUnitCount) {
       byte[] input = toArray(inputBuffer);
       TrueHdSyncParserState parserState = new TrueHdSyncParserState();
-      List<ParsedTrueHdFrameSlice> accessUnits =
-          splitTrueHdAccessUnits(input, encodedAccessUnitCount, parserState);
-      ArrayList<NormalizedAccessUnit> normalizedUnits = new ArrayList<>(accessUnits.size());
-      for (ParsedTrueHdFrameSlice accessUnit : accessUnits) {
-        byte[] bytes = copyRange(input, accessUnit.offset, accessUnit.length);
+      TrueHdSplitResult splitResult = splitTrueHdAccessUnits(input, encodedAccessUnitCount, parserState);
+      ArrayList<NormalizedAccessUnit> normalizedUnits = new ArrayList<>(splitResult.accessUnits.size());
+      for (ParsedTrueHdFrameSlice accessUnit : splitResult.accessUnits) {
+        byte[] bytes = copyRange(splitResult.source, accessUnit.offset, accessUnit.length);
         normalizedUnits.add(
             new NormalizedAccessUnit(
                 bytes,
@@ -2282,6 +2412,7 @@ public final class FireOsIec61937AudioOutputProvider extends ForwardingAudioOutp
   private static final class EAc3IecPacker implements IecPacker {
     private final int inputSampleRateHz;
     private final ArrayDeque<ByteBuffer> pendingPackets;
+    private final ArrayDeque<NormalizedAccessUnit> deferredAccessUnits;
     private byte[] accumulatedFrames;
     private int accumulatedSize;
     private int accumulatedFrameCount;
@@ -2290,6 +2421,7 @@ public final class FireOsIec61937AudioOutputProvider extends ForwardingAudioOutp
     public EAc3IecPacker(int inputSampleRateHz) {
       this.inputSampleRateHz = inputSampleRateHz;
       this.pendingPackets = new ArrayDeque<>();
+      this.deferredAccessUnits = new ArrayDeque<>();
       this.accumulatedFrames = new byte[0];
       this.accumulatedSize = 0;
       this.accumulatedFrameCount = 0;
@@ -2313,8 +2445,18 @@ public final class FireOsIec61937AudioOutputProvider extends ForwardingAudioOutp
 
     @Override
     public ByteBuffer pack(NormalizedPacketBatch batch) {
-      for (NormalizedAccessUnit accessUnit : batch.accessUnits) {
-        appendAccessUnit(accessUnit);
+      while (!deferredAccessUnits.isEmpty()) {
+        if (!appendAccessUnit(checkNotNull(deferredAccessUnits.pollFirst()))) {
+          return drainPendingPackets();
+        }
+      }
+      for (int i = 0; i < batch.accessUnits.size(); i++) {
+        if (!appendAccessUnit(batch.accessUnits.get(i))) {
+          for (int j = i + 1; j < batch.accessUnits.size(); j++) {
+            deferredAccessUnits.addLast(batch.accessUnits.get(j));
+          }
+          break;
+        }
       }
       return drainPendingPackets();
     }
@@ -2339,7 +2481,18 @@ public final class FireOsIec61937AudioOutputProvider extends ForwardingAudioOutp
       return this;
     }
 
-    private void appendAccessUnit(NormalizedAccessUnit accessUnit) {
+    private boolean appendAccessUnit(NormalizedAccessUnit accessUnit) {
+      int maxPayloadBytes = IEC61937_E_AC3_PACKET_BYTES - IEC61937_PACKET_HEADER_BYTES;
+      if (accessUnit.data.length > maxPayloadBytes) {
+        Log.w(
+            TAG,
+            "Dropping oversized E-AC3 access unit"
+                + " bytes="
+                + accessUnit.data.length
+                + " maxPayload="
+                + maxPayloadBytes);
+        return true;
+      }
       int frameSampleCount = max(1, accessUnit.sampleCount);
       int nextFramesPerBurst = max(1, 1_536 / frameSampleCount);
       if (framesPerBurst != 0 && framesPerBurst != nextFramesPerBurst) {
@@ -2347,9 +2500,11 @@ public final class FireOsIec61937AudioOutputProvider extends ForwardingAudioOutp
       }
       framesPerBurst = nextFramesPerBurst;
       int newSize = accumulatedSize + accessUnit.data.length;
-      if (newSize > IEC61937_E_AC3_PACKET_BYTES - IEC61937_PACKET_HEADER_BYTES) {
+      if (newSize > maxPayloadBytes) {
         flushAccumulatedFrames();
-        newSize = accessUnit.data.length;
+        // Kodi flushes the accumulated burst and defers this frame to a later burst.
+        deferredAccessUnits.addLast(accessUnit);
+        return false;
       }
       ensureAccumulatedCapacity(newSize);
       System.arraycopy(accessUnit.data, 0, accumulatedFrames, accumulatedSize, accessUnit.data.length);
@@ -2358,6 +2513,7 @@ public final class FireOsIec61937AudioOutputProvider extends ForwardingAudioOutp
       if (accumulatedFrameCount >= max(1, framesPerBurst)) {
         flushAccumulatedFrames();
       }
+      return true;
     }
 
     private void flushAccumulatedFrames() {
@@ -3528,24 +3684,49 @@ public final class FireOsIec61937AudioOutputProvider extends ForwardingAudioOutp
     return (input[offset] & 0xFF) == 0x0B && (input[offset + 1] & 0xFF) == 0x77;
   }
 
-  private static List<ParsedTrueHdFrameSlice> splitTrueHdAccessUnits(
+  private static TrueHdSplitResult splitTrueHdAccessUnits(
       byte[] input, int encodedAccessUnitCount, TrueHdSyncParserState parserState) {
+    byte[] source = prependPending(input, parserState.pendingBytes);
     ArrayList<ParsedTrueHdFrameSlice> accessUnits = new ArrayList<>();
     int accessUnitLimit = encodedAccessUnitCount > 0 ? encodedAccessUnitCount : Integer.MAX_VALUE;
     int offset = 0;
     int skippedBytes = 0;
-    while (accessUnits.size() < accessUnitLimit && offset < input.length) {
-      @Nullable ParsedTrueHdFrameSlice accessUnit =
-          findNextTrueHdAccessUnit(input, offset, parserState);
-      if (accessUnit == null) {
-        break;
+    int possibleOffset = -1;
+    parserState.needBytes = 0;
+    while (accessUnits.size() < accessUnitLimit && offset < source.length) {
+      int bytesRemaining = source.length - offset;
+      TrueHdParseAttempt parseAttempt =
+          tryParseTrueHdAccessUnit(source, offset, bytesRemaining, parserState);
+      if (parseAttempt.status == TrueHdParseStatus.FRAME) {
+        accessUnits.add(
+            new ParsedTrueHdFrameSlice(offset, parseAttempt.frameSize, parseAttempt.sampleCount));
+        offset += parseAttempt.frameSize;
+        possibleOffset = -1;
+        parserState.needBytes = 0;
+        continue;
       }
-      if (accessUnit.offset > offset) {
-        skippedBytes += accessUnit.offset - offset;
+      if (parseAttempt.status == TrueHdParseStatus.NEED_MORE) {
+        // Match Kodi parser behavior: without a locked sync, keep scanning byte-wise and only
+        // retain the candidate offset for the next input buffer.
+        boolean shouldWaitForMore =
+            parserState.hasSync
+                || bytesRemaining < Ac3Util.TRUEHD_SYNCFRAME_PREFIX_LENGTH
+                || isPotentialTrueHdMajorSync(source, offset);
+        if (shouldWaitForMore) {
+          parserState.needBytes = max(parserState.needBytes, parseAttempt.requiredBytes);
+          break;
+        }
+        possibleOffset = offset;
+        offset++;
+        skippedBytes++;
+        continue;
       }
-      accessUnits.add(accessUnit);
-      offset = accessUnit.offset + accessUnit.length;
+      offset++;
+      skippedBytes++;
     }
+    int pendingOffset = possibleOffset >= 0 ? possibleOffset : offset;
+    parserState.pendingBytes = copyTrailingBytes(source, pendingOffset, MAX_TRUEHD_PENDING_BYTES);
+    int trailingBytes = parserState.pendingBytes.length;
     if (accessUnits.isEmpty()) {
       accessUnits.clear();
       Log.w(
@@ -3553,52 +3734,54 @@ public final class FireOsIec61937AudioOutputProvider extends ForwardingAudioOutp
           "Rejecting TrueHD packet after parser sync failure"
               + " accessUnits="
               + encodedAccessUnitCount
-              + " parsedBytes=0/"
-              + input.length);
-      return accessUnits;
+              + " parsedBytes="
+              + (source.length - trailingBytes)
+              + "/"
+              + source.length);
+      return new TrueHdSplitResult(source, accessUnits, skippedBytes, trailingBytes);
     }
-    if (skippedBytes != 0 || offset != input.length) {
+    if (skippedBytes != 0 || trailingBytes != 0) {
       Log.w(
           TAG,
           "Dropping unsynced TrueHD bytes"
               + " skipped="
               + skippedBytes
               + " trailing="
-              + (input.length - offset)
+              + trailingBytes
               + " parsedUnits="
               + accessUnits.size());
     }
-    return accessUnits;
-  }
-
-  private static @Nullable ParsedTrueHdFrameSlice findNextTrueHdAccessUnit(
-      byte[] input, int searchOffset, TrueHdSyncParserState parserState) {
-    for (int offset = searchOffset; offset < input.length; offset++) {
-      int bytesRemaining = input.length - offset;
-      if (!parserState.hasSync && bytesRemaining < Ac3Util.TRUEHD_SYNCFRAME_PREFIX_LENGTH) {
-        return null;
-      }
-      @Nullable ParsedTrueHdAccessUnitInfo accessUnitInfo =
-          parseTrueHdAccessUnitInfo(input, offset, bytesRemaining, parserState);
-      if (accessUnitInfo == null) {
-        continue;
-      }
-      if (offset + accessUnitInfo.frameSize > input.length) {
-        return null;
-      }
-      return new ParsedTrueHdFrameSlice(offset, accessUnitInfo.frameSize, accessUnitInfo.sampleCount);
-    }
-    return null;
+    return new TrueHdSplitResult(source, accessUnits, skippedBytes, trailingBytes);
   }
 
   private static @Nullable ParsedTrueHdAccessUnitInfo parseTrueHdAccessUnitInfo(
       byte[] input, int offset, int bytesRemaining, TrueHdSyncParserState parserState) {
-    if (bytesRemaining < Ac3Util.TRUEHD_SYNCFRAME_PREFIX_LENGTH) {
+    TrueHdParseAttempt parseAttempt =
+        tryParseTrueHdAccessUnit(input, offset, bytesRemaining, parserState);
+    if (parseAttempt.status != TrueHdParseStatus.FRAME) {
       return null;
     }
-    int frameSize = parseTrueHdFrameSize(input, offset, bytesRemaining);
-    if (frameSize == C.LENGTH_UNSET) {
-      return null;
+    @Nullable ParsedTrueHdStreamInfo parsedStreamInfo = null;
+    if ((readBigEndianInt(input, offset + 4) & 0xFFFFFFFE) == TRUEHD_FORMAT_MAJOR_SYNC
+        && parserState.sampleRateHz > 0
+        && parserState.channelCount > 0) {
+      parsedStreamInfo = new ParsedTrueHdStreamInfo(parserState.sampleRateHz, parserState.channelCount);
+    }
+    return new ParsedTrueHdAccessUnitInfo(
+        parseAttempt.frameSize, parseAttempt.sampleCount, parsedStreamInfo);
+  }
+
+  private static TrueHdParseAttempt tryParseTrueHdAccessUnit(
+      byte[] input, int offset, int bytesRemaining, TrueHdSyncParserState parserState) {
+    if (bytesRemaining < Ac3Util.TRUEHD_SYNCFRAME_PREFIX_LENGTH) {
+      return TrueHdParseAttempt.needMore(Ac3Util.TRUEHD_SYNCFRAME_PREFIX_LENGTH);
+    }
+    int frameSize = ((input[offset] & 0x0F) << 8 | (input[offset + 1] & 0xFF)) << 1;
+    if (frameSize < Ac3Util.TRUEHD_SYNCFRAME_PREFIX_LENGTH) {
+      return TrueHdParseAttempt.noMatch();
+    }
+    if (frameSize > bytesRemaining) {
+      return TrueHdParseAttempt.needMore(frameSize);
     }
     if ((readBigEndianInt(input, offset + 4) & 0xFFFFFFFE) == TRUEHD_FORMAT_MAJOR_SYNC) {
       return parseTrueHdMajorSyncAccessUnit(input, offset, bytesRemaining, frameSize, parserState);
@@ -3606,32 +3789,25 @@ public final class FireOsIec61937AudioOutputProvider extends ForwardingAudioOutp
     return parseTrueHdSubframeAccessUnit(input, offset, bytesRemaining, frameSize, parserState);
   }
 
-  private static int parseTrueHdFrameSize(byte[] input, int offset, int bytesRemaining) {
-    int frameSize = ((input[offset] & 0x0F) << 8 | (input[offset + 1] & 0xFF)) << 1;
-    return frameSize >= Ac3Util.TRUEHD_SYNCFRAME_PREFIX_LENGTH && frameSize <= bytesRemaining
-        ? frameSize
-        : C.LENGTH_UNSET;
-  }
-
-  private static @Nullable ParsedTrueHdAccessUnitInfo parseTrueHdMajorSyncAccessUnit(
+  private static TrueHdParseAttempt parseTrueHdMajorSyncAccessUnit(
       byte[] input,
       int offset,
       int bytesRemaining,
       int frameSize,
       TrueHdSyncParserState parserState) {
     if (bytesRemaining < 32) {
-      return null;
+      return TrueHdParseAttempt.needMore(32);
     }
     int rateBits = (input[offset + 8] >>> 4) & 0x0F;
     if (rateBits == 0x0F) {
-      return null;
+      return TrueHdParseAttempt.noMatch();
     }
     int majorSyncSize = getTrueHdMajorSyncSize(input, offset, bytesRemaining);
     if (majorSyncSize == C.LENGTH_UNSET || bytesRemaining < 4 + majorSyncSize) {
-      return null;
+      return TrueHdParseAttempt.needMore(4 + max(majorSyncSize, 0));
     }
     if (!hasValidTrueHdMajorSyncCrc(input, offset, majorSyncSize)) {
-      return null;
+      return TrueHdParseAttempt.noMatch();
     }
     int sampleRateHz = (((rateBits & 0x08) != 0) ? 44_100 : 48_000) << (rateBits & 0x07);
     int channelMap = ((input[offset + 10] & 0x1F) << 8) | (input[offset + 11] & 0xFF);
@@ -3640,7 +3816,7 @@ public final class FireOsIec61937AudioOutputProvider extends ForwardingAudioOutp
     }
     int channelCount = getTrueHdChannelCount(channelMap);
     if (channelCount <= 0) {
-      return null;
+      return TrueHdParseAttempt.noMatch();
     }
     int sampleCount = 40 << (rateBits & 0x07);
     parserState.setMajorSync(
@@ -3649,24 +3825,27 @@ public final class FireOsIec61937AudioOutputProvider extends ForwardingAudioOutp
         channelCount,
         sampleCount,
         (input[offset + 20] >>> 4) & 0x0F);
-    return new ParsedTrueHdAccessUnitInfo(
-        frameSize, sampleCount, new ParsedTrueHdStreamInfo(sampleRateHz, channelCount));
+    return TrueHdParseAttempt.frame(frameSize, sampleCount);
   }
 
-  private static @Nullable ParsedTrueHdAccessUnitInfo parseTrueHdSubframeAccessUnit(
+  private static TrueHdParseAttempt parseTrueHdSubframeAccessUnit(
       byte[] input,
       int offset,
       int bytesRemaining,
       int frameSize,
       TrueHdSyncParserState parserState) {
-    if (!parserState.hasSync || parserState.sampleCount <= 0 || bytesRemaining < 4) {
-      return null;
+    if (!parserState.hasSync || parserState.sampleCount <= 0) {
+      return TrueHdParseAttempt.noMatch();
+    }
+    int minimumParityBytes = max(4, parserState.substreams * 4);
+    if (bytesRemaining < minimumParityBytes) {
+      return TrueHdParseAttempt.needMore(minimumParityBytes);
     }
     if (!hasValidTrueHdSubframeParity(input, offset, bytesRemaining, parserState.substreams)) {
-      parserState.reset();
-      return null;
+      parserState.resetSyncState();
+      return TrueHdParseAttempt.noMatch();
     }
-    return new ParsedTrueHdAccessUnitInfo(frameSize, parserState.sampleCount, /* streamInfo= */ null);
+    return TrueHdParseAttempt.frame(frameSize, parserState.sampleCount);
   }
 
   private static int getTrueHdMajorSyncSize(byte[] input, int offset, int bytesRemaining) {
@@ -4189,6 +4368,48 @@ public final class FireOsIec61937AudioOutputProvider extends ForwardingAudioOutp
     }
   }
 
+  private enum TrueHdParseStatus {
+    FRAME,
+    NEED_MORE,
+    NO_MATCH
+  }
+
+  private static final class TrueHdParseAttempt {
+    public final TrueHdParseStatus status;
+    public final int frameSize;
+    public final int sampleCount;
+    public final int requiredBytes;
+
+    private TrueHdParseAttempt(
+        TrueHdParseStatus status, int frameSize, int sampleCount, int requiredBytes) {
+      this.status = status;
+      this.frameSize = frameSize;
+      this.sampleCount = sampleCount;
+      this.requiredBytes = requiredBytes;
+    }
+
+    public static TrueHdParseAttempt frame(int frameSize, int sampleCount) {
+      return new TrueHdParseAttempt(
+          TrueHdParseStatus.FRAME, frameSize, sampleCount, /* requiredBytes= */ 0);
+    }
+
+    public static TrueHdParseAttempt needMore(int requiredBytes) {
+      return new TrueHdParseAttempt(
+          TrueHdParseStatus.NEED_MORE,
+          /* frameSize= */ 0,
+          /* sampleCount= */ 0,
+          max(requiredBytes, Ac3Util.TRUEHD_SYNCFRAME_PREFIX_LENGTH));
+    }
+
+    public static TrueHdParseAttempt noMatch() {
+      return new TrueHdParseAttempt(
+          TrueHdParseStatus.NO_MATCH,
+          /* frameSize= */ 0,
+          /* sampleCount= */ 0,
+          /* requiredBytes= */ 0);
+    }
+  }
+
   private static final class ParsedTrueHdFrameSlice {
     public final int offset;
     public final int length;
@@ -4198,6 +4419,21 @@ public final class FireOsIec61937AudioOutputProvider extends ForwardingAudioOutp
       this.offset = offset;
       this.length = length;
       this.sampleCount = sampleCount;
+    }
+  }
+
+  private static final class TrueHdSplitResult {
+    public final byte[] source;
+    public final List<ParsedTrueHdFrameSlice> accessUnits;
+    public final int skippedBytes;
+    public final int trailingBytes;
+
+    public TrueHdSplitResult(
+        byte[] source, List<ParsedTrueHdFrameSlice> accessUnits, int skippedBytes, int trailingBytes) {
+      this.source = source;
+      this.accessUnits = accessUnits;
+      this.skippedBytes = skippedBytes;
+      this.trailingBytes = trailingBytes;
     }
   }
 
@@ -4229,6 +4465,8 @@ public final class FireOsIec61937AudioOutputProvider extends ForwardingAudioOutp
     public int sampleRateHz;
     public int channelCount;
     public int sampleCount;
+    public int needBytes;
+    public byte[] pendingBytes = new byte[0];
 
     public TrueHdSyncParserState copy() {
       TrueHdSyncParserState copy = new TrueHdSyncParserState();
@@ -4243,6 +4481,11 @@ public final class FireOsIec61937AudioOutputProvider extends ForwardingAudioOutp
       sampleRateHz = other.sampleRateHz;
       channelCount = other.channelCount;
       sampleCount = other.sampleCount;
+      needBytes = other.needBytes;
+      pendingBytes =
+          other.pendingBytes.length == 0
+              ? new byte[0]
+              : copyRange(other.pendingBytes, 0, other.pendingBytes.length);
     }
 
     public void setMajorSync(
@@ -4253,15 +4496,22 @@ public final class FireOsIec61937AudioOutputProvider extends ForwardingAudioOutp
       this.channelCount = channelCount;
       this.sampleCount = sampleCount;
       this.substreams = substreams;
+      this.needBytes = 0;
     }
 
-    public void reset() {
+    public void resetSyncState() {
       hasSync = false;
       substreams = 0;
       rateBits = 0;
       sampleRateHz = 0;
       channelCount = 0;
       sampleCount = 0;
+      needBytes = 0;
+    }
+
+    public void reset() {
+      resetSyncState();
+      pendingBytes = new byte[0];
     }
   }
 }
