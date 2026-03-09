@@ -148,4 +148,36 @@ public final class FireOsDtsClassifierTest {
     assertThat(streamInfo.outputRateHz).isEqualTo(192_000);
     assertThat(streamInfo.sampleMimeType).isEqualTo(MimeTypes.AUDIO_DTS_HD);
   }
+
+  @Test
+  public void classifyFromHints_xchMarkerClassifiesAsDtsHd() {
+    FireOsStreamInfo streamInfo =
+        FireOsDtsClassifier.classifyFromHints(
+            /* accessUnit= */ new byte[] {0x5A, 0x5A, 0x5A, 0x5A, 0x00, 0x00, 0x00, 0x00},
+            /* sampleCount= */ 4096,
+            /* repetitionPeriodFrames= */ 4096,
+            /* inputSampleRateHz= */ 48_000,
+            /* inputChannelCount= */ 6,
+            /* previousStreamType= */ FireOsStreamInfo.DtsStreamType.NONE,
+            /* hasExtension= */ true,
+            /* hasUhd= */ false);
+
+    assertThat(streamInfo.dtsStreamType).isEqualTo(FireOsStreamInfo.DtsStreamType.DTSHD);
+  }
+
+  @Test
+  public void classifyFromHints_xllMarkerClassifiesAsDtsHdMa() {
+    FireOsStreamInfo streamInfo =
+        FireOsDtsClassifier.classifyFromHints(
+            /* accessUnit= */ new byte[] {0x41, (byte) 0xA2, (byte) 0x95, 0x47, 0x00, 0x00, 0x00, 0x00},
+            /* sampleCount= */ 16_384,
+            /* repetitionPeriodFrames= */ 16_384,
+            /* inputSampleRateHz= */ 48_000,
+            /* inputChannelCount= */ 8,
+            /* previousStreamType= */ FireOsStreamInfo.DtsStreamType.NONE,
+            /* hasExtension= */ true,
+            /* hasUhd= */ false);
+
+    assertThat(streamInfo.dtsStreamType).isEqualTo(FireOsStreamInfo.DtsStreamType.DTSHD_MA);
+  }
 }

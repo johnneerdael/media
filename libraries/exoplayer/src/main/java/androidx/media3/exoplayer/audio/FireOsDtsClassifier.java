@@ -27,6 +27,13 @@ import java.nio.ByteBuffer;
 @UnstableApi
 /* package */ final class FireOsDtsClassifier {
 
+  private static final int DTS_PREAMBLE_XCH = 0x5A5A5A5A;
+  private static final int DTS_PREAMBLE_XXCH = 0x47004A03;
+  private static final int DTS_PREAMBLE_X96 = 0x1D95F262;
+  private static final int DTS_PREAMBLE_XBR = 0x655E315E;
+  private static final int DTS_PREAMBLE_LBR = 0x0A801921;
+  private static final int DTS_PREAMBLE_XLL = 0x41A29547;
+
   private FireOsDtsClassifier() {}
 
   public static FireOsStreamInfo classify(
@@ -153,6 +160,18 @@ import java.nio.ByteBuffer;
   }
 
   private static FireOsStreamInfo.DtsStreamType classifyBitstreamDeclaredType(byte[] accessUnit) {
+    if (containsAnyMarker(accessUnit, DTS_PREAMBLE_XLL)) {
+      return FireOsStreamInfo.DtsStreamType.DTSHD_MA;
+    }
+    if (containsAnyMarker(
+        accessUnit,
+        DTS_PREAMBLE_XCH,
+        DTS_PREAMBLE_XXCH,
+        DTS_PREAMBLE_X96,
+        DTS_PREAMBLE_XBR,
+        DTS_PREAMBLE_LBR)) {
+      return FireOsStreamInfo.DtsStreamType.DTSHD;
+    }
     @Nullable byte[] extensionFrame = findExtensionFrame(accessUnit);
     if (extensionFrame == null) {
       return FireOsStreamInfo.DtsStreamType.UNKNOWN;
@@ -169,9 +188,28 @@ import java.nio.ByteBuffer;
         return FireOsStreamInfo.DtsStreamType.DTSHD;
       }
     } catch (ParserException | IllegalArgumentException e) {
-      // Fall through to codec hints or UNKNOWN.
+      // Fall through to UNKNOWN.
     }
     return FireOsStreamInfo.DtsStreamType.UNKNOWN;
+  }
+
+  private static boolean containsAnyMarker(byte[] input, int... markers) {
+    if (input.length < 4) {
+      return false;
+    }
+    for (int offset = 0; offset + 3 < input.length; offset++) {
+      int word =
+          ((input[offset] & 0xFF) << 24)
+              | ((input[offset + 1] & 0xFF) << 16)
+              | ((input[offset + 2] & 0xFF) << 8)
+              | (input[offset + 3] & 0xFF);
+      for (int marker : markers) {
+        if (word == marker) {
+          return true;
+        }
+      }
+    }
+    return false;
   }
 
   private static @Nullable byte[] findExtensionFrame(byte[] accessUnit) {
