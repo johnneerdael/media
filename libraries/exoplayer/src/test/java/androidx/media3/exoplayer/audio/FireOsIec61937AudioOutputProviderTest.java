@@ -372,6 +372,28 @@ public class FireOsIec61937AudioOutputProviderTest {
   }
 
   @Test
+  public void prepareEncodedPacket_trueHdConsumesAllAvailableSyncframesWhenReportedCountIsOne() {
+    FireOsIec61937AudioOutputProvider provider =
+        new FireOsIec61937AudioOutputProvider(
+            new FakeAudioOutputProvider(), new FakeAudioOutputProvider());
+    byte[] firstFrame = createTrueHdSyncframe(/* frameSizeBytes= */ 234, /* frameTime= */ 0x04D8);
+    byte[] secondFrame = createTrueHdSyncframe(/* frameSizeBytes= */ 234, /* frameTime= */ 0x0510);
+    Format format =
+        new Format.Builder()
+            .setSampleMimeType(MimeTypes.AUDIO_TRUEHD)
+            .setSampleRate(48_000)
+            .setChannelCount(8)
+            .build();
+
+    FireOsIec61937AudioOutputProvider.PreparedEncodedPacket preparedPacket =
+        provider.prepareEncodedPacket(format, ByteBuffer.wrap(join(firstFrame, secondFrame)), 1);
+
+    assertThat(preparedPacket).isNotNull();
+    assertThat(preparedPacket.metadata.normalizedAccessUnitCount).isEqualTo(2);
+    assertThat(preparedPacket.metadata.totalFrames).isEqualTo(80);
+  }
+
+  @Test
   public void prepareEncodedPacket_trueHdUsesParsedMajorSyncMetadata() {
     FireOsIec61937AudioOutputProvider provider =
         new FireOsIec61937AudioOutputProvider(
