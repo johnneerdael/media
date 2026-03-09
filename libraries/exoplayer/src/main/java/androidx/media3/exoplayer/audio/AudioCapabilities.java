@@ -120,6 +120,16 @@ public final class AudioCapabilities {
     return AmazonQuirks.isFireOsIecVerboseLoggingEnabled();
   }
 
+  /** Enables Kodi-style Fire OS IEC startup audio-delay supervision. */
+  public static void setFireOsIecSuperviseAudioDelayEnabled(boolean enabled) {
+    AmazonQuirks.setFireOsIecSuperviseAudioDelayEnabled(enabled);
+  }
+
+  /** Returns whether Kodi-style Fire OS IEC startup audio-delay supervision is enabled. */
+  public static boolean isFireOsIecSuperviseAudioDelayEnabled() {
+    return AmazonQuirks.isFireOsIecSuperviseAudioDelayEnabled();
+  }
+
   /** Enables the legacy Fire TV DTS-core fallback compatibility path. */
   public static void setLimitedFireTvDtsCoreFallbackEnabled(boolean enabled) {
     setFireOsCompatibilityFallbackEnabled(enabled);
@@ -539,15 +549,7 @@ public final class AudioCapabilities {
           && channelCount > 6) {
         channelCount = 6;
       }
-      if (!allowExperimentalFireOsIecPassthrough
-          && MimeTypes.AUDIO_DTS_X.equals(format.sampleMimeType)
-          && SDK_INT < 33) {
-        // Some DTS:X TVs reports ACTION_HDMI_AUDIO_PLUG.EXTRA_MAX_CHANNEL_COUNT as 8
-        // instead of 10. See https://github.com/androidx/media/issues/396
-        if (channelCount > 10) {
-          return null;
-        }
-      } else if (!audioProfile.supportsChannelCount(channelCount)) {
+      if (!audioProfile.supportsChannelCount(channelCount)) {
         return null;
       }
     }
