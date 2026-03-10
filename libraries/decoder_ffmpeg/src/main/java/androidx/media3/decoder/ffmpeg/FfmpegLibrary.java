@@ -15,6 +15,8 @@
  */
 package androidx.media3.decoder.ffmpeg;
 
+import android.hardware.HardwareBuffer;
+import android.view.Surface;
 import androidx.annotation.Nullable;
 import androidx.media3.common.C;
 import androidx.media3.common.MediaLibraryInfo;
@@ -44,6 +46,9 @@ public final class FfmpegLibrary {
 
   private static @MonotonicNonNull String version;
   private static int inputBufferPaddingSize = C.LENGTH_UNSET;
+  private static int dv5ToneMapToSdrSupport = C.LENGTH_UNSET;
+  private static volatile boolean experimentalDv5ToneMapToSdrEnabled;
+  private static volatile boolean experimentalDv5HardwareToneMapRpuBridgeEnabled;
 
   private FfmpegLibrary() {}
 
@@ -111,6 +116,99 @@ public final class FfmpegLibrary {
   }
 
   /**
+   * Enables an experimental native DV5 tone-mapping path in {@link FfmpegVideoDecoder}.
+   *
+   * <p>This only affects newly created decoders.
+   */
+  public static void setExperimentalDv5ToneMapToSdrEnabled(boolean enabled) {
+    experimentalDv5ToneMapToSdrEnabled = enabled;
+  }
+
+  /**
+   * Enables a native RPU bridge used by the experimental DV5 hardware tone-map pipeline.
+   *
+   * <p>The bridge stores external RPU payloads keyed by timestamps, so native tone-map code can
+   * attach them when decoded frames arrive without Dolby Vision side data.
+   */
+  public static void setExperimentalDv5HardwareToneMapRpuBridgeEnabled(boolean enabled) {
+    experimentalDv5HardwareToneMapRpuBridgeEnabled = enabled;
+    if (isAvailable()) {
+      ffmpegSetExperimentalDv5HardwareToneMapRpuBridgeEnabled(enabled);
+    }
+  }
+
+  /** Pushes an external DV RPU payload for a sample timestamp. */
+  public static void pushExperimentalDv5HardwareRpuSample(long sampleTimeUs, byte[] rpuNalPayload) {
+    if (!experimentalDv5HardwareToneMapRpuBridgeEnabled || rpuNalPayload.length == 0) {
+      return;
+    }
+    if (!isAvailable()) {
+      return;
+    }
+    ffmpegPushExperimentalDv5HardwareRpuSample(sampleTimeUs, rpuNalPayload);
+  }
+
+  /** Notifies native code that a frame timestamp is about to be rendered. */
+  public static void notifyExperimentalDv5HardwareFramePresented(long presentationTimeUs) {
+    if (!experimentalDv5HardwareToneMapRpuBridgeEnabled || !isAvailable()) {
+      return;
+    }
+    ffmpegNotifyExperimentalDv5HardwareFramePresented(presentationTimeUs);
+  }
+
+  /**
+   * Renders a MediaCodec-decoded hardware frame through the experimental native DV5 tone-map path.
+   *
+   * <p>Returns {@code false} if the path is disabled or unavailable.
+   */
+  public static boolean renderExperimentalDv5HardwareFrame(
+      long presentationTimeUs,
+      HardwareBuffer hardwareBuffer,
+      int displayedWidth,
+      int displayedHeight,
+      Surface outputSurface) {
+    if (!experimentalDv5HardwareToneMapRpuBridgeEnabled || !isAvailable()) {
+      return false;
+    }
+    return ffmpegRenderExperimentalDv5HardwareFrame(
+        presentationTimeUs, hardwareBuffer, displayedWidth, displayedHeight, outputSurface);
+  }
+
+  /**
+   * Renders a MediaCodec-decoded hardware frame through the pure native DV5 tone-map path.
+   *
+   * <p>This path uses a native libplacebo renderer directly and does not route through FFmpeg
+   * filter graph wrappers.
+   */
+  public static boolean renderExperimentalDv5HardwareFramePure(
+      long presentationTimeUs,
+      HardwareBuffer hardwareBuffer,
+      int displayedWidth,
+      int displayedHeight,
+      Surface outputSurface) {
+    if (!experimentalDv5HardwareToneMapRpuBridgeEnabled || !isAvailable()) {
+      return false;
+    }
+    return ffmpegRenderExperimentalDv5HardwareFramePure(
+        presentationTimeUs, hardwareBuffer, displayedWidth, displayedHeight, outputSurface);
+  }
+
+  /** Returns whether this native build includes the experimental DV5 SDR tone-mapping path. */
+  public static boolean supportsExperimentalDv5ToneMapToSdr() {
+    if (!isAvailable()) {
+      return false;
+    }
+    if (dv5ToneMapToSdrSupport == C.LENGTH_UNSET) {
+      dv5ToneMapToSdrSupport = ffmpegSupportsDv5ToneMapToSdr() ? 1 : 0;
+    }
+    return dv5ToneMapToSdrSupport == 1;
+  }
+
+  /* package */ static boolean isExperimentalDv5ToneMapToSdrEnabled() {
+    return experimentalDv5ToneMapToSdrEnabled;
+  }
+
+  /**
    * Returns the name of the FFmpeg decoder that could be used to decode the format, or {@code null}
    * if it's unsupported.
    */
@@ -153,6 +251,19 @@ public final class FfmpegLibrary {
         return "h264";
       case MimeTypes.VIDEO_H265:
         return "hevc";
+      case MimeTypes.VIDEO_DOLBY_VISION:
+        // FFmpeg decodes Dolby Vision elementary streams through the HEVC decoder.
+        return "hevc";
+      case MimeTypes.VIDEO_VC1:
+        return "vc1";
+      case MimeTypes.VIDEO_MPEG:
+        return "mpegvideo";
+      case MimeTypes.VIDEO_MPEG2:
+        return "mpeg2video";
+      case MimeTypes.VIDEO_VP8:
+        return "vp8";
+      case MimeTypes.VIDEO_VP9:
+        return "vp9";
       default:
         return null;
     }
@@ -162,5 +273,30 @@ public final class FfmpegLibrary {
 
   private static native int ffmpegGetInputBufferPaddingSize();
 
+  private static native boolean ffmpegSupportsDv5ToneMapToSdr();
+
   private static native boolean ffmpegHasDecoder(String codecName);
+
+  private static native void ffmpegSetExperimentalDv5HardwareToneMapRpuBridgeEnabled(
+      boolean enabled);
+
+  private static native void ffmpegPushExperimentalDv5HardwareRpuSample(
+      long sampleTimeUs, byte[] rpuNalPayload);
+
+  private static native void ffmpegNotifyExperimentalDv5HardwareFramePresented(
+      long presentationTimeUs);
+
+  private static native boolean ffmpegRenderExperimentalDv5HardwareFrame(
+      long presentationTimeUs,
+      HardwareBuffer hardwareBuffer,
+      int displayedWidth,
+      int displayedHeight,
+      Surface outputSurface);
+
+  private static native boolean ffmpegRenderExperimentalDv5HardwareFramePure(
+      long presentationTimeUs,
+      HardwareBuffer hardwareBuffer,
+      int displayedWidth,
+      int displayedHeight,
+      Surface outputSurface);
 }

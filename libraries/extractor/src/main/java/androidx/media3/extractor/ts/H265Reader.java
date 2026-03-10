@@ -71,6 +71,18 @@ public final class H265Reader implements ElementaryStreamReader {
     default byte[] transformDolbyVisionRpuNal(byte[] nalUnit, @Nullable String codecs) {
       return null;
     }
+
+    /**
+     * Optionally rewrites a Dolby Vision RPU NAL unit payload.
+     *
+     * @param sampleTimeUs Sample presentation timestamp in microseconds if known, else {@link
+     *     C#TIME_UNSET}.
+     */
+    @Nullable
+    default byte[] transformDolbyVisionRpuNal(
+        byte[] nalUnit, @Nullable String codecs, long sampleTimeUs) {
+      return transformDolbyVisionRpuNal(nalUnit, codecs);
+    }
   }
 
   private static final String TAG = "H265Reader";
@@ -512,7 +524,9 @@ public final class H265Reader implements ElementaryStreamReader {
       if (nalUnitType != H265_NAL_UNIT_TYPE_DOLBY_VISION_RPU) {
         return nalPayload;
       }
-      @Nullable byte[] maybeTransformed = transformer.transformDolbyVisionRpuNal(nalPayload, codecs);
+      @Nullable
+      byte[] maybeTransformed =
+          transformer.transformDolbyVisionRpuNal(nalPayload, codecs, C.TIME_UNSET);
       if (maybeTransformed == null || maybeTransformed.length == 0) {
         return nalPayload;
       }

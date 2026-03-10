@@ -156,6 +156,19 @@ public class MatroskaExtractor implements Extractor {
         @Nullable byte[] dolbyVisionConfigBytes) {}
 
     /**
+     * Called before writing an HEVC sample that has pending Dolby Vision block-additional bytes.
+     *
+     * @param sampleTimeUs Sample presentation timestamp in microseconds.
+     */
+    default void onHevcSample(
+        int sampleSizeBytes,
+        @Nullable byte[] blockAdditionalData,
+        @Nullable byte[] dolbyVisionConfigBytes,
+        long sampleTimeUs) {
+      onHevcSample(sampleSizeBytes, blockAdditionalData, dolbyVisionConfigBytes);
+    }
+
+    /**
      * Optionally rewrites an HEVC sample payload.
      *
      * @param sampleLengthDelimitedData Sample payload in length-delimited NAL format.
@@ -171,6 +184,25 @@ public class MatroskaExtractor implements Extractor {
         @Nullable byte[] blockAdditionalData,
         @Nullable byte[] dolbyVisionConfigBytes) {
       return null;
+    }
+
+    /**
+     * Optionally rewrites an HEVC sample payload.
+     *
+     * @param sampleTimeUs Sample presentation timestamp in microseconds.
+     */
+    @Nullable
+    default byte[] transformHevcSample(
+        byte[] sampleLengthDelimitedData,
+        int nalUnitLengthFieldLength,
+        @Nullable byte[] blockAdditionalData,
+        @Nullable byte[] dolbyVisionConfigBytes,
+        long sampleTimeUs) {
+      return transformHevcSample(
+          sampleLengthDelimitedData,
+          nalUnitLengthFieldLength,
+          blockAdditionalData,
+          dolbyVisionConfigBytes);
     }
 
     /**
@@ -2033,7 +2065,10 @@ public class MatroskaExtractor implements Extractor {
         // Phase-2 seam: sample event is surfaced here. Payload replacement is added in a later
         // step once DV conversion is wired for full HEVC access units.
         dolbyVisionSampleTransformer.onHevcSample(
-            size, track.pendingDolbyVisionBlockAdditionalData, track.dolbyVisionConfigBytes);
+            size,
+            track.pendingDolbyVisionBlockAdditionalData,
+            track.dolbyVisionConfigBytes,
+            blockTimeUs);
       } catch (RuntimeException e) {
         Log.w(TAG, "DolbyVisionSampleTransformer.onHevcSample failed: " + e.getMessage());
       }
@@ -2052,7 +2087,8 @@ public class MatroskaExtractor implements Extractor {
                 sampleLengthDelimitedData,
                 track.nalUnitLengthFieldLength,
                 track.pendingDolbyVisionBlockAdditionalData,
-                track.dolbyVisionConfigBytes);
+                track.dolbyVisionConfigBytes,
+                blockTimeUs);
         if (transformedPayload != null) {
           payloadToWrite = transformedPayload;
         }

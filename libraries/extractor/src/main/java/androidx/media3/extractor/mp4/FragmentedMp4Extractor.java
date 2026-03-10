@@ -135,6 +135,20 @@ public class FragmentedMp4Extractor implements Extractor {
         @Nullable String codecs) {
       return null;
     }
+
+    /**
+     * Optionally rewrites a length-delimited HEVC sample.
+     *
+     * @param sampleTimeUs Sample presentation timestamp in microseconds.
+     */
+    @Nullable
+    default byte[] transformHevcSample(
+        byte[] sampleLengthDelimitedData,
+        int nalUnitLengthFieldLength,
+        @Nullable String codecs,
+        long sampleTimeUs) {
+      return transformHevcSample(sampleLengthDelimitedData, nalUnitLengthFieldLength, codecs);
+    }
   }
 
   /**
@@ -1820,7 +1834,10 @@ public class FragmentedMp4Extractor implements Extractor {
         byte[] maybeTransformedSample =
             checkNotNull(dolbyVisionSampleTransformer)
                 .transformHevcSample(
-                    sampleLengthDelimitedData, track.nalUnitLengthFieldLength, track.format.codecs);
+                    sampleLengthDelimitedData,
+                    track.nalUnitLengthFieldLength,
+                    track.format.codecs,
+                    sampleTimeUs);
         if (maybeTransformedSample != null && maybeTransformedSample.length > 0) {
           transformedLengthDelimitedData = maybeTransformedSample;
         }
