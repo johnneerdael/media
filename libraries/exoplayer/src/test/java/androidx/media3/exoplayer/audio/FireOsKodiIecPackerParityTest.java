@@ -18,7 +18,7 @@ package androidx.media3.exoplayer.audio;
 import static com.google.common.truth.Truth.assertThat;
 
 import androidx.media3.common.C;
-import androidx.media3.exoplayer.audio.FireOsIec61937AudioOutputProvider.PackerKind;
+
 import androidx.media3.exoplayer.audio.FireOsIec61937AudioOutputProvider.TestAccessUnit;
 import androidx.test.ext.junit.runners.AndroidJUnit4;
 import java.util.ArrayList;
@@ -76,19 +76,7 @@ public final class FireOsKodiIecPackerParityTest {
     byte[] accessUnit = new byte[] {0x11, 0x22, 0x33, 0x44, 0x55, (byte) 0xA6, 0x77};
 
     byte[] actual =
-        FireOsIec61937AudioOutputProvider.packAccessUnitsForTesting(
-            PackerKind.AC3,
-            /* inputSampleRateHz= */ 48_000,
-            /* reportedAccessUnitCount= */ 1,
-            /* keepMultichannelCarrier= */ false,
-            /* streamDtsPeriodFrames= */ C.LENGTH_UNSET,
-            new TestAccessUnit(
-                accessUnit,
-                /* sampleCount= */ 1_536,
-                accessUnit.length,
-                C.LENGTH_UNSET,
-                accessUnit[5] & 0x7,
-                /* littleEndian= */ false));
+        packForTest(AeBitstreamPacker.STREAM_TYPE_AC3, C.LENGTH_UNSET, accessUnit, false);
 
     assertThat(actual).isEqualTo(packKodiAc3(accessUnit));
   }
@@ -96,22 +84,9 @@ public final class FireOsKodiIecPackerParityTest {
   @Test
   public void packEac3_matchesKodiReferenceBytes() {
     byte[] accessUnit =
-        new byte[] {0x01, 0x23, 0x45, 0x67, (byte) 0x89, (byte) 0xAB, (byte) 0xCD, 0x55, 0x66};
+        new byte[] {0x01, 0x23, 0x45, 0x67, (byte) 0xC9, (byte) 0xAB, (byte) 0xCD, 0x55, 0x66};
 
-    byte[] actual =
-        FireOsIec61937AudioOutputProvider.packAccessUnitsForTesting(
-            PackerKind.E_AC3,
-            /* inputSampleRateHz= */ 48_000,
-            /* reportedAccessUnitCount= */ 1,
-            /* keepMultichannelCarrier= */ false,
-            /* streamDtsPeriodFrames= */ C.LENGTH_UNSET,
-            new TestAccessUnit(
-                accessUnit,
-                /* sampleCount= */ 1_536,
-                accessUnit.length,
-                C.LENGTH_UNSET,
-                /* bitstreamMode= */ 0,
-                /* littleEndian= */ false));
+    byte[] actual = packForTest(AeBitstreamPacker.STREAM_TYPE_EAC3, androidx.media3.common.C.LENGTH_UNSET, accessUnit, false);
 
     assertThat(actual).isEqualTo(packKodiEac3(accessUnit));
   }
@@ -124,19 +99,7 @@ public final class FireOsKodiIecPackerParityTest {
         };
 
     byte[] actual =
-        FireOsIec61937AudioOutputProvider.packAccessUnitsForTesting(
-            PackerKind.DTS_CORE,
-            /* inputSampleRateHz= */ 48_000,
-            /* reportedAccessUnitCount= */ 1,
-            /* keepMultichannelCarrier= */ false,
-            /* streamDtsPeriodFrames= */ C.LENGTH_UNSET,
-            new TestAccessUnit(
-                accessUnit,
-                /* sampleCount= */ 512,
-                accessUnit.length,
-                C.LENGTH_UNSET,
-                /* bitstreamMode= */ 0,
-                /* littleEndian= */ false));
+        packForTest(AeBitstreamPacker.STREAM_TYPE_DTS_512, C.LENGTH_UNSET, accessUnit, false);
 
     assertThat(actual).isEqualTo(packKodiDtsCore(accessUnit, /* sampleCount= */ 512, false));
   }
@@ -149,19 +112,7 @@ public final class FireOsKodiIecPackerParityTest {
         };
 
     byte[] actual =
-        FireOsIec61937AudioOutputProvider.packAccessUnitsForTesting(
-            PackerKind.DTS_HD,
-            /* inputSampleRateHz= */ 48_000,
-            /* reportedAccessUnitCount= */ 1,
-            /* keepMultichannelCarrier= */ false,
-            /* streamDtsPeriodFrames= */ 4_096,
-            new TestAccessUnit(
-                accessUnit,
-                /* sampleCount= */ 4_096,
-                accessUnit.length,
-                /* repetitionPeriodFrames= */ 4_096,
-                /* bitstreamMode= */ 0,
-                /* littleEndian= */ false));
+        packForTest(AeBitstreamPacker.STREAM_TYPE_DTSHD, 4_096, accessUnit, false);
 
     assertThat(actual).isEqualTo(packKodiDtsHd(accessUnit, /* repetitionPeriodFrames= */ 4_096));
   }
@@ -184,18 +135,84 @@ public final class FireOsKodiIecPackerParityTest {
               /* littleEndian= */ false);
     }
 
-    byte[] actual =
-        FireOsIec61937AudioOutputProvider.packAccessUnitsForTesting(
-            PackerKind.TRUEHD,
-            /* inputSampleRateHz= */ 48_000,
-            /* reportedAccessUnitCount= */ accessUnits.length,
-            /* keepMultichannelCarrier= */ true,
-            /* streamDtsPeriodFrames= */ C.LENGTH_UNSET,
-            accessUnits);
+    byte[] actual = packTrueHdForTest(accessUnits);
     byte[] expected = new KodiReferenceMatPacker().pack(syncframes);
 
     assertThat(actual.length).isGreaterThan(0);
     assertThat(actual).isEqualTo(expected);
+  }
+
+
+  private static byte[] packForTest(int streamType, int period, byte[] accessUnit, boolean littleEndian) {
+      AeBitstreamPacker packer = new AeBitstreamPacker();
+      packer.pack(streamType, accessUnit, 0, accessUnit.length, period, littleEndian);
+      java.util.List<byte[]> frames = new java.util.ArrayList<>();
+      int size = 0;
+      while (true) {
+          byte[] f = packer.getOutputFrame();
+          if (f == null) break;
+          frames.add(f);
+          size += f.length;
+      }
+      java.nio.ByteBuffer b = java.nio.ByteBuffer.allocate(size);
+      for (byte[] f : frames) b.put(f);
+      return b.array();
+  }
+
+  private static byte[] packMultipleForTest(int streamType, TestAccessUnit[] accessUnits) {
+      AeBitstreamPacker packer = new AeBitstreamPacker();
+      for (TestAccessUnit u : accessUnits) {
+          packer.pack(streamType, u.data, 0, u.data.length, C.LENGTH_UNSET, false);
+      }
+      java.util.List<byte[]> frames = new java.util.ArrayList<>();
+      int size = 0;
+      while (true) {
+          byte[] f = packer.getOutputFrame();
+          if (f == null) break;
+          frames.add(f);
+          size += f.length;
+      }
+      java.nio.ByteBuffer b = java.nio.ByteBuffer.allocate(size);
+      for (byte[] f : frames) b.put(f);
+      return b.array();
+  }
+
+  private static byte[] packTrueHdForTest(TestAccessUnit[] accessUnits) {
+      AeBitstreamPacker packer = new AeBitstreamPacker();
+      PackerMat matPacker = new PackerMat();
+      java.util.List<byte[]> frames = new java.util.ArrayList<>();
+      int size = 0;
+      for (TestAccessUnit accessUnit : accessUnits) {
+          if (!matPacker.packTrueHd(accessUnit.data, 0, accessUnit.data.length)) {
+              continue;
+          }
+          while (true) {
+              byte[] matFrame = matPacker.getOutputFrame();
+              if (matFrame == null) {
+                  break;
+              }
+              packer.pack(
+                  AeBitstreamPacker.STREAM_TYPE_TRUEHD,
+                  matFrame,
+                  0,
+                  matFrame.length,
+                  C.LENGTH_UNSET,
+                  false);
+              while (true) {
+                  byte[] frame = packer.getOutputFrame();
+                  if (frame == null) {
+                      break;
+                  }
+                  frames.add(frame);
+                  size += frame.length;
+              }
+          }
+      }
+      java.nio.ByteBuffer buffer = java.nio.ByteBuffer.allocate(size);
+      for (byte[] frame : frames) {
+          buffer.put(frame);
+      }
+      return buffer.array();
   }
 
   private static byte[] packKodiAc3(byte[] accessUnit) {

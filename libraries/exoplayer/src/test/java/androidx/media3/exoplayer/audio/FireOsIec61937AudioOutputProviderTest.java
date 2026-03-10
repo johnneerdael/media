@@ -394,6 +394,38 @@ public class FireOsIec61937AudioOutputProviderTest {
   }
 
   @Test
+  public void prepareEncodedPacket_dtsConsumesAllAvailableFramesWhenReportedCountIsOne() {
+    FireOsIec61937AudioOutputProvider provider =
+        new FireOsIec61937AudioOutputProvider(
+            new FakeAudioOutputProvider(), new FakeAudioOutputProvider());
+    byte[] firstFrame = createDtsCoreFrame(/* frameSizeBytes= */ 16, /* sampleCount= */ 512);
+    byte[] secondFrame = createDtsCoreFrame(/* frameSizeBytes= */ 16, /* sampleCount= */ 512);
+    Format format =
+        new Format.Builder()
+            .setSampleMimeType(MimeTypes.AUDIO_DTS_HD)
+            .setSampleRate(48_000)
+            .setChannelCount(2)
+            .build();
+
+    FireOsIec61937AudioOutputProvider.PreparedEncodedPacket preparedPacket =
+        provider.prepareEncodedPacket(format, ByteBuffer.wrap(join(firstFrame, secondFrame)), 1);
+
+    assertThat(preparedPacket).isNotNull();
+    assertThat(preparedPacket.metadata.kind)
+        .isEqualTo(FireOsIec61937AudioOutputProvider.PackerKind.DTS_CORE);
+    assertThat(preparedPacket.metadata.normalizedAccessUnitCount).isEqualTo(2);
+    assertThat(preparedPacket.metadata.totalFrames).isEqualTo(1_024);
+    assertThat(FireOsIec61937AudioOutputProvider.getNormalizedPayloadSizesForTesting(preparedPacket))
+        .asList()
+        .containsExactly(16, 16)
+        .inOrder();
+    assertThat(FireOsIec61937AudioOutputProvider.getNormalizedSampleCountsForTesting(preparedPacket))
+        .asList()
+        .containsExactly(512, 512)
+        .inOrder();
+  }
+
+  @Test
   public void prepareEncodedPacket_trueHdUsesParsedMajorSyncMetadata() {
     FireOsIec61937AudioOutputProvider provider =
         new FireOsIec61937AudioOutputProvider(
@@ -416,7 +448,7 @@ public class FireOsIec61937AudioOutputProviderTest {
   }
 
   @Test
-  public void prepareEncodedPacket_trueHdIgnoresMismatchedAc3Mime() {
+  public void prepareEncodedPacket_trueHdWithMismatchedAc3MimeReturnsNull() {
     FireOsIec61937AudioOutputProvider provider =
         new FireOsIec61937AudioOutputProvider(
             new FakeAudioOutputProvider(), new FakeAudioOutputProvider());
@@ -431,19 +463,16 @@ public class FireOsIec61937AudioOutputProviderTest {
     FireOsIec61937AudioOutputProvider.PreparedEncodedPacket preparedPacket =
         provider.prepareEncodedPacket(format, ByteBuffer.wrap(syncframe), 1);
 
-    assertThat(preparedPacket).isNotNull();
-    assertThat(preparedPacket.metadata.kind)
-        .isEqualTo(FireOsIec61937AudioOutputProvider.PackerKind.TRUEHD);
-    assertThat(preparedPacket.metadata.streamInfo.family)
-        .isEqualTo(FireOsStreamInfo.StreamFamily.TRUEHD);
+    assertThat(preparedPacket).isNull();
   }
 
   @Test
-  public void prepareEncodedPacket_eAc3IgnoresMismatchedDtsMime() {
+  public void prepareEncodedPacket_eAc3WithMismatchedDtsMimeReturnsNull() {
     FireOsIec61937AudioOutputProvider provider =
         new FireOsIec61937AudioOutputProvider(
             new FakeAudioOutputProvider(), new FakeAudioOutputProvider());
     byte[] mainFrame = createEAc3Syncframe(Ac3Util.SyncFrameInfo.STREAM_TYPE_TYPE0);
+    byte[] nextMainFrame = createEAc3Syncframe(Ac3Util.SyncFrameInfo.STREAM_TYPE_TYPE0);
     Format format =
         new Format.Builder()
             .setSampleMimeType(MimeTypes.AUDIO_DTS_HD)
@@ -452,13 +481,31 @@ public class FireOsIec61937AudioOutputProviderTest {
             .build();
 
     FireOsIec61937AudioOutputProvider.PreparedEncodedPacket preparedPacket =
-        provider.prepareEncodedPacket(format, ByteBuffer.wrap(mainFrame), 1);
+        provider.prepareEncodedPacket(format, ByteBuffer.wrap(join(mainFrame, nextMainFrame)), 2);
 
-    assertThat(preparedPacket).isNotNull();
-    assertThat(preparedPacket.metadata.kind)
-        .isEqualTo(FireOsIec61937AudioOutputProvider.PackerKind.E_AC3);
-    assertThat(preparedPacket.metadata.streamInfo.family)
-        .isEqualTo(FireOsStreamInfo.StreamFamily.E_AC3);
+    assertThat(preparedPacket).isNull();
+  }
+
+  @Test
+  public void prepareEncodedPacket_activeTrueHdSessionDoesNotProbeAc3Fallback() {
+    FireOsIec61937AudioOutputProvider provider =
+        new FireOsIec61937AudioOutputProvider(
+            new FakeAudioOutputProvider(), new FakeAudioOutputProvider());
+    Format format =
+        new Format.Builder()
+            .setSampleMimeType(MimeTypes.AUDIO_TRUEHD)
+            .setSampleRate(48_000)
+            .setChannelCount(8)
+            .build();
+    provider.updateStreamInfo(format, FireOsStreamInfo.createForTrueHd(48_000, 8));
+
+    FireOsIec61937AudioOutputProvider.PreparedEncodedPacket preparedPacket =
+        provider.prepareEncodedPacket(
+            format,
+            ByteBuffer.wrap(createEAc3Syncframe(Ac3Util.SyncFrameInfo.STREAM_TYPE_TYPE0)),
+            1);
+
+    assertThat(preparedPacket).isNull();
   }
 
   @Test
@@ -653,6 +700,7 @@ public class FireOsIec61937AudioOutputProviderTest {
         new FireOsIec61937AudioOutputProvider(
             new FakeAudioOutputProvider(), new FakeAudioOutputProvider());
     byte[] mainFrame = createEAc3Syncframe(Ac3Util.SyncFrameInfo.STREAM_TYPE_TYPE0);
+    byte[] nextMainFrame = createEAc3Syncframe(Ac3Util.SyncFrameInfo.STREAM_TYPE_TYPE0);
     Ac3Util.SyncFrameInfo syncFrameInfo =
         Ac3Util.parseAc3SyncframeInfo(new ParsableBitArray(mainFrame));
     Format format =
@@ -663,7 +711,7 @@ public class FireOsIec61937AudioOutputProviderTest {
             .build();
 
     FireOsIec61937AudioOutputProvider.PreparedEncodedPacket preparedPacket =
-        provider.prepareEncodedPacket(format, ByteBuffer.wrap(mainFrame), 1);
+        provider.prepareEncodedPacket(format, ByteBuffer.wrap(join(mainFrame, nextMainFrame)), 2);
 
     assertThat(preparedPacket).isNotNull();
     assertThat(preparedPacket.metadata.streamInfo.inputSampleRateHz)
@@ -689,6 +737,34 @@ public class FireOsIec61937AudioOutputProviderTest {
         provider.prepareEncodedPacket(format, ByteBuffer.wrap(new byte[] {0x00, 0x11, 0x22, 0x33}), 1);
 
     assertThat(preparedPacket).isNull();
+  }
+
+  @Test
+  public void prepareEncodedPacket_eAc3DefersMainFrameUntilDependentProbeAvailable() {
+    FireOsIec61937AudioOutputProvider provider =
+        new FireOsIec61937AudioOutputProvider(
+            new FakeAudioOutputProvider(), new FakeAudioOutputProvider());
+    byte[] mainFrame = createEAc3Syncframe(Ac3Util.SyncFrameInfo.STREAM_TYPE_TYPE0);
+    byte[] dependentFrame = createEAc3Syncframe(Ac3Util.SyncFrameInfo.STREAM_TYPE_TYPE1);
+    Format format =
+        new Format.Builder()
+            .setSampleMimeType(MimeTypes.AUDIO_E_AC3)
+            .setSampleRate(48_000)
+            .setChannelCount(6)
+            .build();
+
+    FireOsIec61937AudioOutputProvider.PreparedEncodedPacket firstPreparedPacket =
+        provider.prepareEncodedPacket(format, ByteBuffer.wrap(mainFrame), 1);
+    FireOsIec61937AudioOutputProvider.PreparedEncodedPacket secondPreparedPacket =
+        provider.prepareEncodedPacket(format, ByteBuffer.wrap(dependentFrame), 1);
+
+    assertThat(firstPreparedPacket).isNull();
+    assertThat(secondPreparedPacket).isNotNull();
+    assertThat(secondPreparedPacket.metadata.normalizedAccessUnitCount).isEqualTo(1);
+    int[] payloadSizes =
+        FireOsIec61937AudioOutputProvider.getNormalizedPayloadSizesForTesting(secondPreparedPacket);
+    assertThat(payloadSizes).hasLength(1);
+    assertThat(payloadSizes[0]).isEqualTo(mainFrame.length + dependentFrame.length);
   }
 
   @Test
@@ -774,6 +850,21 @@ public class FireOsIec61937AudioOutputProviderTest {
     byte[] frame = new byte[2_560];
     System.arraycopy(E_AC3_SYNCFRAME_PREFIX, 0, frame, 0, E_AC3_SYNCFRAME_PREFIX.length);
     frame[2] = (byte) ((frame[2] & 0x3F) | (streamType << 6));
+    return frame;
+  }
+
+  private static byte[] createDtsCoreFrame(int frameSizeBytes, int sampleCount) {
+    byte[] frame = new byte[frameSizeBytes];
+    frame[0] = 0x7F;
+    frame[1] = (byte) 0xFE;
+    frame[2] = (byte) 0x80;
+    frame[3] = 0x01;
+    int nblks = (sampleCount / 32) - 1;
+    int frameSizeCode = frameSizeBytes - 1;
+    frame[4] = (byte) ((nblks >>> 6) & 0x01);
+    frame[5] = (byte) (((nblks & 0x3F) << 2) | ((frameSizeCode >>> 12) & 0x03));
+    frame[6] = (byte) ((frameSizeCode >>> 4) & 0xFF);
+    frame[7] = (byte) ((frameSizeCode & 0x0F) << 4);
     return frame;
   }
 
