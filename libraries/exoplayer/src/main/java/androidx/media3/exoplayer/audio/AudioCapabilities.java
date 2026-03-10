@@ -130,6 +130,76 @@ public final class AudioCapabilities {
     return AmazonQuirks.isFireOsIecSuperviseAudioDelayEnabled();
   }
 
+  /** Enables AC3 passthrough on the custom Kodi IEC packer path. */
+  public static void setIecPackerAc3PassthroughEnabled(boolean enabled) {
+    AmazonQuirks.setIecPackerAc3PassthroughEnabled(enabled);
+  }
+
+  /** Returns whether AC3 passthrough is enabled on the custom Kodi IEC packer path. */
+  public static boolean isIecPackerAc3PassthroughEnabled() {
+    return AmazonQuirks.isIecPackerAc3PassthroughEnabled();
+  }
+
+  /** Enables E-AC3 passthrough on the custom Kodi IEC packer path. */
+  public static void setIecPackerEac3PassthroughEnabled(boolean enabled) {
+    AmazonQuirks.setIecPackerEac3PassthroughEnabled(enabled);
+  }
+
+  /** Returns whether E-AC3 passthrough is enabled on the custom Kodi IEC packer path. */
+  public static boolean isIecPackerEac3PassthroughEnabled() {
+    return AmazonQuirks.isIecPackerEac3PassthroughEnabled();
+  }
+
+  /** Enables DTS passthrough on the custom Kodi IEC packer path. */
+  public static void setIecPackerDtsPassthroughEnabled(boolean enabled) {
+    AmazonQuirks.setIecPackerDtsPassthroughEnabled(enabled);
+  }
+
+  /** Returns whether DTS passthrough is enabled on the custom Kodi IEC packer path. */
+  public static boolean isIecPackerDtsPassthroughEnabled() {
+    return AmazonQuirks.isIecPackerDtsPassthroughEnabled();
+  }
+
+  /** Enables TrueHD passthrough on the custom Kodi IEC packer path. */
+  public static void setIecPackerTruehdPassthroughEnabled(boolean enabled) {
+    AmazonQuirks.setIecPackerTruehdPassthroughEnabled(enabled);
+  }
+
+  /** Returns whether TrueHD passthrough is enabled on the custom Kodi IEC packer path. */
+  public static boolean isIecPackerTruehdPassthroughEnabled() {
+    return AmazonQuirks.isIecPackerTruehdPassthroughEnabled();
+  }
+
+  /** Enables DTS-HD passthrough on the custom Kodi IEC packer path. */
+  public static void setIecPackerDtshdPassthroughEnabled(boolean enabled) {
+    AmazonQuirks.setIecPackerDtshdPassthroughEnabled(enabled);
+  }
+
+  /** Returns whether DTS-HD passthrough is enabled on the custom Kodi IEC packer path. */
+  public static boolean isIecPackerDtshdPassthroughEnabled() {
+    return AmazonQuirks.isIecPackerDtshdPassthroughEnabled();
+  }
+
+  /** Enables DTS-HD core fallback on the custom Kodi IEC packer path. */
+  public static void setIecPackerDtshdCoreFallbackEnabled(boolean enabled) {
+    AmazonQuirks.setIecPackerDtshdCoreFallbackEnabled(enabled);
+  }
+
+  /** Returns whether DTS-HD core fallback is enabled on the custom Kodi IEC packer path. */
+  public static boolean isIecPackerDtshdCoreFallbackEnabled() {
+    return AmazonQuirks.isIecPackerDtshdCoreFallbackEnabled();
+  }
+
+  /** Sets the Kodi-style PCM speaker layout limit for the custom IEC packer path. */
+  public static void setIecPackerMaxPcmChannelLayout(int channelLayout) {
+    AmazonQuirks.setIecPackerMaxPcmChannelLayout(channelLayout);
+  }
+
+  /** Returns the Kodi-style PCM speaker layout limit for the custom IEC packer path. */
+  public static int getIecPackerMaxPcmChannelLayout() {
+    return AmazonQuirks.getIecPackerMaxPcmChannelLayout();
+  }
+
   /** Enables the legacy Fire TV DTS-core fallback compatibility path. */
   public static void setLimitedFireTvDtsCoreFallbackEnabled(boolean enabled) {
     setFireOsCompatibilityFallbackEnabled(enabled);

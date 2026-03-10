@@ -1,0 +1,68 @@
+// Copyright (C) 2026 Nuvio
+//
+// This program is free software: you can redistribute it and/or modify
+// it under the terms of the GNU General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
+//
+// This program is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+// GNU General Public License for more details.
+//
+// You should have received a copy of the GNU General Public License
+// along with this program. If not, see <https://www.gnu.org/licenses/>.
+
+apply from: "$gradle.ext.androidxMediaSettingsDir/common_library_config.gradle"
+
+android {
+    namespace 'androidx.media3.exoplayer.kodinativesink'
+
+    sourceSets {
+        androidTest.assets.srcDir '../test_data/src/test/assets'
+    }
+
+    defaultConfig {
+        externalNativeBuild {
+            cmake {
+                targets "kodiNativeSinkJNI"
+            }
+        }
+    }
+
+    publishing {
+        singleVariant('release') {
+            withSourcesJar()
+        }
+    }
+}
+
+android.externalNativeBuild.cmake {
+    path = 'src/main/jni/CMakeLists.txt'
+    version = '3.21.0+'
+    if (project.hasProperty('externalNativeBuildDir')) {
+        if (!new File(externalNativeBuildDir).isAbsolute()) {
+            ext.externalNativeBuildDir = new File(rootDir, it.externalNativeBuildDir)
+        }
+        buildStagingDirectory = "${externalNativeBuildDir}/${project.name}"
+    }
+}
+
+dependencies {
+    api project(modulePrefix + 'lib-common')
+    implementation project(modulePrefix + 'lib-exoplayer')
+    implementation 'androidx.annotation:annotation:' + androidxAnnotationVersion
+    compileOnly 'org.jetbrains.kotlin:kotlin-annotations-jvm:' + kotlinAnnotationsVersion
+    compileOnly 'com.google.errorprone:error_prone_annotations:' + errorProneVersion
+    testImplementation project(modulePrefix + 'test-utils')
+    testImplementation 'org.robolectric:robolectric:' + robolectricVersion
+    androidTestImplementation project(modulePrefix + 'test-utils')
+    androidTestImplementation 'androidx.test:runner:' + androidxTestRunnerVersion
+    androidTestImplementation 'androidx.test.ext:junit:' + androidxTestJUnitVersion
+}
+
+ext {
+    releaseArtifactId = 'media3-exoplayer-kodi-native-sink'
+    releaseName = 'Media3 Kodi native audio sink module'
+}
+apply from: '../../publish.gradle'
