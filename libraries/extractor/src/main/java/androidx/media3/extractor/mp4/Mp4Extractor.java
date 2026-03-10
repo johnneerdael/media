@@ -132,6 +132,20 @@ public final class Mp4Extractor implements Extractor {
         @Nullable String codecs) {
       return null;
     }
+
+    /**
+     * Optionally rewrites a length-delimited HEVC sample.
+     *
+     * @param sampleTimeUs Sample presentation timestamp in microseconds.
+     */
+    @Nullable
+    default byte[] transformHevcSample(
+        byte[] sampleLengthDelimitedData,
+        int nalUnitLengthFieldLength,
+        @Nullable String codecs,
+        long sampleTimeUs) {
+      return transformHevcSample(sampleLengthDelimitedData, nalUnitLengthFieldLength, codecs);
+    }
   }
 
   /**
@@ -991,7 +1005,8 @@ public final class Mp4Extractor implements Extractor {
                 .transformHevcSample(
                     sampleLengthDelimitedData,
                     track.track.nalUnitLengthFieldLength,
-                    track.track.format.codecs);
+                    track.track.format.codecs,
+                    track.sampleTable.timestampsUs[sampleIndex]);
         if (maybeTransformedSample != null && maybeTransformedSample.length > 0) {
           transformedLengthDelimitedData = maybeTransformedSample;
         }

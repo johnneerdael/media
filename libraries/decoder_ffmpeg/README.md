@@ -49,31 +49,89 @@ HOST_PLATFORM="linux-x86_64"
 ANDROID_ABI=21
 ```
 
-*   Configure the decoders to include. See the [Supported formats][] page for
-    details of the available decoders, and which formats they support.
-
-```
-ENABLED_DECODERS=(vorbis opus flac)
-```
-
 *   Fetch FFmpeg and checkout an appropriate branch. We cannot guarantee
     compatibility with all versions of FFmpeg. We currently recommend version
-    6.0:
+    6.1 (or 6.0):
 
-```shell
-cd "${FFMPEG_MODULE_PATH}/jni" && \
-git clone git://source.ffmpeg.org/ffmpeg --branch=release/6.0 --depth=1
+```
+cd "<preferred location for ffmpeg>" && \
+git clone git://source.ffmpeg.org/ffmpeg && \
+cd ffmpeg && \
+git checkout release/6.1 && \
+FFMPEG_PATH="$(pwd)"
 ```
 
-*   Execute `build_ffmpeg.sh` to build FFmpeg for `armeabi-v7a`, `arm64-v8a`,
-    `x86` and `x86_64`. The script can be edited if you need to build for
-    different architectures:
+`build_ffmpeg.sh` detects the FFmpeg version from `VERSION`, `RELEASE`, or
+`libavcodec/version_major.h`.
+
+* Configure the decoders to include. See the [Supported formats][] page for
+  details of the available decoders, and which formats they support.
+
+```
+ENABLED_DECODERS=(aac mp3 ac3 eac3 truehd dca vorbis opus amrnb amrwb flac alac pcm_mulaw pcm_alaw h264 hevc vc1 mpegvideo mpeg2video vp8 vp9)
+```
+
+*   Add a link to the FFmpeg source code in the FFmpeg module `jni` directory.
+
+```
+cd "${FFMPEG_MODULE_PATH}/jni" && \
+ln -s "$FFMPEG_PATH" ffmpeg
+```
+
+* Execute `build_ffmpeg.sh` to build FFmpeg for `armeabi-v7a`, `arm64-v8a`,
+  `x86` and `x86_64`. The script can be edited if you need to build for
+  different architectures:
 
 ```
 cd "${FFMPEG_MODULE_PATH}/jni" && \
 ./build_ffmpeg.sh \
   "${FFMPEG_MODULE_PATH}" "${NDK_PATH}" "${HOST_PLATFORM}" "${ANDROID_ABI}" "${ENABLED_DECODERS[@]}"
 ```
+
+### Optional: DV5 tone mapping with libplacebo (experimental)
+
+To enable the experimental DV5 software tone-mapping path, build FFmpeg with
+`libavfilter + libplacebo` enabled:
+
+1. Build static `libplacebo`, `shaderc` and Vulkan headers per ABI, and stage
+   them in:
+
+```
+<LIBPLACEBO_PREBUILT_ROOT>/<abi>/include
+<LIBPLACEBO_PREBUILT_ROOT>/<abi>/lib
+<LIBPLACEBO_PREBUILT_ROOT>/<abi>/lib/pkgconfig
+```
+
+2. Build Shield-safe libplacebo dependencies (Vulkan 1.1 runtime target):
+
+```
+cd "${FFMPEG_MODULE_PATH}/jni" && \
+./build_libplacebo_android.sh \
+  "<path to libplacebo prebuilts>" "${NDK_PATH}" "${HOST_PLATFORM}" "${ANDROID_ABI}"
+```
+
+Notes:
+- Default `LIBPLACEBO_TAG` is `v5.264.1`.
+- `v5.229.2` is also supported:
+  `LIBPLACEBO_TAG=v5.229.2 ./build_libplacebo_android.sh ...`
+
+3. Re-run the FFmpeg build script with:
+
+```
+FFMPEG_ENABLE_LIBPLACEBO=1 \
+LIBPLACEBO_PREBUILT_ROOT="<path to staged libplacebo prebuilts>" \
+./build_ffmpeg.sh \
+  "${FFMPEG_MODULE_PATH}" "${NDK_PATH}" "${HOST_PLATFORM}" "${ANDROID_ABI}" "${ENABLED_DECODERS[@]}"
+```
+
+Notes:
+- If `libavfilter.a` is absent, the JNI builds without the tone-map path.
+- For Android TV boxes limited to Vulkan 1.1, use FFmpeg 6.x and `libplacebo`
+  v5.x (`v5.264.1` default; `v5.229.2` also supported by
+  `build_libplacebo_android.sh`).
+- FFmpeg 7.x is not supported for this path. `build_ffmpeg.sh` will fail fast
+  unless the detected FFmpeg version is 6.x when
+  `FFMPEG_ENABLE_LIBPLACEBO=1`.
 
 * [Install CMake][]
 
@@ -122,7 +180,7 @@ then implement your own logic to use the renderer for a given track.
 [Ninja]: https://ninja-build.org/
 [Install CMake]: https://developer.android.com/studio/projects/install-ndk
 [CMake]: https://cmake.org/
-[JNI wrapper library]: src/main/jni/ffmpeg_jni.cc
+[JNI wrapper library]: src/main/jni/ffmain.cpp
 [ExoPlayer issue 2781]: https://github.com/google/ExoPlayer/issues/2781
 [Supported formats]: https://developer.android.com/media/media3/exoplayer/supported-formats#ffmpeg-library
 
