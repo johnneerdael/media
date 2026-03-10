@@ -1352,10 +1352,6 @@ public final class FireOsDefaultAudioSink implements AudioSink {
         listener.onAudioSinkError(error);
       }
       if (e.isRecoverable) {
-        if (isStrictKodiIecMode()) {
-          Log.w(TAG, "Strict Fire OS IEC sink reopen after recoverable write failure");
-          flush();
-        }
         throw error; // Do not delay the exception if it can be recovered at a higher level.
       }
       writeExceptionPendingExceptionHolder.throwExceptionIfDeadlineIsReached(error);
@@ -1950,6 +1946,9 @@ public final class FireOsDefaultAudioSink implements AudioSink {
   private void refreshFireOsOutputConfigFromStreamInfo(FireOsStreamInfo streamInfo)
       throws InitializationException {
     if (fireOsAudioOutputProvider == null || configuration == null) {
+      return;
+    }
+    if (isStrictKodiIecMode()) {
       return;
     }
     try {

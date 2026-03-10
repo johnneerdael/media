@@ -33,6 +33,7 @@ import java.nio.ByteBuffer;
   private static final int DTS_PREAMBLE_XBR = 0x655E315E;
   private static final int DTS_PREAMBLE_LBR = 0x0A801921;
   private static final int DTS_PREAMBLE_XLL = 0x41A29547;
+  private static final int DTS_PREAMBLE_HD = 0x64582025;
 
   private FireOsDtsClassifier() {}
 
@@ -131,6 +132,12 @@ import java.nio.ByteBuffer;
               ? previousStreamType
               : FireOsStreamInfo.DtsStreamType.UNKNOWN;
     }
+    if (previousStreamType == FireOsStreamInfo.DtsStreamType.DTSHD
+        || previousStreamType == FireOsStreamInfo.DtsStreamType.DTSHD_MA) {
+      // Mirror Kodi stream-state behavior: once DTS-HD/MA is established, keep that stream type
+      // instead of downgrading on core-only probe windows.
+      return previousStreamType;
+    }
     if (repetitionPeriodFrames != C.LENGTH_UNSET && repetitionPeriodFrames != 0 && sampleCount == 0) {
       switch (repetitionPeriodFrames) {
         case 512:
@@ -160,6 +167,20 @@ import java.nio.ByteBuffer;
   }
 
   private static FireOsStreamInfo.DtsStreamType classifyBitstreamDeclaredType(byte[] accessUnit) {
+    @Nullable byte[] extensionFrame = findExtensionFrame(accessUnit);
+    if (extensionFrame != null) {
+      int marker = extractKodiDtsHdSubstreamMarker(extensionFrame);
+      if (marker == DTS_PREAMBLE_XLL) {
+        return FireOsStreamInfo.DtsStreamType.DTSHD_MA;
+      }
+      if (marker == DTS_PREAMBLE_XCH
+          || marker == DTS_PREAMBLE_XXCH
+          || marker == DTS_PREAMBLE_X96
+          || marker == DTS_PREAMBLE_XBR
+          || marker == DTS_PREAMBLE_LBR) {
+        return FireOsStreamInfo.DtsStreamType.DTSHD;
+      }
+    }
     if (containsAnyMarker(accessUnit, DTS_PREAMBLE_XLL)) {
       return FireOsStreamInfo.DtsStreamType.DTSHD_MA;
     }
@@ -172,7 +193,6 @@ import java.nio.ByteBuffer;
         DTS_PREAMBLE_LBR)) {
       return FireOsStreamInfo.DtsStreamType.DTSHD;
     }
-    @Nullable byte[] extensionFrame = findExtensionFrame(accessUnit);
     if (extensionFrame == null) {
       return FireOsStreamInfo.DtsStreamType.UNKNOWN;
     }
@@ -191,6 +211,30 @@ import java.nio.ByteBuffer;
       // Fall through to UNKNOWN.
     }
     return FireOsStreamInfo.DtsStreamType.UNKNOWN;
+  }
+
+  private static int extractKodiDtsHdSubstreamMarker(byte[] extensionFrame) {
+    if (extensionFrame.length < 10) {
+      return 0;
+    }
+    if (DtsUtil.getFrameType(ByteBuffer.wrap(extensionFrame, 0, 4).getInt())
+        != DtsUtil.FRAME_TYPE_EXTENSION_SUBSTREAM) {
+      return 0;
+    }
+    boolean blownup = (extensionFrame[5] & 0x20) != 0;
+    int headerSize;
+    if (blownup) {
+      headerSize = (((extensionFrame[5] & 0x1F) << 7) | ((extensionFrame[6] & 0xFE) >> 1)) + 1;
+    } else {
+      headerSize = (((extensionFrame[5] & 0x1F) << 3) | ((extensionFrame[6] & 0xE0) >> 5)) + 1;
+    }
+    if (headerSize <= 0 || headerSize + 4 > extensionFrame.length) {
+      return 0;
+    }
+    return ((extensionFrame[headerSize] & 0xFF) << 24)
+        | ((extensionFrame[headerSize + 1] & 0xFF) << 16)
+        | ((extensionFrame[headerSize + 2] & 0xFF) << 8)
+        | (extensionFrame[headerSize + 3] & 0xFF);
   }
 
   private static boolean containsAnyMarker(byte[] input, int... markers) {
@@ -216,8 +260,9 @@ import java.nio.ByteBuffer;
     if (accessUnit.length < 4) {
       return null;
     }
-    int frameType = DtsUtil.getFrameType(ByteBuffer.wrap(accessUnit, 0, 4).getInt());
-    if (frameType == DtsUtil.FRAME_TYPE_EXTENSION_SUBSTREAM) {
+    int sync = ByteBuffer.wrap(accessUnit, 0, 4).getInt();
+    int frameType = DtsUtil.getFrameType(sync);
+    if (sync == DTS_PREAMBLE_HD) {
       return accessUnit;
     }
     if (frameType != DtsUtil.FRAME_TYPE_CORE || accessUnit.length < 16) {
@@ -227,8 +272,8 @@ import java.nio.ByteBuffer;
     if (coreSize <= 0 || coreSize >= accessUnit.length || accessUnit.length - coreSize < 4) {
       return null;
     }
-    int extensionType = DtsUtil.getFrameType(ByteBuffer.wrap(accessUnit, coreSize, 4).getInt());
-    if (extensionType != DtsUtil.FRAME_TYPE_EXTENSION_SUBSTREAM) {
+    int extensionSync = ByteBuffer.wrap(accessUnit, coreSize, 4).getInt();
+    if (extensionSync != DTS_PREAMBLE_HD) {
       return null;
     }
     byte[] extensionFrame = new byte[accessUnit.length - coreSize];
