@@ -24,6 +24,7 @@ gen-external-apklibs
 .gradle
 build
 buildout
+buildout-composite
 out
 
 # Maven
