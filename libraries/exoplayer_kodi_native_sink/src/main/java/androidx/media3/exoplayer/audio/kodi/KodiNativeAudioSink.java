@@ -17,6 +17,7 @@
 package androidx.media3.exoplayer.audio.kodi;
 
 import android.content.Context;
+import android.util.Log;
 import android.media.AudioDeviceInfo;
 import androidx.annotation.Nullable;
 import androidx.media3.common.AudioAttributes;
@@ -38,6 +39,7 @@ import java.nio.ByteBuffer;
 public final class KodiNativeAudioSink extends ForwardingAudioSink {
 
   private static final int DEFAULT_PAUSE_BURST_DURATION_MS = 200;
+  private static final String TAG = "KodiNativeSink";
 
   private final Context context;
   private final boolean nativeLibraryReady;
@@ -56,6 +58,7 @@ public final class KodiNativeAudioSink extends ForwardingAudioSink {
   @Nullable private int[] lastOutputChannels;
   private int audioSessionId;
   private float volume;
+  private long lastLoggedPositionUs;
 
   public KodiNativeAudioSink(Context context, AudioSink sink) {
     super(sink);
@@ -66,6 +69,7 @@ public final class KodiNativeAudioSink extends ForwardingAudioSink {
     this.lastOutputChannels = null;
     this.audioSessionId = C.AUDIO_SESSION_ID_UNSET;
     this.volume = 1f;
+    this.lastLoggedPositionUs = CURRENT_POSITION_NOT_SET;
   }
 
   /** Returns whether the native library is present and passed the JNI smoke test. */
@@ -172,6 +176,7 @@ public final class KodiNativeAudioSink extends ForwardingAudioSink {
               outputChannels,
               audioSessionId,
               volume,
+              AmazonQuirks.isFireOsIecVerboseLoggingEnabled(),
               capabilitySnapshot,
               playbackDecision);
       usingNativeTransport = isSupportedNativeMode(playbackDecision);
@@ -186,6 +191,26 @@ public final class KodiNativeAudioSink extends ForwardingAudioSink {
       lastQueuedPacket = null;
       lastQueuedPacketMetadata = null;
       lastPauseBurstDurationMs = C.LENGTH_UNSET;
+      logVerbose(
+          "configure"
+              + " mime="
+              + inputFormat.sampleMimeType
+              + " sampleRate="
+              + inputFormat.sampleRate
+              + " channels="
+              + inputFormat.channelCount
+              + " mode="
+              + playbackDecision.mode
+              + " streamType="
+              + playbackDecision.streamType
+              + " encoding="
+              + playbackDecision.outputEncoding
+              + " channelConfig="
+              + playbackDecision.channelConfig
+              + " sessionId="
+              + audioSessionId
+              + " buffer="
+              + specifiedBufferSize);
     } catch (KodiNativeException e) {
       throw new ConfigurationException(e, inputFormat);
     }
@@ -201,6 +226,16 @@ public final class KodiNativeAudioSink extends ForwardingAudioSink {
     ByteBuffer pendingSnapshot = buffer.duplicate();
     try {
       if (usingNativeTransport) {
+        logVerbose(
+            "handleBuffer queue"
+                + " size="
+                + pendingSnapshot.remaining()
+                + " ptsUs="
+                + presentationTimeUs
+                + " accessUnits="
+                + encodedAccessUnitCount
+                + " mode="
+                + (lastPlaybackDecision != null ? lastPlaybackDecision.mode : -1));
         nativeSession.queueInput(pendingSnapshot, presentationTimeUs, encodedAccessUnitCount);
         drainNativePacketsToNativeTransport(/* countsTowardMediaPosition= */ true);
         lastPauseBurstDurationMs = C.LENGTH_UNSET;
@@ -247,6 +282,7 @@ public final class KodiNativeAudioSink extends ForwardingAudioSink {
       try {
         long positionUs = nativeSession.getCurrentPositionUs();
         if (positionUs != Long.MIN_VALUE / 2) {
+          maybeLogPosition(positionUs, sourceEnded);
           return positionUs;
         }
       } catch (KodiNativeException e) {
@@ -372,6 +408,20 @@ public final class KodiNativeAudioSink extends ForwardingAudioSink {
     KodiNativePacketMetadata metadata;
     while ((metadata = nativeSession.drainOnePacketToAudioTrack(countsTowardMediaPosition)) != null) {
       lastQueuedPacketMetadata = metadata;
+      logVerbose(
+          "drain packet"
+              + " kind="
+              + metadata.kind
+              + " size="
+              + metadata.sizeBytes
+              + " frames="
+              + metadata.totalFrames
+              + " accessUnits="
+              + metadata.normalizedAccessUnits
+              + " ptsUs="
+              + metadata.effectivePresentationTimeUs
+              + " media="
+              + countsTowardMediaPosition);
     }
   }
 
@@ -389,6 +439,11 @@ public final class KodiNativeAudioSink extends ForwardingAudioSink {
           lastPlaybackDecision != null && lastPlaybackDecision.usesIecCarrier());
       drainNativePacketsToNativeTransport(/* countsTowardMediaPosition= */ false);
       lastPauseBurstDurationMs = pauseBurstDurationMs;
+      logVerbose(
+          "queuePauseBurst durationMs="
+              + pauseBurstDurationMs
+              + " iec="
+              + (lastPlaybackDecision != null && lastPlaybackDecision.usesIecCarrier()));
     } catch (KodiNativeException e) {
       // Keep the active transport usable even if synthetic keep-alive bursts fail.
     }
@@ -450,5 +505,32 @@ public final class KodiNativeAudioSink extends ForwardingAudioSink {
       nativeSession = KodiNativeSinkSession.create();
     }
     return nativeSession;
+  }
+
+  private void maybeLogPosition(long positionUs, boolean sourceEnded) {
+    if (!AmazonQuirks.isFireOsIecVerboseLoggingEnabled()) {
+      return;
+    }
+    if (lastLoggedPositionUs != CURRENT_POSITION_NOT_SET
+        && Math.abs(positionUs - lastLoggedPositionUs) < 50_000) {
+      return;
+    }
+    lastLoggedPositionUs = positionUs;
+    logVerbose(
+        "position"
+            + " currentUs="
+            + positionUs
+            + " sourceEnded="
+            + sourceEnded
+            + " pending="
+            + hasPendingData()
+            + " bufferUs="
+            + getAudioTrackBufferSizeUs());
+  }
+
+  private static void logVerbose(String message) {
+    if (AmazonQuirks.isFireOsIecVerboseLoggingEnabled()) {
+      Log.i(TAG, message);
+    }
   }
 }

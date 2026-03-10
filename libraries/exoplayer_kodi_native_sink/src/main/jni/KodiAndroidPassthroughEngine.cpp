@@ -17,6 +17,9 @@
 
 #include "KodiAndroidPassthroughEngine.h"
 
+#include <android/log.h>
+
+#include <cstdarg>
 #include <cstring>
 #include <cmath>
 
@@ -32,6 +35,7 @@ constexpr int kModePcm = 1;
 constexpr int kModePassthroughDirect = 2;
 constexpr int kModePassthroughIecStereo = 3;
 constexpr int kModePassthroughIecMultichannel = 4;
+constexpr char kLogTag[] = "KodiNativeSink";
 
 bool PlaybackDecisionUsesIecCarrier(const PlaybackDecision& playback_decision)
 {
@@ -108,6 +112,15 @@ void KodiAndroidPassthroughEngine::Configure(int mime_kind,
   bitstream_packer_.Reset();
   passthrough_codec_.reset();
   audio_format_ = {};
+  LogVerbose("engine configure mime=%d rate=%d channels=%d pcm=%d mode=%d stream=%d outChannels=%d buffer=%d",
+             mime_kind,
+             sample_rate,
+             channel_count,
+             pcm_encoding,
+             playback_decision.mode,
+             playback_decision.stream_type,
+             output_channel_count,
+             specified_buffer_size);
   ConfigureStreamInfo();
 }
 
@@ -162,6 +175,13 @@ void KodiAndroidPassthroughEngine::QueueCopiedOutput(int kind,
   packet.data.resize(size);
   std::memcpy(packet.data.data(), data, size);
   pending_packets_.push_back(std::move(packet));
+  LogVerbose("engine emit copied kind=%d size=%d frames=%lld accessUnits=%d ptsUs=%lld pending=%zu",
+             kind,
+             size,
+             static_cast<long long>(total_frames),
+             encoded_access_unit_count,
+             static_cast<long long>(presentation_time_us),
+             pending_packets_.size());
 }
 
 void KodiAndroidPassthroughEngine::QueueCodecFrames(const uint8_t* data,
@@ -225,6 +245,13 @@ void KodiAndroidPassthroughEngine::QueuePackedOutput(int64_t presentation_time_u
   packet.data.resize(packed_size);
   std::memcpy(packet.data.data(), bitstream_packer_.GetBuffer(), packed_size);
   pending_packets_.push_back(std::move(packet));
+  LogVerbose("engine emit packed size=%u frames=%lld accessUnits=%d ptsUs=%lld pending=%zu stream=%d",
+             packed_size,
+             static_cast<long long>(CAEBitstreamPacker::GetOutputRate(stream_info_)),
+             encoded_access_unit_count,
+             static_cast<long long>(presentation_time_us),
+             pending_packets_.size(),
+             stream_info_.m_type);
 }
 
 void KodiAndroidPassthroughEngine::QueueInput(const uint8_t* data,
@@ -236,6 +263,13 @@ void KodiAndroidPassthroughEngine::QueueInput(const uint8_t* data,
     return;
 
   queued_input_bytes_ += size;
+  LogVerbose("engine queue size=%d ptsUs=%lld accessUnits=%d mode=%d stream=%d queuedBytes=%lld",
+             size,
+             static_cast<long long>(presentation_time_us),
+             encoded_access_unit_count,
+             playback_decision_.mode,
+             playback_decision_.stream_type,
+             static_cast<long long>(queued_input_bytes_));
   if (playback_decision_.mode == kModeUnsupported)
     return;
 
@@ -303,6 +337,7 @@ void KodiAndroidPassthroughEngine::QueuePause(unsigned int millis, bool iec_burs
   if (!bitstream_packer_.PackPause(stream_info_, millis, iec_bursts))
     return;
 
+  LogVerbose("engine queuePause millis=%u iec=%d stream=%d", millis, iec_bursts ? 1 : 0, stream_info_.m_type);
   QueuePackedOutput(/* presentation_time_us= */ 0, /* encoded_access_unit_count= */ 0);
 }
 
@@ -315,7 +350,24 @@ bool KodiAndroidPassthroughEngine::DequeuePacket(PacketMetadata* packet)
   pending_packets_.pop_front();
   *packet = pending_packet.metadata;
   last_dequeued_packet_data_ = std::move(pending_packet.data);
+  LogVerbose("engine dequeue kind=%d size=%d frames=%lld accessUnits=%d ptsUs=%lld pending=%zu",
+             packet->kind,
+             packet->size_bytes,
+             static_cast<long long>(packet->total_frames),
+             packet->normalized_access_units,
+             static_cast<long long>(packet->effective_presentation_time_us),
+             pending_packets_.size());
   return true;
+}
+
+void KodiAndroidPassthroughEngine::LogVerbose(const char* format, ...) const
+{
+  if (!verbose_logging_enabled_)
+    return;
+  va_list args;
+  va_start(args, format);
+  __android_log_vprint(ANDROID_LOG_INFO, kLogTag, format, args);
+  va_end(args);
 }
 
 bool KodiAndroidPassthroughEngine::TakeLastDequeuedPacketData(std::vector<uint8_t>* data)
