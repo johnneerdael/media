@@ -37,6 +37,13 @@ public final class AmazonQuirks {
   private static volatile boolean skipProfileLevelCheck;
   private static volatile boolean fireOsIecVerboseLoggingEnabled;
   private static volatile boolean fireOsIecSuperviseAudioDelayEnabled;
+  private static volatile boolean iecPackerAc3PassthroughEnabled = true;
+  private static volatile boolean iecPackerEac3PassthroughEnabled = true;
+  private static volatile boolean iecPackerDtsPassthroughEnabled = true;
+  private static volatile boolean iecPackerTruehdPassthroughEnabled = true;
+  private static volatile boolean iecPackerDtshdPassthroughEnabled = true;
+  private static volatile boolean iecPackerDtshdCoreFallbackEnabled = true;
+  private static volatile int iecPackerMaxPcmChannelLayout = 10;
 
   private AmazonQuirks() {}
 
@@ -70,6 +77,62 @@ public final class AmazonQuirks {
 
   public static boolean isFireOsIecSuperviseAudioDelayEnabled() {
     return fireOsIecSuperviseAudioDelayEnabled;
+  }
+
+  public static void setIecPackerAc3PassthroughEnabled(boolean enabled) {
+    iecPackerAc3PassthroughEnabled = enabled;
+  }
+
+  public static boolean isIecPackerAc3PassthroughEnabled() {
+    return iecPackerAc3PassthroughEnabled;
+  }
+
+  public static void setIecPackerEac3PassthroughEnabled(boolean enabled) {
+    iecPackerEac3PassthroughEnabled = enabled;
+  }
+
+  public static boolean isIecPackerEac3PassthroughEnabled() {
+    return iecPackerEac3PassthroughEnabled;
+  }
+
+  public static void setIecPackerDtsPassthroughEnabled(boolean enabled) {
+    iecPackerDtsPassthroughEnabled = enabled;
+  }
+
+  public static boolean isIecPackerDtsPassthroughEnabled() {
+    return iecPackerDtsPassthroughEnabled;
+  }
+
+  public static void setIecPackerTruehdPassthroughEnabled(boolean enabled) {
+    iecPackerTruehdPassthroughEnabled = enabled;
+  }
+
+  public static boolean isIecPackerTruehdPassthroughEnabled() {
+    return iecPackerTruehdPassthroughEnabled;
+  }
+
+  public static void setIecPackerDtshdPassthroughEnabled(boolean enabled) {
+    iecPackerDtshdPassthroughEnabled = enabled;
+  }
+
+  public static boolean isIecPackerDtshdPassthroughEnabled() {
+    return iecPackerDtshdPassthroughEnabled;
+  }
+
+  public static void setIecPackerDtshdCoreFallbackEnabled(boolean enabled) {
+    iecPackerDtshdCoreFallbackEnabled = enabled;
+  }
+
+  public static boolean isIecPackerDtshdCoreFallbackEnabled() {
+    return iecPackerDtshdCoreFallbackEnabled;
+  }
+
+  public static void setIecPackerMaxPcmChannelLayout(int channelLayout) {
+    iecPackerMaxPcmChannelLayout = channelLayout;
+  }
+
+  public static int getIecPackerMaxPcmChannelLayout() {
+    return iecPackerMaxPcmChannelLayout;
   }
 
   public static boolean isFireOsCompatibilityFallbackEnabled() {

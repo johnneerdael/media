@@ -35,6 +35,9 @@ project(modulePrefix + 'lib-session').projectDir = new File(rootDir, 'libraries/
 
 include modulePrefix + 'lib-exoplayer'
 project(modulePrefix + 'lib-exoplayer').projectDir = new File(rootDir, 'libraries/exoplayer')
+include modulePrefix + 'lib-exoplayer-kodi-native-sink'
+project(modulePrefix + 'lib-exoplayer-kodi-native-sink').projectDir =
+        new File(rootDir, 'libraries/exoplayer_kodi_native_sink')
 include modulePrefix + 'lib-exoplayer-dash'
 project(modulePrefix + 'lib-exoplayer-dash').projectDir = new File(rootDir, 'libraries/exoplayer_dash')
 include modulePrefix + 'lib-exoplayer-hls'
