@@ -37,8 +37,10 @@ void KodiNativeSinkSession::Configure(int mime_kind,
                                       int output_channel_count,
                                       int audio_session_id,
                                       float volume,
+                                      bool verbose_logging_enabled,
                                       const CapabilitySnapshot& capability_snapshot,
                                       const PlaybackDecision& playback_decision) {
+  engine_->set_verbose_logging_enabled(verbose_logging_enabled);
   engine_->Configure(mime_kind,
                      sample_rate,
                      channel_count,
@@ -47,6 +49,7 @@ void KodiNativeSinkSession::Configure(int mime_kind,
                      output_channel_count,
                      capability_snapshot,
                      playback_decision);
+  audio_track_sink_->set_verbose_logging_enabled(verbose_logging_enabled);
   audio_track_sink_->Configure(env,
                                sample_rate,
                                channel_count,

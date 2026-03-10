@@ -160,6 +160,7 @@ Java_androidx_media3_exoplayer_audio_kodi_KodiNativeSinkSession_nConfigure(
     jint output_channel_count,
     jint audio_session_id,
     jfloat volume,
+    jboolean verbose_logging_enabled,
     jint sdk_int,
     jboolean tv,
     jboolean automotive,
@@ -218,6 +219,7 @@ Java_androidx_media3_exoplayer_audio_kodi_KodiNativeSinkSession_nConfigure(
           output_channel_count,
           audio_session_id,
           volume,
+          verbose_logging_enabled == JNI_TRUE,
           capability_snapshot,
           playback_decision);
 }

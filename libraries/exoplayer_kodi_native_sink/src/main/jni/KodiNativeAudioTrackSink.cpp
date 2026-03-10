@@ -17,7 +17,11 @@
 
 #include "KodiNativeAudioTrackSink.h"
 
+#include <android/log.h>
+
 #include <algorithm>
+#include <cstdarg>
+#include <cstdlib>
 #include <cstring>
 
 #include "AEStreamInfo.h"
@@ -39,6 +43,7 @@ constexpr int kModePcm = 1;
 constexpr int kModePassthroughDirect = 2;
 constexpr int kModePassthroughIecStereo = 3;
 constexpr int kModePassthroughIecMultichannel = 4;
+constexpr char kLogTag[] = "KodiNativeSink";
 
 bool UsesIecCarrier(const PlaybackDecision& playback_decision) {
   return playback_decision.mode == kModePassthroughIecStereo ||
@@ -93,6 +98,18 @@ void KodiNativeAudioTrackSink::Configure(JNIEnv* env,
       transport_frame_size_bytes_ > 0 ? buffer_size_bytes_ / transport_frame_size_bytes_ : 0,
       transport_sample_rate_hz_);
   ResetState();
+  LogVerbose(
+      "track configure rate=%d channelConfig=%d channelCount=%d encoding=%d frameBytes=%d bufferBytes=%d bufferUs=%lld passthrough=%d raw=%d session=%d",
+      transport_sample_rate_hz_,
+      transport_channel_config_,
+      transport_channel_count_,
+      transport_encoding_,
+      transport_frame_size_bytes_,
+      buffer_size_bytes_,
+      static_cast<long long>(buffer_size_us_),
+      passthrough_ ? 1 : 0,
+      raw_passthrough_ ? 1 : 0,
+      audio_session_id_);
 }
 
 void KodiNativeAudioTrackSink::WritePacket(JNIEnv* env,
@@ -110,8 +127,16 @@ void KodiNativeAudioTrackSink::WritePacket(JNIEnv* env,
   if (play_requested_ && audio_track_->getPlayState(env) != CJNIAudioTrack::PLAYSTATE_PLAYING) {
     audio_track_->play(env);
   }
+  const int64_t delay_before_us = GetDelayUs(env);
   int written_bytes = WriteToAudioTrack(env, data, packet.size_bytes);
   if (written_bytes <= 0) {
+    LogVerbose(
+        "track write stalled kind=%d size=%d frames=%lld ptsUs=%lld delayBeforeUs=%lld",
+        packet.kind,
+        packet.size_bytes,
+        static_cast<long long>(packet.total_frames),
+        static_cast<long long>(packet.effective_presentation_time_us),
+        static_cast<long long>(delay_before_us));
     return;
   }
   int64_t packet_frames = packet.total_frames;
@@ -124,6 +149,19 @@ void KodiNativeAudioTrackSink::WritePacket(JNIEnv* env,
       media_frames_submitted_ += packet_frames;
     }
   }
+  const int64_t delay_after_us = GetDelayUs(env);
+  LogVerbose(
+      "track write kind=%d req=%d wrote=%d frames=%lld media=%d submitted=%lld mediaSubmitted=%lld delayBeforeUs=%lld delayAfterUs=%lld ptsUs=%lld",
+      packet.kind,
+      packet.size_bytes,
+      written_bytes,
+      static_cast<long long>(packet_frames),
+      counts_toward_media_position ? 1 : 0,
+      static_cast<long long>(submitted_frames_),
+      static_cast<long long>(media_frames_submitted_),
+      static_cast<long long>(delay_before_us),
+      static_cast<long long>(delay_after_us),
+      static_cast<long long>(packet.effective_presentation_time_us));
 }
 
 void KodiNativeAudioTrackSink::Play(JNIEnv* env) {
@@ -132,6 +170,7 @@ void KodiNativeAudioTrackSink::Play(JNIEnv* env) {
   if (audio_track_ != nullptr) {
     audio_track_->play(env);
   }
+  LogVerbose("track play");
 }
 
 void KodiNativeAudioTrackSink::Pause(JNIEnv* env) {
@@ -140,6 +179,7 @@ void KodiNativeAudioTrackSink::Pause(JNIEnv* env) {
       audio_track_->getPlayState(env) == CJNIAudioTrack::PLAYSTATE_PLAYING) {
     audio_track_->pause(env);
   }
+  LogVerbose("track pause");
 }
 
 void KodiNativeAudioTrackSink::Flush(JNIEnv* env) {
@@ -148,6 +188,7 @@ void KodiNativeAudioTrackSink::Flush(JNIEnv* env) {
     audio_track_->flush(env);
   }
   ResetState();
+  LogVerbose("track flush");
 }
 
 void KodiNativeAudioTrackSink::Stop(JNIEnv* env) {
@@ -155,6 +196,7 @@ void KodiNativeAudioTrackSink::Stop(JNIEnv* env) {
     audio_track_->stop(env);
   }
   ResetState();
+  LogVerbose("track stop");
 }
 
 void KodiNativeAudioTrackSink::Release(JNIEnv* env) {
@@ -164,6 +206,7 @@ void KodiNativeAudioTrackSink::Release(JNIEnv* env) {
     audio_track_->release(env);
     audio_track_.reset();
   }
+  LogVerbose("track release");
   ResetState();
   transport_encoding_ = kEncodingInvalid;
   transport_sample_rate_hz_ = 0;
@@ -176,6 +219,7 @@ void KodiNativeAudioTrackSink::Release(JNIEnv* env) {
 
 void KodiNativeAudioTrackSink::PlayToEndOfStream(JNIEnv* env) {
   play_to_end_of_stream_requested_ = true;
+  LogVerbose("track playToEndOfStream delayUs=%lld", static_cast<long long>(GetDelayUs(env)));
   MaybeDrainCompletedPlayback(env);
 }
 
@@ -203,7 +247,21 @@ int64_t KodiNativeAudioTrackSink::GetCurrentPositionUs(JNIEnv* env) {
   const int64_t played_frames =
       std::max<int64_t>(0, submitted_frames_ - DurationUsToSampleCount(GetDelayUs(env), transport_sample_rate_hz_));
   const int64_t played_media_frames = std::min<int64_t>(media_frames_submitted_, played_frames);
-  return start_media_time_us_ + SampleCountToDurationUs(played_media_frames, transport_sample_rate_hz_);
+  const int64_t position_us =
+      start_media_time_us_ + SampleCountToDurationUs(played_media_frames, transport_sample_rate_hz_);
+  if (last_logged_position_us_ == kCurrentPositionNotSet ||
+      std::llabs(position_us - last_logged_position_us_) >= 50000) {
+    last_logged_position_us_ = position_us;
+    LogVerbose(
+        "track position currentUs=%lld playedFrames=%lld playedMediaFrames=%lld submitted=%lld mediaSubmitted=%lld delayUs=%lld",
+        static_cast<long long>(position_us),
+        static_cast<long long>(played_frames),
+        static_cast<long long>(played_media_frames),
+        static_cast<long long>(submitted_frames_),
+        static_cast<long long>(media_frames_submitted_),
+        static_cast<long long>(GetDelayUs(env)));
+  }
+  return position_us;
 }
 
 int64_t KodiNativeAudioTrackSink::GetBufferSizeUs() const {
@@ -213,6 +271,7 @@ int64_t KodiNativeAudioTrackSink::GetBufferSizeUs() const {
 void KodiNativeAudioTrackSink::ResetState() {
   submitted_frames_ = 0;
   media_frames_submitted_ = 0;
+  last_logged_position_us_ = kCurrentPositionNotSet;
   playback_head_wrap_count_ = 0;
   last_playback_head_position_ = 0;
   start_media_time_us_ = kCurrentPositionNotSet;
@@ -341,6 +400,7 @@ void KodiNativeAudioTrackSink::MaybeDrainCompletedPlayback(JNIEnv* env) {
   if (GetDelayUs(env) > 0) {
     return;
   }
+  LogVerbose("track drain complete");
   audio_track_->stop(env);
   audio_track_->pause(env);
   ResetState();
@@ -364,6 +424,16 @@ int KodiNativeAudioTrackSink::WriteToAudioTrack(JNIEnv* env, const uint8_t* data
     return audio_track_->write(env, float_write_buffer_, CJNIAudioTrack::WRITE_BLOCKING);
   }
   return audio_track_->write(env, data, size_bytes, CJNIAudioTrack::WRITE_BLOCKING);
+}
+
+void KodiNativeAudioTrackSink::LogVerbose(const char* format, ...) const {
+  if (!verbose_logging_enabled_) {
+    return;
+  }
+  va_list args;
+  va_start(args, format);
+  __android_log_vprint(ANDROID_LOG_INFO, kLogTag, format, args);
+  va_end(args);
 }
 
 }  // namespace androidx_media3

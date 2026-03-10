@@ -34,6 +34,9 @@ namespace androidx_media3 {
 
 class KodiAndroidPassthroughEngine {
  public:
+  void set_verbose_logging_enabled(bool verbose_logging_enabled) {
+    verbose_logging_enabled_ = verbose_logging_enabled;
+  }
   void Configure(int mime_kind,
                  int sample_rate,
                  int channel_count,
@@ -64,6 +67,7 @@ class KodiAndroidPassthroughEngine {
   int specified_buffer_size_ = 0;
   int output_channel_count_ = 0;
   PlaybackDecision playback_decision_ = {};
+  bool verbose_logging_enabled_ = false;
   bool playing_ = false;
   int64_t queued_input_bytes_ = 0;
   CAEBitstreamPacker bitstream_packer_;
@@ -92,6 +96,7 @@ class KodiAndroidPassthroughEngine {
                         int64_t presentation_time_us,
                         int encoded_access_unit_count);
   void QueuePackedOutput(int64_t presentation_time_us, int encoded_access_unit_count);
+  void LogVerbose(const char* format, ...) const;
 };
 
 }  // namespace androidx_media3

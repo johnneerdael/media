@@ -49,6 +49,7 @@ public final class KodiNativeSinkSession implements AutoCloseable {
       @Nullable int[] outputChannels,
       int audioSessionId,
       float volume,
+      boolean verboseLoggingEnabled,
       KodiNativeCapabilitySnapshot capabilitySnapshot,
       KodiNativePlaybackDecision playbackDecision)
       throws KodiNativeException {
@@ -63,6 +64,7 @@ public final class KodiNativeSinkSession implements AutoCloseable {
         outputChannels != null ? outputChannels.length : 0,
         audioSessionId,
         volume,
+        verboseLoggingEnabled,
         capabilitySnapshot.sdkInt,
         capabilitySnapshot.tv,
         capabilitySnapshot.automotive,
@@ -235,6 +237,7 @@ public final class KodiNativeSinkSession implements AutoCloseable {
       int outputChannelCount,
       int audioSessionId,
       float volume,
+      boolean verboseLoggingEnabled,
       int sdkInt,
       boolean tv,
       boolean automotive,

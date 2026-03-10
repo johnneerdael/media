@@ -32,6 +32,9 @@ namespace androidx_media3 {
 
 class KodiNativeAudioTrackSink {
  public:
+  void set_verbose_logging_enabled(bool verbose_logging_enabled) {
+    verbose_logging_enabled_ = verbose_logging_enabled;
+  }
   void Configure(JNIEnv* env,
                  int sample_rate,
                  int channel_count,
@@ -65,6 +68,7 @@ class KodiNativeAudioTrackSink {
   int transport_frame_size_bytes_ = 0;
   int buffer_size_bytes_ = 0;
   int audio_session_id_ = 0;
+  bool verbose_logging_enabled_ = false;
   bool passthrough_ = false;
   bool raw_passthrough_ = false;
   bool play_requested_ = false;
@@ -74,6 +78,7 @@ class KodiNativeAudioTrackSink {
   int64_t media_frames_submitted_ = 0;
   int64_t start_media_time_us_ = -1;
   int64_t buffer_size_us_ = 0;
+  int64_t last_logged_position_us_ = -1;
   uint64_t playback_head_wrap_count_ = 0;
   uint64_t last_playback_head_position_ = 0;
   float volume_ = 1.0f;
@@ -93,6 +98,7 @@ class KodiNativeAudioTrackSink {
   int64_t GetDelayUs(JNIEnv* env);
   void MaybeDrainCompletedPlayback(JNIEnv* env);
   int WriteToAudioTrack(JNIEnv* env, const uint8_t* data, int size_bytes);
+  void LogVerbose(const char* format, ...) const;
 };
 
 }  // namespace androidx_media3

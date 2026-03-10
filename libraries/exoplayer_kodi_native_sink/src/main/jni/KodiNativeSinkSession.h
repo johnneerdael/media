@@ -53,8 +53,9 @@ class KodiNativeSinkSession {
                  int output_channel_count,
                  int audio_session_id,
                  float volume,
+                 bool verbose_logging_enabled,
                  const CapabilitySnapshot& capability_snapshot,
-                  const PlaybackDecision& playback_decision);
+                 const PlaybackDecision& playback_decision);
   void QueueInput(const uint8_t* data,
                   int size,
                   int64_t presentation_time_us,
