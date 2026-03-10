@@ -35,11 +35,17 @@ allprojects {
             }
         }
     }
-    if (it.hasProperty('externalBuildDir')) {
-        if (!new File(externalBuildDir).isAbsolute()) {
-            externalBuildDir = new File(rootDir, externalBuildDir)
+    def configuredExternalBuildDir = findProperty('externalBuildDir')
+    if (configuredExternalBuildDir != null) {
+        if (!new File(configuredExternalBuildDir).isAbsolute()) {
+            configuredExternalBuildDir = new File(rootDir, configuredExternalBuildDir)
         }
-        buildDir = "${externalBuildDir}/${project.name}"
+        buildDir = "${configuredExternalBuildDir}/${project.name}"
+    } else if (gradle.parent != null) {
+        // Composite builds from the nexio superproject must not share build outputs with a
+        // standalone `media` Gradle invocation, otherwise concurrent compilation can corrupt
+        // intermediate class directories and surface as spurious missing-symbol errors.
+        buildDir = new File(rootDir, "buildout-composite/${project.name}")
     }
     group = 'androidx.media3'
 }
