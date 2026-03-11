@@ -17,8 +17,8 @@
 package androidx.media3.exoplayer.audio.kodi;
 
 import android.content.Context;
-import android.util.Log;
 import android.media.AudioDeviceInfo;
+import android.util.Log;
 import androidx.annotation.Nullable;
 import androidx.media3.common.AudioAttributes;
 import androidx.media3.common.C;
@@ -37,11 +37,59 @@ import java.nio.ByteBuffer;
  */
 @UnstableApi
 public final class KodiNativeAudioSink extends ForwardingAudioSink {
+  private final class RuntimeListener implements KodiNativeActiveAERuntime.Listener {
+    @Override
+    public void onUserAudioSettingsChanged() {
+      maybeReconfigureActiveNativePath();
+    }
+
+    @Override
+    public void onControlSettingsChanged() {
+      if (nativeSession == null) {
+        return;
+      }
+      try {
+        applyKodiControlSettings();
+      } catch (KodiNativeException e) {
+        // Keep the active transport usable if control updates fail.
+      }
+    }
+
+    @Override
+    public void onAppFocusedChanged(boolean appFocused) {
+      updateNativeAppFocusedState();
+    }
+
+    @Override
+    public void onCapabilitySnapshotChanged(KodiNativeCapabilitySnapshot capabilitySnapshot) {
+      if (!reconfiguringActivePath) {
+        maybeReconfigureActiveNativePath();
+      }
+    }
+
+    @Override
+    public void onEngineStatsChanged(KodiNativeEngineStats stats) {}
+  }
+
+  public static final class ControlSettings {
+    public static final ControlSettings DEFAULT = new ControlSettings(1, true);
+
+    public final int silenceTimeoutMinutes;
+    public final boolean streamNoiseEnabled;
+
+    public ControlSettings(int silenceTimeoutMinutes, boolean streamNoiseEnabled) {
+      this.silenceTimeoutMinutes = Math.max(0, silenceTimeoutMinutes);
+      this.streamNoiseEnabled = streamNoiseEnabled;
+    }
+  }
 
   private static final int DEFAULT_PAUSE_BURST_DURATION_MS = 200;
   private static final String TAG = "KodiNativeSink";
 
   private final Context context;
+  private final KodiNativeActiveAERuntime runtime;
+  private final boolean ownsRuntime;
+  private final RuntimeListener runtimeListener;
   private final boolean nativeLibraryReady;
   @Nullable private AudioAttributes audioAttributes;
   @Nullable private AudioDeviceInfo preferredDevice;
@@ -50,8 +98,6 @@ public final class KodiNativeAudioSink extends ForwardingAudioSink {
   @Nullable private AudioSink.Listener listener;
   @Nullable private KodiNativeCapabilitySnapshot lastCapabilitySnapshot;
   @Nullable private KodiNativePlaybackDecision lastPlaybackDecision;
-  @Nullable private KodiNativePacket lastQueuedPacket;
-  @Nullable private KodiNativePacketMetadata lastQueuedPacketMetadata;
   private boolean usingNativeTransport;
   private int lastPauseBurstDurationMs;
   private int lastSpecifiedBufferSize;
@@ -59,10 +105,33 @@ public final class KodiNativeAudioSink extends ForwardingAudioSink {
   private int audioSessionId;
   private float volume;
   private long lastLoggedPositionUs;
+  private boolean reconfiguringActivePath;
 
   public KodiNativeAudioSink(Context context, AudioSink sink) {
+    this(context, sink, KodiNativeActiveAERuntime.createDefault(context), true);
+  }
+
+  public KodiNativeAudioSink(
+      Context context, AudioSink sink, KodiNativeActiveAERuntime runtime) {
+    this(context, sink, runtime, false);
+  }
+
+  public KodiNativeAudioSink(Context context, AudioSink sink, ControlSettings controlSettings) {
+    this(
+        context,
+        sink,
+        new KodiNativeActiveAERuntime(
+            context, KodiNativeUserAudioSettings.fromGlobals(), controlSettings),
+        true);
+  }
+
+  private KodiNativeAudioSink(
+      Context context, AudioSink sink, KodiNativeActiveAERuntime runtime, boolean ownsRuntime) {
     super(sink);
     this.context = context.getApplicationContext();
+    this.runtime = runtime;
+    this.ownsRuntime = ownsRuntime;
+    this.runtimeListener = new RuntimeListener();
     this.nativeLibraryReady = KodiNativeLibrary.passesSmokeTest();
     this.lastPauseBurstDurationMs = C.LENGTH_UNSET;
     this.lastSpecifiedBufferSize = 0;
@@ -70,23 +139,13 @@ public final class KodiNativeAudioSink extends ForwardingAudioSink {
     this.audioSessionId = C.AUDIO_SESSION_ID_UNSET;
     this.volume = 1f;
     this.lastLoggedPositionUs = CURRENT_POSITION_NOT_SET;
+    runtime.addListener(runtimeListener);
+    runtime.setRoutingContext(AudioAttributes.DEFAULT, preferredDevice);
   }
 
   /** Returns whether the native library is present and passed the JNI smoke test. */
   public boolean isNativeLibraryReady() {
     return nativeLibraryReady;
-  }
-
-  /** Returns the latest packet metadata observed from the native session, if any. */
-  @Nullable
-  public KodiNativePacketMetadata getLastQueuedPacketMetadata() {
-    return lastQueuedPacketMetadata;
-  }
-
-  /** Returns the latest full packet observed from the native session, if any. */
-  @Nullable
-  public KodiNativePacket getLastQueuedPacket() {
-    return lastQueuedPacket;
   }
 
   /** Returns the latest capability snapshot used to configure the native session, if any. */
@@ -104,14 +163,14 @@ public final class KodiNativeAudioSink extends ForwardingAudioSink {
   @Override
   public void setAudioAttributes(AudioAttributes audioAttributes) {
     this.audioAttributes = audioAttributes;
-    maybeReconfigureActiveNativePath();
+    runtime.setRoutingContext(audioAttributes, preferredDevice);
     super.setAudioAttributes(audioAttributes);
   }
 
   @Override
   public void setPreferredDevice(@Nullable AudioDeviceInfo audioDeviceInfo) {
     preferredDevice = audioDeviceInfo;
-    maybeReconfigureActiveNativePath();
+    runtime.setRoutingContext(audioAttributes != null ? audioAttributes : AudioAttributes.DEFAULT, preferredDevice);
     super.setPreferredDevice(audioDeviceInfo);
   }
 
@@ -138,6 +197,7 @@ public final class KodiNativeAudioSink extends ForwardingAudioSink {
         // Keep the current transport alive if native volume update fails.
       }
     }
+    publishRuntimeStats();
     super.setVolume(volume);
   }
 
@@ -162,13 +222,15 @@ public final class KodiNativeAudioSink extends ForwardingAudioSink {
       throw new ConfigurationException(
           new KodiNativeException("Kodi native sink library is unavailable"), inputFormat);
     }
+    reconfiguringActivePath = true;
     try {
       AudioAttributes currentAudioAttributes =
           audioAttributes != null ? audioAttributes : AudioAttributes.DEFAULT;
-      KodiNativeCapabilitySnapshot capabilitySnapshot =
-          KodiNativeCapabilitySnapshot.fromSystem(context, currentAudioAttributes, preferredDevice);
+      runtime.setRoutingContext(currentAudioAttributes, preferredDevice);
+      KodiNativeCapabilitySnapshot capabilitySnapshot = runtime.getCapabilitySnapshot();
       KodiNativePlaybackDecision playbackDecision =
-          KodiNativeCapabilitySelector.evaluatePlaybackDecision(capabilitySnapshot, inputFormat);
+          KodiNativeCapabilitySelector.evaluatePlaybackDecision(
+              capabilitySnapshot, inputFormat, runtime.getUserAudioSettings());
       ensureSession()
           .configure(
               inputFormat,
@@ -177,8 +239,10 @@ public final class KodiNativeAudioSink extends ForwardingAudioSink {
               audioSessionId,
               volume,
               AmazonQuirks.isFireOsIecVerboseLoggingEnabled(),
+              AmazonQuirks.isFireOsIecSuperviseAudioDelayEnabled(),
               capabilitySnapshot,
               playbackDecision);
+      applyKodiControlSettings();
       usingNativeTransport = isSupportedNativeMode(playbackDecision);
       if (!usingNativeTransport) {
         throw new ConfigurationException(
@@ -188,9 +252,8 @@ public final class KodiNativeAudioSink extends ForwardingAudioSink {
       }
       lastCapabilitySnapshot = capabilitySnapshot;
       lastPlaybackDecision = playbackDecision;
-      lastQueuedPacket = null;
-      lastQueuedPacketMetadata = null;
       lastPauseBurstDurationMs = C.LENGTH_UNSET;
+      publishRuntimeStats();
       logVerbose(
           "configure"
               + " mime="
@@ -213,6 +276,8 @@ public final class KodiNativeAudioSink extends ForwardingAudioSink {
               + specifiedBufferSize);
     } catch (KodiNativeException e) {
       throw new ConfigurationException(e, inputFormat);
+    } finally {
+      reconfiguringActivePath = false;
     }
   }
 
@@ -236,10 +301,25 @@ public final class KodiNativeAudioSink extends ForwardingAudioSink {
                 + encodedAccessUnitCount
                 + " mode="
                 + (lastPlaybackDecision != null ? lastPlaybackDecision.mode : -1));
-        nativeSession.queueInput(pendingSnapshot, presentationTimeUs, encodedAccessUnitCount);
-        drainNativePacketsToNativeTransport(/* countsTowardMediaPosition= */ true);
+        if (!nativeSession.handleBufferToSink(
+            pendingSnapshot,
+            presentationTimeUs,
+            encodedAccessUnitCount)) {
+          logVerbose(
+              "handleBuffer backpressure"
+                  + " size="
+                  + pendingSnapshot.remaining()
+                  + " ptsUs="
+                  + presentationTimeUs
+                  + " accessUnits="
+                  + encodedAccessUnitCount
+                  + " mode="
+                  + (lastPlaybackDecision != null ? lastPlaybackDecision.mode : -1));
+          return false;
+        }
         lastPauseBurstDurationMs = C.LENGTH_UNSET;
         buffer.position(buffer.limit());
+        publishRuntimeStats();
         return true;
       }
     } catch (KodiNativeException e) {
@@ -252,7 +332,9 @@ public final class KodiNativeAudioSink extends ForwardingAudioSink {
   public void play() {
     if (nativeSession != null) {
       try {
+        updateNativeAppFocusedState();
         nativeSession.play();
+        publishRuntimeStats();
       } catch (KodiNativeException e) {
         throw new IllegalStateException("Kodi native sink play failed", e);
       }
@@ -264,7 +346,9 @@ public final class KodiNativeAudioSink extends ForwardingAudioSink {
     queuePauseBurstIfEnabled();
     if (nativeSession != null) {
       try {
+        updateNativeAppFocusedState();
         nativeSession.pause();
+        publishRuntimeStats();
       } catch (KodiNativeException e) {
         throw new IllegalStateException("Kodi native sink pause failed", e);
       }
@@ -282,6 +366,7 @@ public final class KodiNativeAudioSink extends ForwardingAudioSink {
       try {
         long positionUs = nativeSession.getCurrentPositionUs();
         if (positionUs != Long.MIN_VALUE / 2) {
+          publishRuntimeStats();
           maybeLogPosition(positionUs, sourceEnded);
           return positionUs;
         }
@@ -296,7 +381,8 @@ public final class KodiNativeAudioSink extends ForwardingAudioSink {
   public void playToEndOfStream() throws WriteException {
     if (usingNativeTransport && nativeSession != null) {
       try {
-        nativeSession.playToEndOfStream();
+        nativeSession.drain();
+        publishRuntimeStats();
       } catch (KodiNativeException e) {
         throw new WriteException(/* errorCode= */ -1, configuredFormat, /* isRecoverable= */ false);
       }
@@ -307,7 +393,9 @@ public final class KodiNativeAudioSink extends ForwardingAudioSink {
   public boolean isEnded() {
     if (usingNativeTransport && nativeSession != null) {
       try {
-        return nativeSession.isEnded();
+        boolean ended = nativeSession.isEnded();
+        publishRuntimeStats();
+        return ended;
       } catch (KodiNativeException e) {
         return false;
       }
@@ -319,7 +407,9 @@ public final class KodiNativeAudioSink extends ForwardingAudioSink {
   public boolean hasPendingData() {
     if (usingNativeTransport && nativeSession != null) {
       try {
-        return nativeSession.hasPendingData();
+        boolean pending = nativeSession.hasPendingData();
+        publishRuntimeStats();
+        return pending;
       } catch (KodiNativeException e) {
         return false;
       }
@@ -331,7 +421,9 @@ public final class KodiNativeAudioSink extends ForwardingAudioSink {
   public long getAudioTrackBufferSizeUs() {
     if (usingNativeTransport && nativeSession != null) {
       try {
-        return nativeSession.getBufferSizeUs();
+        long bufferSizeUs = nativeSession.getBufferSizeUs();
+        publishRuntimeStats();
+        return bufferSizeUs;
       } catch (KodiNativeException e) {
         return 0L;
       }
@@ -348,9 +440,8 @@ public final class KodiNativeAudioSink extends ForwardingAudioSink {
       } catch (KodiNativeException e) {
         return;
       }
-      lastQueuedPacket = null;
-      lastQueuedPacketMetadata = null;
       lastPauseBurstDurationMs = C.LENGTH_UNSET;
+      publishRuntimeStats();
     }
   }
 
@@ -367,12 +458,11 @@ public final class KodiNativeAudioSink extends ForwardingAudioSink {
         configuredFormat = null;
         lastCapabilitySnapshot = null;
         lastPlaybackDecision = null;
-        lastQueuedPacket = null;
-        lastQueuedPacketMetadata = null;
         usingNativeTransport = false;
         lastPauseBurstDurationMs = C.LENGTH_UNSET;
         lastSpecifiedBufferSize = 0;
         lastOutputChannels = null;
+        publishRuntimeStats();
       }
     }
   }
@@ -390,39 +480,18 @@ public final class KodiNativeAudioSink extends ForwardingAudioSink {
         configuredFormat = null;
         lastCapabilitySnapshot = null;
         lastPlaybackDecision = null;
-        lastQueuedPacket = null;
-        lastQueuedPacketMetadata = null;
         usingNativeTransport = false;
         lastPauseBurstDurationMs = C.LENGTH_UNSET;
         lastSpecifiedBufferSize = 0;
         lastOutputChannels = null;
+        publishRuntimeStats();
       }
     }
-    super.release();
-  }
-
-  private void drainNativePacketsToNativeTransport(boolean countsTowardMediaPosition)
-      throws KodiNativeException {
-    lastQueuedPacket = null;
-    lastQueuedPacketMetadata = null;
-    KodiNativePacketMetadata metadata;
-    while ((metadata = nativeSession.drainOnePacketToAudioTrack(countsTowardMediaPosition)) != null) {
-      lastQueuedPacketMetadata = metadata;
-      logVerbose(
-          "drain packet"
-              + " kind="
-              + metadata.kind
-              + " size="
-              + metadata.sizeBytes
-              + " frames="
-              + metadata.totalFrames
-              + " accessUnits="
-              + metadata.normalizedAccessUnits
-              + " ptsUs="
-              + metadata.effectivePresentationTimeUs
-              + " media="
-              + countsTowardMediaPosition);
+    runtime.removeListener(runtimeListener);
+    if (ownsRuntime) {
+      runtime.close();
     }
+    super.release();
   }
 
   private void queuePauseBurstIfEnabled() {
@@ -434,10 +503,9 @@ public final class KodiNativeAudioSink extends ForwardingAudioSink {
       return;
     }
     try {
-      nativeSession.queuePause(
+      nativeSession.queuePauseToSink(
           pauseBurstDurationMs,
           lastPlaybackDecision != null && lastPlaybackDecision.usesIecCarrier());
-      drainNativePacketsToNativeTransport(/* countsTowardMediaPosition= */ false);
       lastPauseBurstDurationMs = pauseBurstDurationMs;
       logVerbose(
           "queuePauseBurst durationMs="
@@ -460,10 +528,11 @@ public final class KodiNativeAudioSink extends ForwardingAudioSink {
       if (listener != null
           && previousSnapshot != null
           && previousDecision != null
-          && (!previousSnapshot.toString().equals(String.valueOf(lastCapabilitySnapshot))
-              || !previousDecision.toString().equals(String.valueOf(lastPlaybackDecision)))) {
+          && (!previousSnapshot.equals(lastCapabilitySnapshot)
+              || !previousDecision.equals(lastPlaybackDecision))) {
         listener.onAudioCapabilitiesChanged();
       }
+      publishRuntimeStats();
     } catch (ConfigurationException e) {
       // Keep the current sink alive if route-based reconfiguration fails.
     }
@@ -505,6 +574,61 @@ public final class KodiNativeAudioSink extends ForwardingAudioSink {
       nativeSession = KodiNativeSinkSession.create();
     }
     return nativeSession;
+  }
+
+  private void applyKodiControlSettings() throws KodiNativeException {
+    if (nativeSession == null) {
+      return;
+    }
+    ControlSettings controlSettings = runtime.getControlSettings();
+    nativeSession.setSilenceTimeoutMinutes(controlSettings.silenceTimeoutMinutes);
+    nativeSession.setStreamNoise(controlSettings.streamNoiseEnabled);
+    nativeSession.setAppFocused(runtime.isAppFocused());
+  }
+
+  private void updateNativeAppFocusedState() {
+    if (nativeSession == null) {
+      return;
+    }
+    try {
+      nativeSession.setAppFocused(runtime.isAppFocused());
+    } catch (KodiNativeException e) {
+      // Keep the active transport usable if app-focus propagation fails.
+    }
+    publishRuntimeStats();
+  }
+
+  private void publishRuntimeStats() {
+    boolean pendingData = false;
+    boolean ended = false;
+    long positionUs = 0;
+    long bufferSizeUs = 0;
+    if (nativeSession != null) {
+      try {
+        pendingData = nativeSession.hasPendingData();
+        ended = nativeSession.isEnded();
+        positionUs = nativeSession.getCurrentPositionUs();
+        bufferSizeUs = nativeSession.getBufferSizeUs();
+      } catch (KodiNativeException e) {
+        pendingData = false;
+        ended = false;
+        positionUs = 0;
+        bufferSizeUs = 0;
+      }
+    }
+    runtime.setEngineStats(
+        new KodiNativeEngineStats(
+            usingNativeTransport,
+            runtime.isAppFocused(),
+            nativeSession == null,
+            pendingData,
+            ended,
+            positionUs,
+            bufferSizeUs,
+            volume,
+            configuredFormat,
+            lastCapabilitySnapshot != null ? lastCapabilitySnapshot : runtime.getCapabilitySnapshot(),
+            lastPlaybackDecision));
   }
 
   private void maybeLogPosition(long positionUs, boolean sourceEnded) {

@@ -1,6 +1,9 @@
 #include <jni.h>
+extern "C" {
 #include "libavcodec/version.h"
 #include "libavcodec/defs.h"
+#include "libavutil/hwcontext.h"
+}
 #include "config.h"
 #include "config_components.h"
 #include "ffcommon.h"
@@ -75,6 +78,33 @@ Java_androidx_media3_decoder_ffmpeg_FfmpegLibrary_ffmpegSupportsDv5ToneMapToSdr(
     (void) env;
     (void) clazz;
     return FFMPEG_DV5_TONEMAP_AVAILABLE ? JNI_TRUE : JNI_FALSE;
+}
+
+extern "C"
+JNIEXPORT jboolean JNICALL
+Java_androidx_media3_decoder_ffmpeg_FfmpegLibrary_ffmpegSupportsDv5ToneMapToSdrRuntime(
+        JNIEnv *env,
+        jclass clazz) {
+    (void) env;
+    (void) clazz;
+#if !FFMPEG_DV5_TONEMAP_AVAILABLE
+    return JNI_FALSE;
+#else
+    AVBufferRef *deviceRef = nullptr;
+    int result = av_hwdevice_ctx_create(
+            &deviceRef,
+            AV_HWDEVICE_TYPE_VULKAN,
+            nullptr,
+            nullptr,
+            0);
+    if (result < 0) {
+        logError("av_hwdevice_ctx_create(vulkan)[runtime_probe]", result);
+        av_buffer_unref(&deviceRef);
+        return JNI_FALSE;
+    }
+    av_buffer_unref(&deviceRef);
+    return JNI_TRUE;
+#endif
 }
 
 extern "C"

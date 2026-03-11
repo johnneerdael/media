@@ -47,6 +47,7 @@ public final class FfmpegLibrary {
   private static @MonotonicNonNull String version;
   private static int inputBufferPaddingSize = C.LENGTH_UNSET;
   private static int dv5ToneMapToSdrSupport = C.LENGTH_UNSET;
+  private static int dv5ToneMapToSdrRuntimeSupport = C.LENGTH_UNSET;
   private static volatile boolean experimentalDv5ToneMapToSdrEnabled;
   private static volatile boolean experimentalDv5HardwareToneMapRpuBridgeEnabled;
 
@@ -204,6 +205,21 @@ public final class FfmpegLibrary {
     return dv5ToneMapToSdrSupport == 1;
   }
 
+  /**
+   * Returns whether the software DV5 SDR tone-map path is usable at runtime on this device.
+   *
+   * <p>This probes FFmpeg's Vulkan hwdevice creation path required by vf_libplacebo.
+   */
+  public static boolean supportsExperimentalDv5SoftwareToneMapToSdrRuntime() {
+    if (!supportsExperimentalDv5ToneMapToSdr()) {
+      return false;
+    }
+    if (dv5ToneMapToSdrRuntimeSupport == C.LENGTH_UNSET) {
+      dv5ToneMapToSdrRuntimeSupport = ffmpegSupportsDv5ToneMapToSdrRuntime() ? 1 : 0;
+    }
+    return dv5ToneMapToSdrRuntimeSupport == 1;
+  }
+
   /* package */ static boolean isExperimentalDv5ToneMapToSdrEnabled() {
     return experimentalDv5ToneMapToSdrEnabled;
   }
@@ -274,6 +290,7 @@ public final class FfmpegLibrary {
   private static native int ffmpegGetInputBufferPaddingSize();
 
   private static native boolean ffmpegSupportsDv5ToneMapToSdr();
+  private static native boolean ffmpegSupportsDv5ToneMapToSdrRuntime();
 
   private static native boolean ffmpegHasDecoder(String codecName);
 

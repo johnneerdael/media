@@ -64,6 +64,8 @@ class CJNIAudioTrack {
   int write(JNIEnv* env, const std::vector<int16_t>& data, int write_mode);
   int write(JNIEnv* env, const std::vector<float>& data, int write_mode);
   int getPlaybackHeadPosition(JNIEnv* env) const;
+  int getLatency(JNIEnv* env) const;
+  int getBufferSizeInFrames(JNIEnv* env) const;
   bool getTimestamp(JNIEnv* env, uint64_t* frame_position, int64_t* nano_time) const;
 
  private:

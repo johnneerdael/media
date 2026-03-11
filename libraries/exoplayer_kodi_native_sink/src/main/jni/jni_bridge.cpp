@@ -42,21 +42,6 @@ constexpr jintArray MakePlaybackDecisionArray(
   return result;
 }
 
-constexpr jlongArray MakePacketMetadataArray(
-    JNIEnv* env, const androidx_media3::PacketMetadata& packet) {
-  std::array<jlong, 5> values = {packet.kind,
-                                 packet.size_bytes,
-                                 packet.total_frames,
-                                 packet.normalized_access_units,
-                                 packet.effective_presentation_time_us};
-  jlongArray result = env->NewLongArray(values.size());
-  if (result == nullptr) {
-    return nullptr;
-  }
-  env->SetLongArrayRegion(result, 0, values.size(), values.data());
-  return result;
-}
-
 androidx_media3::KodiNativeSinkSession* AsSession(jlong native_handle) {
   return reinterpret_cast<androidx_media3::KodiNativeSinkSession*>(native_handle);
 }
@@ -161,6 +146,7 @@ Java_androidx_media3_exoplayer_audio_kodi_KodiNativeSinkSession_nConfigure(
     jint audio_session_id,
     jfloat volume,
     jboolean verbose_logging_enabled,
+    jboolean supervise_audio_delay_enabled,
     jint sdk_int,
     jboolean tv,
     jboolean automotive,
@@ -220,6 +206,7 @@ Java_androidx_media3_exoplayer_audio_kodi_KodiNativeSinkSession_nConfigure(
           audio_session_id,
           volume,
           verbose_logging_enabled == JNI_TRUE,
+          supervise_audio_delay_enabled == JNI_TRUE,
           capability_snapshot,
           playback_decision);
 }
@@ -242,6 +229,30 @@ Java_androidx_media3_exoplayer_audio_kodi_KodiNativeSinkSession_nQueueInput(
       ->QueueInput(data, size, static_cast<int64_t>(presentation_time_us), encoded_access_unit_count);
 }
 
+extern "C" JNIEXPORT jboolean JNICALL
+Java_androidx_media3_exoplayer_audio_kodi_KodiNativeSinkSession_nHandleBufferToSink(
+    JNIEnv* env,
+    jclass clazz,
+    jlong native_handle,
+    jobject buffer,
+    jint offset,
+    jint size,
+    jlong presentation_time_us,
+    jint encoded_access_unit_count) {
+  (void)clazz;
+  const auto* base =
+      static_cast<const uint8_t*>(buffer != nullptr ? env->GetDirectBufferAddress(buffer) : nullptr);
+  const uint8_t* data = base != nullptr ? base + offset : nullptr;
+  return AsSession(native_handle)
+             ->HandleBuffer(env,
+                            data,
+                            size,
+                            static_cast<int64_t>(presentation_time_us),
+                            encoded_access_unit_count)
+         ? JNI_TRUE
+         : JNI_FALSE;
+}
+
 extern "C" JNIEXPORT void JNICALL
 Java_androidx_media3_exoplayer_audio_kodi_KodiNativeSinkSession_nQueuePause(
     JNIEnv* env,
@@ -249,53 +260,25 @@ Java_androidx_media3_exoplayer_audio_kodi_KodiNativeSinkSession_nQueuePause(
     jlong native_handle,
     jint millis,
     jboolean iec_bursts) {
-  (void)env;
   (void)clazz;
-  AsSession(native_handle)->QueuePause(static_cast<unsigned int>(millis), iec_bursts == JNI_TRUE);
+  AsSession(native_handle)
+      ->QueuePause(env, static_cast<unsigned int>(millis), iec_bursts == JNI_TRUE);
 }
 
-extern "C" JNIEXPORT jlongArray JNICALL
-Java_androidx_media3_exoplayer_audio_kodi_KodiNativeSinkSession_nDequeuePacketMetadata(
-    JNIEnv* env, jclass clazz, jlong native_handle) {
+extern "C" JNIEXPORT jboolean JNICALL
+Java_androidx_media3_exoplayer_audio_kodi_KodiNativeSinkSession_nQueuePauseToSink(
+    JNIEnv* env,
+    jclass clazz,
+    jlong native_handle,
+    jint millis,
+    jboolean iec_bursts) {
   (void)clazz;
-  androidx_media3::PacketMetadata packet;
-  if (!AsSession(native_handle)->DequeuePacket(&packet)) {
-    return nullptr;
-  }
-  return MakePacketMetadataArray(env, packet);
-}
-
-extern "C" JNIEXPORT jbyteArray JNICALL
-Java_androidx_media3_exoplayer_audio_kodi_KodiNativeSinkSession_nDequeuePacketBytes(
-    JNIEnv* env, jclass clazz, jlong native_handle) {
-  (void)clazz;
-  std::vector<uint8_t> data;
-  if (!AsSession(native_handle)->TakeLastDequeuedPacketData(&data)) {
-    return nullptr;
-  }
-  jbyteArray result = env->NewByteArray(data.size());
-  if (result == nullptr) {
-    return nullptr;
-  }
-  env->SetByteArrayRegion(
-      result, 0, data.size(), reinterpret_cast<const jbyte*>(data.data()));
-  return result;
-}
-
-extern "C" JNIEXPORT jint JNICALL
-Java_androidx_media3_exoplayer_audio_kodi_KodiNativeSinkSession_nGetPendingPacketCount(
-    JNIEnv* env, jclass clazz, jlong native_handle) {
-  (void)env;
-  (void)clazz;
-  return AsSession(native_handle)->pending_packet_count();
-}
-
-extern "C" JNIEXPORT jlong JNICALL
-Java_androidx_media3_exoplayer_audio_kodi_KodiNativeSinkSession_nGetQueuedInputBytes(
-    JNIEnv* env, jclass clazz, jlong native_handle) {
-  (void)env;
-  (void)clazz;
-  return static_cast<jlong>(AsSession(native_handle)->queued_input_bytes());
+  return AsSession(native_handle)
+             ->QueuePauseToSink(env,
+                                static_cast<unsigned int>(millis),
+                                iec_bursts == JNI_TRUE)
+         ? JNI_TRUE
+         : JNI_FALSE;
 }
 
 extern "C" JNIEXPORT void JNICALL
@@ -339,10 +322,10 @@ Java_androidx_media3_exoplayer_audio_kodi_KodiNativeSinkSession_nReset(
 }
 
 extern "C" JNIEXPORT void JNICALL
-Java_androidx_media3_exoplayer_audio_kodi_KodiNativeSinkSession_nPlayToEndOfStream(
+Java_androidx_media3_exoplayer_audio_kodi_KodiNativeSinkSession_nDrain(
     JNIEnv* env, jclass clazz, jlong native_handle) {
   (void)clazz;
-  AsSession(native_handle)->PlayToEndOfStream(env);
+  AsSession(native_handle)->Drain(env);
 }
 
 extern "C" JNIEXPORT void JNICALL
@@ -352,17 +335,27 @@ Java_androidx_media3_exoplayer_audio_kodi_KodiNativeSinkSession_nSetVolume(
   AsSession(native_handle)->SetVolume(env, volume);
 }
 
-extern "C" JNIEXPORT jlongArray JNICALL
-Java_androidx_media3_exoplayer_audio_kodi_KodiNativeSinkSession_nDrainOnePacketToAudioTrack(
-    JNIEnv* env, jclass clazz, jlong native_handle, jboolean counts_toward_media_position) {
+extern "C" JNIEXPORT void JNICALL
+Java_androidx_media3_exoplayer_audio_kodi_KodiNativeSinkSession_nSetAppFocused(
+    JNIEnv* env, jclass clazz, jlong native_handle, jboolean app_focused) {
   (void)clazz;
-  androidx_media3::PacketMetadata packet;
-  if (!AsSession(native_handle)
-           ->DrainOnePacketToAudioTrack(
-               env, counts_toward_media_position == JNI_TRUE, &packet)) {
-    return nullptr;
-  }
-  return MakePacketMetadataArray(env, packet);
+  AsSession(native_handle)->SetAppFocused(env, app_focused == JNI_TRUE);
+}
+
+extern "C" JNIEXPORT void JNICALL
+Java_androidx_media3_exoplayer_audio_kodi_KodiNativeSinkSession_nSetSilenceTimeoutMinutes(
+    JNIEnv* env, jclass clazz, jlong native_handle, jint silence_timeout_minutes) {
+  (void)env;
+  (void)clazz;
+  AsSession(native_handle)->SetSilenceTimeoutMinutes(static_cast<int>(silence_timeout_minutes));
+}
+
+extern "C" JNIEXPORT void JNICALL
+Java_androidx_media3_exoplayer_audio_kodi_KodiNativeSinkSession_nSetStreamNoise(
+    JNIEnv* env, jclass clazz, jlong native_handle, jboolean stream_noise) {
+  (void)env;
+  (void)clazz;
+  AsSession(native_handle)->SetStreamNoise(stream_noise == JNI_TRUE);
 }
 
 extern "C" JNIEXPORT jlong JNICALL

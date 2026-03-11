@@ -45,6 +45,7 @@ extern "C" {
 #include <libavutil/error.h>
 #include <libavutil/opt.h>
 #include <libavutil/avutil.h>
+#include <libavutil/hwcontext.h>
 #include <libavutil/rational.h>
 #include <libavutil/pixfmt.h>
 #include <libavutil/pixdesc.h>
@@ -1220,9 +1221,28 @@ bool ffmpegRenderExperimentalDv5HardwareFramePure(
 }
 
 #if FFMPEG_TONEMAP_FILTERS_ACTIVE
-static const char *kDv5ToneMapFilterGraph =
-        "libplacebo=tonemapping=bt.2390:peak_detect=1:colorspace=bt709:color_primaries=bt709:"
-        "color_trc=bt709:range=tv,format=pix_fmts=yuv420p";
+struct ToneMapFilterGraphSpec {
+    const char *name;
+    const char *graph;
+};
+
+static const ToneMapFilterGraphSpec kDv5ToneMapFilterGraphs[] = {
+        {
+                "libplacebo_direct",
+                "libplacebo=tonemapping=bt.2390:peak_detect=1:colorspace=bt709:"
+                "color_primaries=bt709:color_trc=bt709:range=tv:apply_dolbyvision=1:format=yuv420p",
+        },
+        {
+                "format_then_libplacebo",
+                "format=pix_fmts=yuv420p,libplacebo=tonemapping=mobius:peak_detect=0:"
+                "colorspace=bt709:color_primaries=bt709:color_trc=bt709:range=tv:"
+                "apply_dolbyvision=1:format=yuv420p",
+        },
+        {
+                "libplacebo_minimal",
+                "libplacebo=tonemapping=mobius:peak_detect=0:apply_dolbyvision=1:format=yuv420p",
+        },
+};
 #endif
 
 
@@ -1278,6 +1298,8 @@ struct JniContext {
 
     AVCodecContext *codecContext{};
     SwsContext *swsContext{};
+    SwsContext *decode_output_sws_context{};
+    AVBufferRef *tone_map_hw_device_ctx{};
 #if FFMPEG_TONEMAP_FILTERS_ACTIVE
     AVFilterGraph *filter_graph{};
     AVFilterContext *buffer_source_context{};
@@ -1867,6 +1889,14 @@ static bool shouldApplyToneMap(const AVFrame *frame) {
     return false;
 }
 
+static const char *safePixelFormatName(const AVFrame *frame) {
+    if (!frame) {
+        return "unknown";
+    }
+    const char *name = av_get_pix_fmt_name(static_cast<AVPixelFormat>(frame->format));
+    return name ? name : "unknown";
+}
+
 static void clearToneMapFilterGraph(JniContext *jniContext) {
     if (!jniContext) return;
     if (jniContext->filter_graph) {
@@ -1882,6 +1912,25 @@ static void clearToneMapFilterGraph(JniContext *jniContext) {
     jniContext->filter_input_format = AV_PIX_FMT_NONE;
 }
 
+static bool ensureToneMapHardwareDevice(JniContext *jniContext) {
+    if (!jniContext) return false;
+    if (jniContext->tone_map_hw_device_ctx != nullptr) {
+        return true;
+    }
+
+    int result = av_hwdevice_ctx_create(
+            &jniContext->tone_map_hw_device_ctx,
+            AV_HWDEVICE_TYPE_VULKAN,
+            nullptr,
+            nullptr,
+            0);
+    if (result < 0) {
+        logError("av_hwdevice_ctx_create(vulkan)", result);
+        return false;
+    }
+    return true;
+}
+
 static bool ensureToneMapFilterGraph(JniContext *jniContext, const AVFrame *sourceFrame) {
     if (!jniContext || !sourceFrame) return false;
 
@@ -1894,17 +1943,13 @@ static bool ensureToneMapFilterGraph(JniContext *jniContext, const AVFrame *sour
 
     clearToneMapFilterGraph(jniContext);
 
-    AVFilterGraph *filterGraph = avfilter_graph_alloc();
-    if (!filterGraph) {
-        LOGE("Failed to allocate filter graph.");
+    if (!ensureToneMapHardwareDevice(jniContext)) {
         return false;
     }
-
     const AVFilter *bufferSource = avfilter_get_by_name("buffer");
     const AVFilter *bufferSink = avfilter_get_by_name("buffersink");
     if (!bufferSource || !bufferSink) {
         LOGE("Missing buffer/buffersink filters.");
-        avfilter_graph_free(&filterGraph);
         return false;
     }
 
@@ -1931,76 +1976,149 @@ static bool ensureToneMapFilterGraph(JniContext *jniContext, const AVFrame *sour
             sampleAspectRatio.num,
             sampleAspectRatio.den);
 
-    AVFilterContext *bufferSourceContext = nullptr;
-    int result = avfilter_graph_create_filter(
-            &bufferSourceContext, bufferSource, "in", args, nullptr, filterGraph);
-    if (result < 0) {
-        logError("avfilter_graph_create_filter(buffer)", result);
-        avfilter_graph_free(&filterGraph);
-        return false;
-    }
+    for (size_t specIndex = 0;
+         specIndex < sizeof(kDv5ToneMapFilterGraphs) / sizeof(kDv5ToneMapFilterGraphs[0]);
+         ++specIndex) {
+        const ToneMapFilterGraphSpec &spec = kDv5ToneMapFilterGraphs[specIndex];
+        AVFilterGraph *filterGraph = avfilter_graph_alloc();
+        if (!filterGraph) {
+            LOGE("Failed to allocate filter graph.");
+            return false;
+        }
 
-    AVFilterContext *bufferSinkContext = nullptr;
-    result = avfilter_graph_create_filter(
-            &bufferSinkContext, bufferSink, "out", nullptr, nullptr, filterGraph);
-    if (result < 0) {
-        logError("avfilter_graph_create_filter(buffersink)", result);
-        avfilter_graph_free(&filterGraph);
-        return false;
-    }
+        AVFilterContext *bufferSourceContext = nullptr;
+        int result = avfilter_graph_create_filter(
+                &bufferSourceContext, bufferSource, "in", args, nullptr, filterGraph);
+        if (result < 0) {
+            logError("avfilter_graph_create_filter(buffer)", result);
+            avfilter_graph_free(&filterGraph);
+            continue;
+        }
 
-    AVFilterInOut *outputs = avfilter_inout_alloc();
-    AVFilterInOut *inputs = avfilter_inout_alloc();
-    if (!outputs || !inputs) {
-        LOGE("Failed to allocate AVFilterInOut.");
-        avfilter_inout_free(&outputs);
+        AVFilterContext *bufferSinkContext = nullptr;
+        result = avfilter_graph_create_filter(
+                &bufferSinkContext, bufferSink, "out", nullptr, nullptr, filterGraph);
+        if (result < 0) {
+            logError("avfilter_graph_create_filter(buffersink)", result);
+            avfilter_graph_free(&filterGraph);
+            continue;
+        }
+
+        AVFilterInOut *outputs = avfilter_inout_alloc();
+        AVFilterInOut *inputs = avfilter_inout_alloc();
+        if (!outputs || !inputs) {
+            LOGE("Failed to allocate AVFilterInOut.");
+            avfilter_inout_free(&outputs);
+            avfilter_inout_free(&inputs);
+            avfilter_graph_free(&filterGraph);
+            continue;
+        }
+
+        outputs->name = av_strdup("in");
+        outputs->filter_ctx = bufferSourceContext;
+        outputs->pad_idx = 0;
+        outputs->next = nullptr;
+
+        inputs->name = av_strdup("out");
+        inputs->filter_ctx = bufferSinkContext;
+        inputs->pad_idx = 0;
+        inputs->next = nullptr;
+
+        result = avfilter_graph_parse_ptr(
+                filterGraph, spec.graph, &inputs, &outputs, nullptr);
         avfilter_inout_free(&inputs);
-        avfilter_graph_free(&filterGraph);
-        return false;
+        avfilter_inout_free(&outputs);
+        if (result < 0) {
+            logError("avfilter_graph_parse_ptr", result);
+            __android_log_print(
+                    ANDROID_LOG_WARN,
+                    LOG_TAG,
+                    "DV5_SW_TONEMAP: variant=%s parse failed inputFmt=%s size=%dx%d",
+                    spec.name,
+                    safePixelFormatName(sourceFrame),
+                    sourceFrame->width,
+                    sourceFrame->height);
+            avfilter_graph_free(&filterGraph);
+            continue;
+        }
+
+        bool boundHwDevice = false;
+        for (unsigned int i = 0; i < filterGraph->nb_filters; ++i) {
+            AVFilterContext *filterContext = filterGraph->filters[i];
+            if (!filterContext || !filterContext->filter || !filterContext->filter->name) {
+                continue;
+            }
+            if (strcmp(filterContext->filter->name, "libplacebo") != 0) {
+                continue;
+            }
+            AVBufferRef *hwDeviceRef = av_buffer_ref(jniContext->tone_map_hw_device_ctx);
+            if (!hwDeviceRef) {
+                LOGE("DV5_SW_TONEMAP: failed to reference Vulkan hw_device_ctx for libplacebo.");
+                avfilter_graph_free(&filterGraph);
+                filterGraph = nullptr;
+                break;
+            }
+            av_buffer_unref(&filterContext->hw_device_ctx);
+            filterContext->hw_device_ctx = hwDeviceRef;
+            boundHwDevice = true;
+        }
+        if (!filterGraph) {
+            continue;
+        }
+        if (!boundHwDevice) {
+            LOGE("DV5_SW_TONEMAP: libplacebo filter context not found in parsed graph.");
+            avfilter_graph_free(&filterGraph);
+            continue;
+        }
+
+        result = avfilter_graph_config(filterGraph, nullptr);
+        if (result < 0) {
+            logError("avfilter_graph_config", result);
+            __android_log_print(
+                    ANDROID_LOG_WARN,
+                    LOG_TAG,
+                    "DV5_SW_TONEMAP: variant=%s config failed inputFmt=%s size=%dx%d",
+                    spec.name,
+                    safePixelFormatName(sourceFrame),
+                    sourceFrame->width,
+                    sourceFrame->height);
+            avfilter_graph_free(&filterGraph);
+            continue;
+        }
+
+        AVFrame *filteredFrame = av_frame_alloc();
+        if (!filteredFrame) {
+            LOGE("Failed to allocate filtered frame.");
+            avfilter_graph_free(&filterGraph);
+            continue;
+        }
+
+        jniContext->filter_graph = filterGraph;
+        jniContext->buffer_source_context = bufferSourceContext;
+        jniContext->buffer_sink_context = bufferSinkContext;
+        jniContext->filtered_frame = filteredFrame;
+        jniContext->filter_width = sourceFrame->width;
+        jniContext->filter_height = sourceFrame->height;
+        jniContext->filter_input_format = (AVPixelFormat) sourceFrame->format;
+        __android_log_print(
+                ANDROID_LOG_INFO,
+                LOG_TAG,
+                "DV5_SW_TONEMAP: configured variant=%s inputFmt=%s size=%dx%d",
+                spec.name,
+                safePixelFormatName(sourceFrame),
+                sourceFrame->width,
+                sourceFrame->height);
+        return true;
     }
 
-    outputs->name = av_strdup("in");
-    outputs->filter_ctx = bufferSourceContext;
-    outputs->pad_idx = 0;
-    outputs->next = nullptr;
-
-    inputs->name = av_strdup("out");
-    inputs->filter_ctx = bufferSinkContext;
-    inputs->pad_idx = 0;
-    inputs->next = nullptr;
-
-    result = avfilter_graph_parse_ptr(
-            filterGraph, kDv5ToneMapFilterGraph, &inputs, &outputs, nullptr);
-    avfilter_inout_free(&inputs);
-    avfilter_inout_free(&outputs);
-    if (result < 0) {
-        logError("avfilter_graph_parse_ptr", result);
-        avfilter_graph_free(&filterGraph);
-        return false;
-    }
-
-    result = avfilter_graph_config(filterGraph, nullptr);
-    if (result < 0) {
-        logError("avfilter_graph_config", result);
-        avfilter_graph_free(&filterGraph);
-        return false;
-    }
-
-    AVFrame *filteredFrame = av_frame_alloc();
-    if (!filteredFrame) {
-        LOGE("Failed to allocate filtered frame.");
-        avfilter_graph_free(&filterGraph);
-        return false;
-    }
-
-    jniContext->filter_graph = filterGraph;
-    jniContext->buffer_source_context = bufferSourceContext;
-    jniContext->buffer_sink_context = bufferSinkContext;
-    jniContext->filtered_frame = filteredFrame;
-    jniContext->filter_width = sourceFrame->width;
-    jniContext->filter_height = sourceFrame->height;
-    jniContext->filter_input_format = (AVPixelFormat) sourceFrame->format;
-    return true;
+    __android_log_print(
+            ANDROID_LOG_ERROR,
+            LOG_TAG,
+            "DV5_SW_TONEMAP: all variants failed inputFmt=%s size=%dx%d",
+            safePixelFormatName(sourceFrame),
+            sourceFrame->width,
+            sourceFrame->height);
+    return false;
 }
 
 static AVFrame *applyToneMapToFrame(JniContext *jniContext, AVFrame *sourceFrame) {
@@ -2010,7 +2128,7 @@ static AVFrame *applyToneMapToFrame(JniContext *jniContext, AVFrame *sourceFrame
         return sourceFrame;
     }
     if (!ensureToneMapFilterGraph(jniContext, sourceFrame)) {
-        LOGE("Disabling tone-map filter graph after initialization failure.");
+        LOGE("DV5_SW_TONEMAP: disabling tone-map filter graph after initialization failure.");
         jniContext->enable_tone_map_to_sdr = false;
         return sourceFrame;
     }
@@ -2043,6 +2161,70 @@ static AVFrame *applyToneMapToFrame(JniContext *jniContext, AVFrame *sourceFrame
     return sourceFrame;
 }
 #endif
+
+static bool convertFrameToYuv420p(
+        JniContext *jniContext,
+        const AVFrame *sourceFrame,
+        AVFrame **convertedFrameOut) {
+    if (!jniContext || !sourceFrame || !convertedFrameOut) {
+        return false;
+    }
+    *convertedFrameOut = nullptr;
+    if (sourceFrame->format == AV_PIX_FMT_YUV420P) {
+        return true;
+    }
+
+    jniContext->decode_output_sws_context = sws_getCachedContext(
+            jniContext->decode_output_sws_context,
+            sourceFrame->width,
+            sourceFrame->height,
+            static_cast<AVPixelFormat>(sourceFrame->format),
+            sourceFrame->width,
+            sourceFrame->height,
+            AV_PIX_FMT_YUV420P,
+            SWS_BILINEAR,
+            nullptr,
+            nullptr,
+            nullptr);
+    if (!jniContext->decode_output_sws_context) {
+        LOGE(
+                "DV5_SW_TONEMAP: failed to allocate output sws context for format=%s",
+                av_get_pix_fmt_name(static_cast<AVPixelFormat>(sourceFrame->format)));
+        return false;
+    }
+
+    AVFrame *convertedFrame = av_frame_alloc();
+    if (!convertedFrame) {
+        LOGE("DV5_SW_TONEMAP: failed to allocate converted output frame.");
+        return false;
+    }
+
+    convertedFrame->format = AV_PIX_FMT_YUV420P;
+    convertedFrame->width = sourceFrame->width;
+    convertedFrame->height = sourceFrame->height;
+    if (av_frame_get_buffer(convertedFrame, 32) < 0) {
+        LOGE("DV5_SW_TONEMAP: failed to allocate converted output frame buffer.");
+        av_frame_free(&convertedFrame);
+        return false;
+    }
+
+    int scaleResult = sws_scale(
+            jniContext->decode_output_sws_context,
+            sourceFrame->data,
+            sourceFrame->linesize,
+            0,
+            sourceFrame->height,
+            convertedFrame->data,
+            convertedFrame->linesize);
+    if (scaleResult <= 0) {
+        LOGE("DV5_SW_TONEMAP: sws_scale output conversion failed.");
+        av_frame_free(&convertedFrame);
+        return false;
+    }
+
+    *convertedFrameOut = convertedFrame;
+    return true;
+}
 
 
 extern "C"
@@ -2086,6 +2268,8 @@ Java_androidx_media3_decoder_ffmpeg_FfmpegVideoDecoder_ffmpegRelease(JNIEnv *env
     AVCodecContext *context = jniContext->codecContext;
     if (context) {
         sws_freeContext(jniContext->swsContext);
+        sws_freeContext(jniContext->decode_output_sws_context);
+        av_buffer_unref(&jniContext->tone_map_hw_device_ctx);
         clearToneMapFilterGraph(jniContext);
         releaseContext(context);
         delete jniContext;
@@ -2283,6 +2467,14 @@ Java_androidx_media3_decoder_ffmpeg_FfmpegVideoDecoder_ffmpegReceiveFrame(JNIEnv
     }
 
     AVFrame *outputFrame = applyToneMapToFrame(jniContext, frame);
+    AVFrame *convertedOutputFrame = nullptr;
+    if (!convertFrameToYuv420p(jniContext, outputFrame, &convertedOutputFrame)) {
+        av_frame_free(&frame);
+        return VIDEO_DECODER_ERROR_OTHER;
+    }
+    if (convertedOutputFrame != nullptr) {
+        outputFrame = convertedOutputFrame;
+    }
     int64_t outputTimeUs = outputFrame->best_effort_timestamp;
     if (outputTimeUs == AV_NOPTS_VALUE) {
         outputTimeUs = outputFrame->pts;
@@ -2328,6 +2520,7 @@ Java_androidx_media3_decoder_ffmpeg_FfmpegVideoDecoder_ffmpegReceiveFrame(JNIEnv
     memcpy(data + yLength, outputFrame->data[1], uvLength);
     memcpy(data + yLength + uvLength, outputFrame->data[2], uvLength);
 
+    av_frame_free(&convertedOutputFrame);
     av_frame_free(&frame);
 
     return result;
