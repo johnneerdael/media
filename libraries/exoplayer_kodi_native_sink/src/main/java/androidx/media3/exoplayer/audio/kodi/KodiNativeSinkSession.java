@@ -50,6 +50,7 @@ public final class KodiNativeSinkSession implements AutoCloseable {
       int audioSessionId,
       float volume,
       boolean verboseLoggingEnabled,
+      boolean superviseAudioDelayEnabled,
       KodiNativeCapabilitySnapshot capabilitySnapshot,
       KodiNativePlaybackDecision playbackDecision)
       throws KodiNativeException {
@@ -65,6 +66,7 @@ public final class KodiNativeSinkSession implements AutoCloseable {
         audioSessionId,
         volume,
         verboseLoggingEnabled,
+        superviseAudioDelayEnabled,
         capabilitySnapshot.sdkInt,
         capabilitySnapshot.tv,
         capabilitySnapshot.automotive,
@@ -105,39 +107,27 @@ public final class KodiNativeSinkSession implements AutoCloseable {
         encodedAccessUnitCount);
   }
 
+  public boolean handleBufferToSink(
+      ByteBuffer buffer, long presentationTimeUs, int encodedAccessUnitCount)
+      throws KodiNativeException {
+    ensureOpen();
+    return nHandleBufferToSink(
+        nativeHandle,
+        buffer,
+        buffer.position(),
+        buffer.remaining(),
+        presentationTimeUs,
+        encodedAccessUnitCount);
+  }
+
   public void queuePause(int millis, boolean iecBursts) throws KodiNativeException {
     ensureOpen();
     nQueuePause(nativeHandle, millis, iecBursts);
   }
 
-  @Nullable
-  public KodiNativePacket dequeuePacket() throws KodiNativeException {
+  public boolean queuePauseToSink(int millis, boolean iecBursts) throws KodiNativeException {
     ensureOpen();
-    long[] values = nDequeuePacketMetadata(nativeHandle);
-    if (values == null) {
-      return null;
-    }
-    if (values.length != 5) {
-      throw new KodiNativeException("Unexpected native packet metadata shape");
-    }
-    byte[] data = nDequeuePacketBytes(nativeHandle);
-    if (data == null) {
-      throw new KodiNativeException("Native session returned metadata without packet bytes");
-    }
-    return new KodiNativePacket(
-        new KodiNativePacketMetadata(
-            (int) values[0], (int) values[1], values[2], (int) values[3], values[4]),
-        data);
-  }
-
-  public int getPendingPacketCount() throws KodiNativeException {
-    ensureOpen();
-    return nGetPendingPacketCount(nativeHandle);
-  }
-
-  public long getQueuedInputBytes() throws KodiNativeException {
-    ensureOpen();
-    return nGetQueuedInputBytes(nativeHandle);
+    return nQueuePauseToSink(nativeHandle, millis, iecBursts);
   }
 
   public void play() throws KodiNativeException {
@@ -165,9 +155,9 @@ public final class KodiNativeSinkSession implements AutoCloseable {
     nReset(nativeHandle);
   }
 
-  public void playToEndOfStream() throws KodiNativeException {
+  public void drain() throws KodiNativeException {
     ensureOpen();
-    nPlayToEndOfStream(nativeHandle);
+    nDrain(nativeHandle);
   }
 
   public void setVolume(float volume) throws KodiNativeException {
@@ -175,19 +165,19 @@ public final class KodiNativeSinkSession implements AutoCloseable {
     nSetVolume(nativeHandle, volume);
   }
 
-  @Nullable
-  public KodiNativePacketMetadata drainOnePacketToAudioTrack(boolean countsTowardMediaPosition)
-      throws KodiNativeException {
+  public void setAppFocused(boolean appFocused) throws KodiNativeException {
     ensureOpen();
-    long[] values = nDrainOnePacketToAudioTrack(nativeHandle, countsTowardMediaPosition);
-    if (values == null) {
-      return null;
-    }
-    if (values.length != 5) {
-      throw new KodiNativeException("Unexpected drained packet metadata shape");
-    }
-    return new KodiNativePacketMetadata(
-        (int) values[0], (int) values[1], values[2], (int) values[3], values[4]);
+    nSetAppFocused(nativeHandle, appFocused);
+  }
+
+  public void setSilenceTimeoutMinutes(int silenceTimeoutMinutes) throws KodiNativeException {
+    ensureOpen();
+    nSetSilenceTimeoutMinutes(nativeHandle, silenceTimeoutMinutes);
+  }
+
+  public void setStreamNoise(boolean streamNoise) throws KodiNativeException {
+    ensureOpen();
+    nSetStreamNoise(nativeHandle, streamNoise);
   }
 
   public long getCurrentPositionUs() throws KodiNativeException {
@@ -238,6 +228,7 @@ public final class KodiNativeSinkSession implements AutoCloseable {
       int audioSessionId,
       float volume,
       boolean verboseLoggingEnabled,
+      boolean superviseAudioDelayEnabled,
       int sdkInt,
       boolean tv,
       boolean automotive,
@@ -273,17 +264,17 @@ public final class KodiNativeSinkSession implements AutoCloseable {
       long presentationTimeUs,
       int encodedAccessUnitCount);
 
+  private static native boolean nHandleBufferToSink(
+      long nativeHandle,
+      ByteBuffer buffer,
+      int offset,
+      int size,
+      long presentationTimeUs,
+      int encodedAccessUnitCount);
+
   private static native void nQueuePause(long nativeHandle, int millis, boolean iecBursts);
 
-  @Nullable
-  private static native long[] nDequeuePacketMetadata(long nativeHandle);
-
-  @Nullable
-  private static native byte[] nDequeuePacketBytes(long nativeHandle);
-
-  private static native int nGetPendingPacketCount(long nativeHandle);
-
-  private static native long nGetQueuedInputBytes(long nativeHandle);
+  private static native boolean nQueuePauseToSink(long nativeHandle, int millis, boolean iecBursts);
 
   private static native void nPlay(long nativeHandle);
 
@@ -295,13 +286,15 @@ public final class KodiNativeSinkSession implements AutoCloseable {
 
   private static native void nReset(long nativeHandle);
 
-  private static native void nPlayToEndOfStream(long nativeHandle);
+  private static native void nDrain(long nativeHandle);
 
   private static native void nSetVolume(long nativeHandle, float volume);
 
-  @Nullable
-  private static native long[] nDrainOnePacketToAudioTrack(
-      long nativeHandle, boolean countsTowardMediaPosition);
+  private static native void nSetAppFocused(long nativeHandle, boolean appFocused);
+
+  private static native void nSetSilenceTimeoutMinutes(long nativeHandle, int silenceTimeoutMinutes);
+
+  private static native void nSetStreamNoise(long nativeHandle, boolean streamNoise);
 
   private static native long nGetCurrentPositionUs(long nativeHandle);
 

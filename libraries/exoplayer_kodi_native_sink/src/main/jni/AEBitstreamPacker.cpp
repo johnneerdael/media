@@ -107,7 +107,7 @@ bool CAEBitstreamPacker::PackPause(CAEStreamInfo& info, unsigned int millis, boo
   if (!iecBursts)
     std::memset(m_packedBuffer, 0, m_dataSize);
 
-  return m_dataSize > 0;
+  return true;
 }
 
 unsigned int CAEBitstreamPacker::GetSize() const
@@ -122,12 +122,6 @@ uint8_t* CAEBitstreamPacker::GetBuffer()
 
 void CAEBitstreamPacker::Reset()
 {
-  m_dtsHD.clear();
-  m_dtsHDSize = 0;
-  m_eac3.clear();
-  m_eac3Size = 0;
-  m_eac3FramesCount = 0;
-  m_eac3FramesPerBurst = 0;
   m_dataSize = 0;
   m_pauseDuration = 0;
   m_packedBuffer[0] = 0;

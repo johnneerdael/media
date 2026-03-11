@@ -18,10 +18,16 @@ package androidx.media3.common.util;
 import android.content.ContentResolver;
 import android.os.Build;
 import android.provider.Settings.Global;
+import java.util.concurrent.CopyOnWriteArraySet;
 
 /** Fire OS quirk detection and opt-in toggles used by the Nuvio Media3 fork. */
 @UnstableApi
 public final class AmazonQuirks {
+  /** Listener notified when Kodi/Fire OS audio quirk settings change. */
+  public interface Listener {
+    void onAmazonQuirkSettingsChanged();
+  }
+
 
   private static final String FIRETV_GEN1_DEVICE_MODEL = "AFTB";
   private static final String FIRETV_STICK_DEVICE_MODEL = "AFTM";
@@ -44,11 +50,21 @@ public final class AmazonQuirks {
   private static volatile boolean iecPackerDtshdPassthroughEnabled = true;
   private static volatile boolean iecPackerDtshdCoreFallbackEnabled = true;
   private static volatile int iecPackerMaxPcmChannelLayout = 10;
+  private static final CopyOnWriteArraySet<Listener> listeners = new CopyOnWriteArraySet<>();
 
   private AmazonQuirks() {}
 
+  public static void addListener(Listener listener) {
+    listeners.add(listener);
+  }
+
+  public static void removeListener(Listener listener) {
+    listeners.remove(listener);
+  }
+
   public static void setExperimentalFireOsAudioQuirksEnabled(boolean enabled) {
     experimentalFireOsAudioQuirksEnabled = enabled;
+    notifyListeners();
   }
 
   public static boolean isExperimentalFireOsAudioQuirksEnabled() {
@@ -57,14 +73,17 @@ public final class AmazonQuirks {
 
   public static void setExperimentalFireOsIecPassthroughEnabled(boolean enabled) {
     experimentalFireOsAudioQuirksEnabled = enabled;
+    notifyListeners();
   }
 
   public static void setFireOsCompatibilityFallbackEnabled(boolean enabled) {
     limitedFireTvDtsCoreFallbackEnabled = enabled;
+    notifyListeners();
   }
 
   public static void setFireOsIecVerboseLoggingEnabled(boolean enabled) {
     fireOsIecVerboseLoggingEnabled = enabled;
+    notifyListeners();
   }
 
   public static boolean isFireOsIecVerboseLoggingEnabled() {
@@ -73,6 +92,7 @@ public final class AmazonQuirks {
 
   public static void setFireOsIecSuperviseAudioDelayEnabled(boolean enabled) {
     fireOsIecSuperviseAudioDelayEnabled = enabled;
+    notifyListeners();
   }
 
   public static boolean isFireOsIecSuperviseAudioDelayEnabled() {
@@ -81,6 +101,7 @@ public final class AmazonQuirks {
 
   public static void setIecPackerAc3PassthroughEnabled(boolean enabled) {
     iecPackerAc3PassthroughEnabled = enabled;
+    notifyListeners();
   }
 
   public static boolean isIecPackerAc3PassthroughEnabled() {
@@ -89,6 +110,7 @@ public final class AmazonQuirks {
 
   public static void setIecPackerEac3PassthroughEnabled(boolean enabled) {
     iecPackerEac3PassthroughEnabled = enabled;
+    notifyListeners();
   }
 
   public static boolean isIecPackerEac3PassthroughEnabled() {
@@ -97,6 +119,7 @@ public final class AmazonQuirks {
 
   public static void setIecPackerDtsPassthroughEnabled(boolean enabled) {
     iecPackerDtsPassthroughEnabled = enabled;
+    notifyListeners();
   }
 
   public static boolean isIecPackerDtsPassthroughEnabled() {
@@ -105,6 +128,7 @@ public final class AmazonQuirks {
 
   public static void setIecPackerTruehdPassthroughEnabled(boolean enabled) {
     iecPackerTruehdPassthroughEnabled = enabled;
+    notifyListeners();
   }
 
   public static boolean isIecPackerTruehdPassthroughEnabled() {
@@ -113,6 +137,7 @@ public final class AmazonQuirks {
 
   public static void setIecPackerDtshdPassthroughEnabled(boolean enabled) {
     iecPackerDtshdPassthroughEnabled = enabled;
+    notifyListeners();
   }
 
   public static boolean isIecPackerDtshdPassthroughEnabled() {
@@ -121,6 +146,7 @@ public final class AmazonQuirks {
 
   public static void setIecPackerDtshdCoreFallbackEnabled(boolean enabled) {
     iecPackerDtshdCoreFallbackEnabled = enabled;
+    notifyListeners();
   }
 
   public static boolean isIecPackerDtshdCoreFallbackEnabled() {
@@ -129,6 +155,7 @@ public final class AmazonQuirks {
 
   public static void setIecPackerMaxPcmChannelLayout(int channelLayout) {
     iecPackerMaxPcmChannelLayout = channelLayout;
+    notifyListeners();
   }
 
   public static int getIecPackerMaxPcmChannelLayout() {
@@ -214,5 +241,11 @@ public final class AmazonQuirks {
 
   public static boolean shouldSkipProfileLevelCheck() {
     return skipProfileLevelCheck;
+  }
+
+  private static void notifyListeners() {
+    for (Listener listener : listeners) {
+      listener.onAmazonQuirkSettingsChanged();
+    }
   }
 }

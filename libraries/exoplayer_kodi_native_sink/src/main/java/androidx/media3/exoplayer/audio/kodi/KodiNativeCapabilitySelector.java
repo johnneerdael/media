@@ -50,7 +50,9 @@ public final class KodiNativeCapabilitySelector {
       @Nullable AudioDeviceInfo routedDevice,
       Format format) {
     return evaluatePlaybackDecision(
-        KodiNativeCapabilitySnapshot.fromSystem(context, audioAttributes, routedDevice), format);
+        KodiNativeCapabilitySnapshot.fromSystem(context, audioAttributes, routedDevice),
+        format,
+        KodiNativeUserAudioSettings.fromGlobals());
   }
 
   /**
@@ -62,6 +64,14 @@ public final class KodiNativeCapabilitySelector {
    */
   public static KodiNativePlaybackDecision evaluatePlaybackDecision(
       KodiNativeCapabilitySnapshot snapshot, Format format) {
+    return evaluatePlaybackDecision(snapshot, format, KodiNativeUserAudioSettings.fromGlobals());
+  }
+
+  /** Evaluates the native playback decision for the requested format and explicit user settings. */
+  public static KodiNativePlaybackDecision evaluatePlaybackDecision(
+      KodiNativeCapabilitySnapshot snapshot,
+      Format format,
+      KodiNativeUserAudioSettings userSettings) {
     if (!KodiNativeLibrary.isAvailable()) {
       return new KodiNativePlaybackDecision(
           KodiNativePlaybackDecision.MODE_UNSUPPORTED,
@@ -70,7 +80,6 @@ public final class KodiNativeCapabilitySelector {
           /* streamType= */ 0,
           /* flags= */ 0);
     }
-    KodiNativeUserAudioSettings userSettings = KodiNativeUserAudioSettings.fromGlobals();
     int[] result =
         nEvaluatePlaybackDecision(
             snapshot.sdkInt,

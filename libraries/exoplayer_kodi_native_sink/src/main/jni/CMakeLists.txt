@@ -38,15 +38,16 @@ add_library(kodiNativeSinkJNI
             ActiveAESettings.cpp
             ActiveAESink.cpp
             ActiveAEPolicy.cpp
+            KodiActorProtocol.cpp
             CJNIAudioAttributes.cpp
             CJNIAudioFormat.cpp
             CJNIAudioTrack.cpp
             CJNIAudioTimestamp.cpp
             DVDAudioCodecPassthrough.cpp
+            KodiActiveAEBufferCompat.cpp
             KodiNativeAudioTrackSink.cpp
             PackerMAT.cpp
             KodiCapabilitySelector.cpp
-            KodiAndroidPassthroughEngine.cpp
             KodiNativeSinkSession.cpp)
 
 find_library(android_log_lib log)

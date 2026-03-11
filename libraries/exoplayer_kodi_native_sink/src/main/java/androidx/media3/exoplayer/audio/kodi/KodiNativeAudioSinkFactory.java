@@ -30,4 +30,16 @@ public final class KodiNativeAudioSinkFactory {
   public static KodiNativeAudioSink wrap(Context context, AudioSink sink) {
     return new KodiNativeAudioSink(context, sink);
   }
+
+  /** Wraps the provided sink in the native-shell implementation with shared ActiveAE runtime. */
+  public static KodiNativeAudioSink wrap(
+      Context context, AudioSink sink, KodiNativeActiveAERuntime runtime) {
+    return new KodiNativeAudioSink(context, sink, runtime);
+  }
+
+  /** Wraps the provided sink in the native-shell implementation with explicit Kodi control policy. */
+  public static KodiNativeAudioSink wrap(
+      Context context, AudioSink sink, KodiNativeAudioSink.ControlSettings controlSettings) {
+    return new KodiNativeAudioSink(context, sink, controlSettings);
+  }
 }

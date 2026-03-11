@@ -18,11 +18,13 @@ package androidx.media3.exoplayer.audio.kodi;
 
 import android.media.AudioFormat;
 import androidx.annotation.IntDef;
+import androidx.annotation.Nullable;
 import androidx.media3.common.C;
 import androidx.media3.common.util.UnstableApi;
 import java.lang.annotation.Documented;
 import java.lang.annotation.Retention;
 import java.lang.annotation.RetentionPolicy;
+import java.util.Objects;
 
 /** Decision returned by the native capability selector for a requested input format. */
 @UnstableApi
@@ -89,6 +91,27 @@ public final class KodiNativePlaybackDecision {
   public boolean usesMultichannelCarrier() {
     return mode == MODE_PASSTHROUGH_IEC_MULTICHANNEL
         || channelConfig == AudioFormat.CHANNEL_OUT_7POINT1_SURROUND;
+  }
+
+  @Override
+  public boolean equals(@Nullable Object obj) {
+    if (this == obj) {
+      return true;
+    }
+    if (!(obj instanceof KodiNativePlaybackDecision)) {
+      return false;
+    }
+    KodiNativePlaybackDecision other = (KodiNativePlaybackDecision) obj;
+    return mode == other.mode
+        && outputEncoding == other.outputEncoding
+        && channelConfig == other.channelConfig
+        && streamType == other.streamType
+        && flags == other.flags;
+  }
+
+  @Override
+  public int hashCode() {
+    return Objects.hash(mode, outputEncoding, channelConfig, streamType, flags);
   }
 
   @Override

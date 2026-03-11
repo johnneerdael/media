@@ -43,6 +43,8 @@ struct CachedIds {
   jmethodID write_shorts = nullptr;
   jmethodID write_floats = nullptr;
   jmethodID get_playback_head_position = nullptr;
+  jmethodID get_latency = nullptr;
+  jmethodID get_buffer_size_in_frames = nullptr;
   jmethodID get_timestamp = nullptr;
   jmethodID get_min_buffer_size = nullptr;
 };
@@ -91,6 +93,9 @@ bool EnsureIds(JNIEnv* env) {
   ids.write_floats = env->GetMethodID(ids.audio_track_class, "write", "([FIII)I");
   ids.get_playback_head_position =
       env->GetMethodID(ids.audio_track_class, "getPlaybackHeadPosition", "()I");
+  ids.get_latency = env->GetMethodID(ids.audio_track_class, "getLatency", "()I");
+  ids.get_buffer_size_in_frames =
+      env->GetMethodID(ids.audio_track_class, "getBufferSizeInFrames", "()I");
   ids.get_timestamp =
       env->GetMethodID(ids.audio_track_class, "getTimestamp", "(Landroid/media/AudioTimestamp;)Z");
   ids.get_min_buffer_size =
@@ -251,6 +256,20 @@ int CJNIAudioTrack::write(JNIEnv* env, const std::vector<float>& data, int write
 
 int CJNIAudioTrack::getPlaybackHeadPosition(JNIEnv* env) const {
   return env->CallIntMethod(audio_track_, GetCachedIds().get_playback_head_position);
+}
+
+int CJNIAudioTrack::getLatency(JNIEnv* env) const {
+  if (GetCachedIds().get_latency == nullptr) {
+    return -1;
+  }
+  return env->CallIntMethod(audio_track_, GetCachedIds().get_latency);
+}
+
+int CJNIAudioTrack::getBufferSizeInFrames(JNIEnv* env) const {
+  if (GetCachedIds().get_buffer_size_in_frames == nullptr) {
+    return -1;
+  }
+  return env->CallIntMethod(audio_track_, GetCachedIds().get_buffer_size_in_frames);
 }
 
 bool CJNIAudioTrack::getTimestamp(JNIEnv* env, uint64_t* frame_position, int64_t* nano_time) const {

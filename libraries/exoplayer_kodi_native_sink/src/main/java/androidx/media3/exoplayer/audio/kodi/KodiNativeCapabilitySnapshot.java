@@ -30,6 +30,7 @@ import androidx.media3.common.util.UnstableApi;
 import androidx.media3.common.util.Util;
 import androidx.media3.exoplayer.audio.AudioCapabilities;
 import java.util.Arrays;
+import java.util.Objects;
 
 /**
  * Snapshot of Android audio capability facts used by the native Kodi capability selector.
@@ -118,6 +119,39 @@ public final class KodiNativeCapabilitySnapshot {
   }
 
   @Override
+  public boolean equals(@Nullable Object obj) {
+    if (this == obj) {
+      return true;
+    }
+    if (!(obj instanceof KodiNativeCapabilitySnapshot)) {
+      return false;
+    }
+    KodiNativeCapabilitySnapshot other = (KodiNativeCapabilitySnapshot) obj;
+    return sdkInt == other.sdkInt
+        && tv == other.tv
+        && automotive == other.automotive
+        && routedDeviceId == other.routedDeviceId
+        && routedDeviceType == other.routedDeviceType
+        && maxChannelCount == other.maxChannelCount
+        && Arrays.equals(supportedEncodings, other.supportedEncodings)
+        && Objects.equals(ac3, other.ac3)
+        && Objects.equals(eAc3, other.eAc3)
+        && Objects.equals(dts, other.dts)
+        && Objects.equals(dtsHd, other.dtsHd)
+        && Objects.equals(trueHd, other.trueHd);
+  }
+
+  @Override
+  public int hashCode() {
+    int result =
+        Objects.hash(
+            sdkInt, tv, automotive, routedDeviceId, routedDeviceType, maxChannelCount, ac3, eAc3,
+            dts, dtsHd, trueHd);
+    result = 31 * result + Arrays.hashCode(supportedEncodings);
+    return result;
+  }
+
+  @Override
   public String toString() {
     return "KodiNativeCapabilitySnapshot[sdk="
         + sdkInt
@@ -193,6 +227,25 @@ public final class KodiNativeCapabilitySnapshot {
       this.supported = supported;
       this.encoding = encoding;
       this.channelConfig = channelConfig;
+    }
+
+    @Override
+    public boolean equals(@Nullable Object obj) {
+      if (this == obj) {
+        return true;
+      }
+      if (!(obj instanceof ProbeResult)) {
+        return false;
+      }
+      ProbeResult other = (ProbeResult) obj;
+      return supported == other.supported
+          && encoding == other.encoding
+          && channelConfig == other.channelConfig;
+    }
+
+    @Override
+    public int hashCode() {
+      return Objects.hash(supported, encoding, channelConfig);
     }
 
     @Override
