@@ -160,6 +160,8 @@ private:
   int64_t lastOutputPositionSystemTimeUs_{CURRENT_POSITION_NOT_SET};
   int64_t systemTimeAtPlayUs_{CURRENT_POSITION_NOT_SET};
   uint64_t framesAtPlay_{0};
+  int64_t lastPrePlayAcceptSystemTimeUs_{CURRENT_POSITION_NOT_SET};
+  int64_t lastPrePlayWriteSystemTimeUs_{CURRENT_POSITION_NOT_SET};
   uint64_t lastStablePlayedFrames_{0};
   TimestampState timestampState_{TimestampState::INITIALIZING};
   int64_t timestampInitializeSystemTimeUs_{0};
