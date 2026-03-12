@@ -300,6 +300,7 @@ int CJNIAudioFormat::ENCODING_IEC61937 = -1;
 
 int CJNIAudioTrack::MODE_STREAM = 1;
 int CJNIAudioTrack::WRITE_BLOCKING = 0;
+int CJNIAudioTrack::WRITE_NON_BLOCKING = 1;
 int CJNIAudioTrack::PLAYSTATE_STOPPED = 1;
 int CJNIAudioTrack::PLAYSTATE_PAUSED = 2;
 int CJNIAudioTrack::PLAYSTATE_PLAYING = 3;
@@ -357,6 +358,11 @@ static bool EnsureAudioConstants() {
       LoadStaticIntField<int>("android/media/AudioFormat", "ENCODING_DOLBY_TRUEHD");
   CJNIAudioFormat::ENCODING_IEC61937 =
       LoadStaticIntField<int>("android/media/AudioFormat", "ENCODING_IEC61937");
+
+  CJNIAudioTrack::WRITE_BLOCKING =
+      LoadStaticIntField<int>("android/media/AudioTrack", "WRITE_BLOCKING", 0);
+  CJNIAudioTrack::WRITE_NON_BLOCKING =
+      LoadStaticIntField<int>("android/media/AudioTrack", "WRITE_NON_BLOCKING", 1);
 
   g_audio_constants_loaded = CJNIAudioFormat::CHANNEL_OUT_STEREO != 0 &&
                              CJNIAudioFormat::ENCODING_PCM_16BIT > 0;

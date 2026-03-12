@@ -1,5 +1,6 @@
 /*
  *  Copyright (C) 2005-2018 Team Kodi
+ *  Copyright (C) 2026 Nuvio
  *  This file is part of Kodi - https://kodi.tv
  *
  *  SPDX-License-Identifier: GPL-2.0-or-later
@@ -69,6 +70,7 @@ public:
                                                       const AEAudioFormat& requestedFormat);
   static void EnsureMediaSinkRegistered();
   static void ApplyForMediaSource(const CActiveAEMediaSettings& settings);
+  static bool IsExternalClockMasterForMediaSource();
 
 protected:
   static void SettingOptionsAudioDevicesFillerGeneral(

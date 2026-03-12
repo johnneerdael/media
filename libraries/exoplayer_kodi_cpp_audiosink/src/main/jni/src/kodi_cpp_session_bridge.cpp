@@ -138,6 +138,15 @@ Java_androidx_media3_exoplayer_audio_kodi_KodiNativeAudioSink_nDrain(
 }
 
 extern "C" JNIEXPORT void JNICALL
+Java_androidx_media3_exoplayer_audio_kodi_KodiNativeAudioSink_nHandleDiscontinuity(
+    JNIEnv* env, jclass clazz, jlong native_handle)
+{
+  (void)env;
+  (void)clazz;
+  AsSession(native_handle)->HandleDiscontinuity();
+}
+
+extern "C" JNIEXPORT void JNICALL
 Java_androidx_media3_exoplayer_audio_kodi_KodiNativeAudioSink_nSetVolume(
     JNIEnv* env, jclass clazz, jlong native_handle, jfloat volume)
 {

@@ -1,5 +1,6 @@
 /*
  *  Copyright (C) 2010-2026 Team Kodi
+ *  Copyright (C) 2026 Nuvio
  *  This file is part of Kodi - https://kodi.tv
  *
  *  SPDX-License-Identifier: GPL-2.0-or-later
@@ -9,6 +10,7 @@
 #include "ActiveAESink.h"
 
 #include "ActiveAE.h"
+#include "ActiveAESettings.h"
 #include "cores/AudioEngine/AEResampleFactory.h"
 #include "cores/AudioEngine/Utils/AEBitstreamPacker.h"
 #include "cores/AudioEngine/Utils/AEStreamInfo.h"
@@ -307,6 +309,8 @@ void CActiveAESink::StateMachine(int signal, Protocol *port, Message *msg)
 
         case CSinkControlProtocol::FLUSH:
           ReturnBuffers();
+          if (CActiveAESettings::IsExternalClockMasterForMediaSource() && m_sink)
+            m_sink->Drain();
           msg->Reply(CSinkControlProtocol::ACC);
           return;
 

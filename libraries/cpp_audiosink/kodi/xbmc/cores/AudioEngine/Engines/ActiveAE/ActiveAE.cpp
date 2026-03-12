@@ -1,5 +1,6 @@
 /*
  *  Copyright (C) 2010-2018 Team Kodi
+ *  Copyright (C) 2026 Nuvio
  *  This file is part of Kodi - https://kodi.tv
  *
  *  SPDX-License-Identifier: GPL-2.0-or-later
@@ -2050,9 +2051,11 @@ bool CActiveAE::RunStages()
   if ((m_stats.GetWaterLevel() < m_targetBufferLevel || isTrueHDPassthrough) &&
       (m_mode != MODE_TRANSCODE || (m_encoderBuffers && !m_encoderBuffers->m_freeSamples.empty())))
   {
-    // calculate sync error
-    for (it = m_streams.begin(); it != m_streams.end(); ++it)
-    {
+  // calculate sync error
+  const bool mediaSourceExternalClockMaster =
+      CActiveAESettings::IsExternalClockMasterForMediaSource();
+  for (it = m_streams.begin(); it != m_streams.end(); ++it)
+  {
       // reset target buffer level at pause (but not initial start pause)
       if ((*it)->m_paused && (*it)->m_started && m_settings.lowLatencyMode)
         m_targetBufferLevel = m_initialTargetBufferLevel;
@@ -2060,8 +2063,17 @@ bool CActiveAE::RunStages()
       if ((*it)->m_paused || !(*it)->m_started || !(*it)->m_processingBuffers || !(*it)->m_pClock)
         continue;
 
-      if ((*it)->m_processingBuffers->m_outputSamples.empty())
-        continue;
+    if ((*it)->m_processingBuffers->m_outputSamples.empty())
+      continue;
+
+    if (mediaSourceExternalClockMaster)
+    {
+      (*it)->m_syncState = CAESyncInfo::AESyncState::SYNC_INSYNC;
+      (*it)->m_syncError.Flush(1000ms);
+      (*it)->m_resampleIntegral = 0;
+      (*it)->m_processingBuffers->SetRR(1.0, m_settings.atempoThreshold);
+      continue;
+    }
 
       CSampleBuffer *buf = (*it)->m_processingBuffers->m_outputSamples.front();
       if (buf->timestamp)
@@ -2468,6 +2480,16 @@ CSampleBuffer* CActiveAE::SyncStream(CActiveAEStream *stream)
 
   if (!stream->m_pClock)
     return ret;
+
+  if (CActiveAESettings::IsExternalClockMasterForMediaSource())
+  {
+    stream->m_syncState = CAESyncInfo::AESyncState::SYNC_INSYNC;
+    stream->m_syncError.Flush(1000ms);
+    stream->m_resampleIntegral = 0;
+    if (stream->m_processingBuffers)
+      stream->m_processingBuffers->SetRR(1.0, m_settings.atempoThreshold);
+    return ret;
+  }
 
   if (stream->m_syncState == CAESyncInfo::AESyncState::SYNC_START)
   {
