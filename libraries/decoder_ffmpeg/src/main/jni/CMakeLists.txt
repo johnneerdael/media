@@ -55,13 +55,9 @@ if(EXISTS "${ffmpeg_avfilter_file_path}")
     set(ffmpeg_has_avfilter TRUE)
     # When FFmpeg is built with static libplacebo/shaderc, libavfilter.a keeps
     # unresolved references that must be linked by this final JNI shared lib.
-    file(GLOB ffmpeg_extension_static_libs "${ffmpeg_binaries}/*.a")
-    list(REMOVE_ITEM ffmpeg_extension_static_libs
-            "${ffmpeg_binaries}/libavutil.a"
-            "${ffmpeg_binaries}/libswresample.a"
-            "${ffmpeg_binaries}/libswscale.a"
-            "${ffmpeg_binaries}/libavcodec.a"
-            "${ffmpeg_binaries}/libavfilter.a")
+    file(GLOB CONFIGURE_DEPENDS ffmpeg_extension_static_libs "${ffmpeg_binaries}/*.a")
+    list(FILTER ffmpeg_extension_static_libs EXCLUDE REGEX "/lib(avutil|swresample|swscale|avcodec|avfilter)\\.a$")
+    list(FILTER ffmpeg_extension_static_libs INCLUDE REGEX "\\.a$")
     list(SORT ffmpeg_extension_static_libs)
 endif()
 

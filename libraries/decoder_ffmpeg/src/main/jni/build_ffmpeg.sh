@@ -30,8 +30,8 @@ JOBS="$(nproc 2> /dev/null || sysctl -n hw.ncpu 2> /dev/null || echo 4)"
 echo "Using $JOBS jobs for make"
 FFMPEG_ENABLE_LIBPLACEBO="${FFMPEG_ENABLE_LIBPLACEBO:-0}"
 LIBPLACEBO_PREBUILT_ROOT="${LIBPLACEBO_PREBUILT_ROOT:-}"
-LIBPLACEBO_MIN_VERSION="${LIBPLACEBO_MIN_VERSION:-5.229.2}"
-LIBPLACEBO_MAX_VERSION="${LIBPLACEBO_MAX_VERSION:-5.264.1}"
+LIBPLACEBO_MIN_VERSION="${LIBPLACEBO_MIN_VERSION:-7.360.0}"
+LIBPLACEBO_MAX_VERSION="${LIBPLACEBO_MAX_VERSION:-7.360.0}"
 FFMPEG_ENABLE_LIBDOVI="${FFMPEG_ENABLE_LIBDOVI:-0}"
 LIBDOVI_PREBUILT_ROOT="${LIBDOVI_PREBUILT_ROOT:-${FFMPEG_MODULE_PATH}/../../../../../third_party/libdovi}"
 FFMPEG_REQUIRE_LIBDOVI="${FFMPEG_REQUIRE_LIBDOVI:-0}"
@@ -41,14 +41,13 @@ COMMON_OPTIONS="
     --target-os=android
     --pkg-config=pkg-config
     --enable-static
+    --enable-pic
     --disable-shared
     --disable-doc
     --disable-programs
     --disable-everything
     --disable-avdevice
-    --disable-avformat
     --enable-swscale
-    --disable-postproc
     --enable-avfilter
     --disable-symver
     --enable-swresample
@@ -139,11 +138,11 @@ configure_supports_option() {
     "${FFMPEG_SOURCE_PATH}/configure" --help 2>/dev/null | grep -q -- "${option_name}"
 }
 
-if [[ "${FFMPEG_ENABLE_LIBPLACEBO}" == "1" && "${FFMPEG_MAJOR_VERSION}" != "6" ]]
+if [[ "${FFMPEG_ENABLE_LIBPLACEBO}" == "1" && "${FFMPEG_MAJOR_VERSION}" != "8" ]]
 then
-    echo "libplacebo tone-map path requires FFmpeg 6.x for API compatibility with libplacebo v5.x."
+    echo "libplacebo tone-map path requires FFmpeg 8.x for this repository's decoder stack."
     echo "Current FFmpeg source is ${FFMPEG_VERSION} (${FFMPEG_SOURCE_PATH})."
-    echo "Use FFmpeg 6.0/6.1 (for example, media/jellyfin-androidx-media/ffmpeg) and rebuild."
+    echo "Use the repo FFmpeg checkout at media/FFmpeg (8.0.git) and rebuild."
     exit 1
 fi
 
@@ -157,7 +156,7 @@ then
     if ! configure_supports_option "--enable-libdovi"
     then
         echo "Current FFmpeg source (${FFMPEG_SOURCE_PATH}) does not support --enable-libdovi."
-        echo "This is expected for standard FFmpeg 6.x: DV metadata is parsed via internal DOVI_RPU."
+        echo "This is expected for standard FFmpeg 8.x: DV metadata is parsed via internal DOVI_RPU."
         echo "External --enable-libdovi is optional and only applies to custom FFmpeg forks."
         if [[ "${FFMPEG_REQUIRE_LIBDOVI}" == "1" ]]
         then
@@ -222,17 +221,17 @@ validate_libplacebo_pc_version() {
         exit 1
     fi
     local libplacebo_major="${libplacebo_version%%.*}"
-    if [[ "${libplacebo_major}" != "5" ]]
+    if [[ "${libplacebo_major}" != "7" ]]
     then
-        echo "Unsupported libplacebo version ${libplacebo_version}; Vulkan 1.1 targets require libplacebo v5.x."
+        echo "Unsupported libplacebo version ${libplacebo_version}; this build is pinned to libplacebo v7.x."
         exit 1
     fi
     local version_cmp
     version_cmp="$(compare_versions "${libplacebo_version}" "${LIBPLACEBO_MAX_VERSION}")"
     if [[ "${version_cmp}" == "1" ]]
     then
-        echo "libplacebo ${libplacebo_version} is too new for Vulkan 1.1 devices."
-        echo "Use ${LIBPLACEBO_MAX_VERSION} or older v5.x (recommended: ${LIBPLACEBO_MAX_VERSION} or ${LIBPLACEBO_MIN_VERSION})."
+        echo "libplacebo ${libplacebo_version} is newer than the validated version range."
+        echo "Use ${LIBPLACEBO_MAX_VERSION} (current repo default) or override LIBPLACEBO_MAX_VERSION deliberately."
         exit 1
     fi
     version_cmp="$(compare_versions "${libplacebo_version}" "${LIBPLACEBO_MIN_VERSION}")"
@@ -523,7 +522,7 @@ configure_ffmpeg "armeabi-v7a" \
     --ar="${TOOLCHAIN_PREFIX}/llvm-ar" \
     --ranlib="${TOOLCHAIN_PREFIX}/llvm-ranlib" \
     --strip="${TOOLCHAIN_PREFIX}/llvm-strip" \
-    --extra-cflags="-march=armv7-a -mfloat-abi=softfp" \
+    --extra-cflags="-fPIC -march=armv7-a -mfloat-abi=softfp" \
     --extra-ldflags="-Wl,--fix-cortex-a8"
 make -j$JOBS
 make install-libs
@@ -539,7 +538,8 @@ configure_ffmpeg "arm64-v8a" \
     --nm="${TOOLCHAIN_PREFIX}/llvm-nm" \
     --ar="${TOOLCHAIN_PREFIX}/llvm-ar" \
     --ranlib="${TOOLCHAIN_PREFIX}/llvm-ranlib" \
-    --strip="${TOOLCHAIN_PREFIX}/llvm-strip"
+    --strip="${TOOLCHAIN_PREFIX}/llvm-strip" \
+    --extra-cflags="-fPIC"
 make -j$JOBS
 make install-libs
 validate_tonemap_outputs_for_abi "arm64-v8a"
@@ -555,6 +555,7 @@ configure_ffmpeg "x86" \
     --ar="${TOOLCHAIN_PREFIX}/llvm-ar" \
     --ranlib="${TOOLCHAIN_PREFIX}/llvm-ranlib" \
     --strip="${TOOLCHAIN_PREFIX}/llvm-strip" \
+    --extra-cflags="-fPIC" \
     --disable-asm
 make -j$JOBS
 make install-libs
@@ -571,6 +572,7 @@ configure_ffmpeg "x86_64" \
     --ar="${TOOLCHAIN_PREFIX}/llvm-ar" \
     --ranlib="${TOOLCHAIN_PREFIX}/llvm-ranlib" \
     --strip="${TOOLCHAIN_PREFIX}/llvm-strip" \
+    --extra-cflags="-fPIC" \
     --disable-asm
 make -j$JOBS
 make install-libs
@@ -581,7 +583,7 @@ make clean
 HEADER_STAGING_DIR="${FFMPEG_MODULE_PATH}/jni/ffmpeg-headers"
 rm -rf "${HEADER_STAGING_DIR}"
 mkdir -p "${HEADER_STAGING_DIR}"
-for header_dir in libavcodec libavutil libswresample libswscale libavfilter
+for header_dir in libavcodec libavformat libavutil libswresample libswscale libavfilter
 do
     ln -s "../ffmpeg/${header_dir}" "${HEADER_STAGING_DIR}/${header_dir}"
 done

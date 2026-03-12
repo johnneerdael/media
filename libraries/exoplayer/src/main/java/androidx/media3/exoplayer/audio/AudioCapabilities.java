@@ -180,6 +180,26 @@ public final class AudioCapabilities {
     return AmazonQuirks.isIecPackerDtshdCoreFallbackEnabled();
   }
 
+  /** Enables AC3 transcoding on the custom Kodi IEC packer path. */
+  public static void setIecPackerAc3TranscodeEnabled(boolean enabled) {
+    AmazonQuirks.setIecPackerAc3TranscodeEnabled(enabled);
+  }
+
+  /** Returns whether AC3 transcoding is enabled on the custom Kodi IEC packer path. */
+  public static boolean isIecPackerAc3TranscodeEnabled() {
+    return AmazonQuirks.isIecPackerAc3TranscodeEnabled();
+  }
+
+  /** Sets the Kodi-style audio config enum for the custom IEC packer path. */
+  public static void setIecPackerAudioConfig(int config) {
+    AmazonQuirks.setIecPackerAudioConfig(config);
+  }
+
+  /** Returns the Kodi-style audio config enum for the custom IEC packer path. */
+  public static int getIecPackerAudioConfig() {
+    return AmazonQuirks.getIecPackerAudioConfig();
+  }
+
   /** Sets the Kodi-style PCM speaker layout limit for the custom IEC packer path. */
   public static void setIecPackerMaxPcmChannelLayout(int channelLayout) {
     AmazonQuirks.setIecPackerMaxPcmChannelLayout(channelLayout);
@@ -188,6 +208,26 @@ public final class AudioCapabilities {
   /** Returns the Kodi-style PCM speaker layout limit for the custom IEC packer path. */
   public static int getIecPackerMaxPcmChannelLayout() {
     return AmazonQuirks.getIecPackerMaxPcmChannelLayout();
+  }
+
+  /** Sets the Kodi-style audio device string for the custom IEC packer path. */
+  public static void setIecPackerAudioDevice(String device) {
+    AmazonQuirks.setIecPackerAudioDevice(device);
+  }
+
+  /** Returns the Kodi-style audio device string for the custom IEC packer path. */
+  public static String getIecPackerAudioDevice() {
+    return AmazonQuirks.getIecPackerAudioDevice();
+  }
+
+  /** Sets the Kodi-style passthrough device string for the custom IEC packer path. */
+  public static void setIecPackerPassthroughDevice(String device) {
+    AmazonQuirks.setIecPackerPassthroughDevice(device);
+  }
+
+  /** Returns the Kodi-style passthrough device string for the custom IEC packer path. */
+  public static String getIecPackerPassthroughDevice() {
+    return AmazonQuirks.getIecPackerPassthroughDevice();
   }
 
   /** Enables the legacy Fire TV DTS-core fallback compatibility path. */

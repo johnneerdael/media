@@ -604,7 +604,7 @@ bool importHardwareBufferAsVulkanTexture(
     if (formatProps.format == VK_FORMAT_UNDEFINED) {
         LOGE(
                 "DV5_HW_PURE: AHB has VK_FORMAT_UNDEFINED (externalFormat=%" PRIu64
-                "); cannot wrap with libplacebo v5",
+                "); cannot wrap with libplacebo",
                 static_cast<uint64_t>(formatProps.externalFormat));
         return false;
     }

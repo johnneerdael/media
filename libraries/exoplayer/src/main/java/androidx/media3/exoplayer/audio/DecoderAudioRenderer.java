@@ -320,6 +320,9 @@ public abstract class DecoderAudioRenderer<
 
   @Override
   public void render(long positionUs, long elapsedRealtimeUs) throws ExoPlaybackException {
+    if (audioSink instanceof RendererClockAwareAudioSink) {
+      ((RendererClockAwareAudioSink) audioSink).setRendererClockUs(positionUs);
+    }
     if (outputStreamEnded) {
       try {
         audioSink.playToEndOfStream();

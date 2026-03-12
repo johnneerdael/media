@@ -839,6 +839,9 @@ public class MediaCodecAudioRenderer extends MediaCodecRenderer implements Media
       boolean isLastBuffer,
       Format format)
       throws ExoPlaybackException {
+    if (audioSink instanceof RendererClockAwareAudioSink) {
+      ((RendererClockAwareAudioSink) audioSink).setRendererClockUs(positionUs);
+    }
     checkNotNull(buffer);
     // Reset nextBufferToWritePresentationTimeUs to default value C.TIME_UNSET for if
     // buffer is skipped, dropped, or written.
