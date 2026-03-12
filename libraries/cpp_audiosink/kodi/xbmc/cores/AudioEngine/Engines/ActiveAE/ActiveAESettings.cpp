@@ -1,5 +1,6 @@
 /*
  *  Copyright (C) 2010-2018 Team Kodi
+ *  Copyright (C) 2026 Nuvio
  *  This file is part of Kodi - https://kodi.tv
  *
  *  SPDX-License-Identifier: GPL-2.0-or-later
@@ -24,6 +25,7 @@
 #include "utils/StringUtils.h"
 
 #include <algorithm>
+#include <atomic>
 #include <mutex>
 #include <sstream>
 
@@ -40,6 +42,7 @@ constexpr int kMimeKindDtsUhd = 5;
 constexpr int kMimeKindTrueHd = 6;
 constexpr int kMimeKindPcm = 7;
 constexpr char kDefaultIecDevice[] = "AUDIOTRACK:AudioTrack (IEC)";
+std::atomic_bool g_mediaSourceExternalClockMaster{false};
 
 CAEStreamInfo::DataType MimeKindToStreamType(int mimeKind)
 {
@@ -312,6 +315,7 @@ void CActiveAESettings::ApplyForMediaSource(const CActiveAEMediaSettings& mediaS
   const auto settings = CServiceBroker::GetSettingsComponent()->GetSettings();
   const bool passthrough = mediaSettings.mimeKind != kMimeKindPcm;
   const std::string device = SelectDeviceForMediaSource(mediaSettings);
+  g_mediaSourceExternalClockMaster.store(true);
 
   CServiceBroker::GetLogging().SetIecVerboseLoggingEnabled(mediaSettings.iecVerboseLogging);
   CServiceBroker::GetSettingsComponent()->GetAdvancedSettings()->m_superviseAudioDelay =
@@ -341,6 +345,11 @@ void CActiveAESettings::ApplyForMediaSource(const CActiveAEMediaSettings& mediaS
   settings->SetBool(CSettings::SETTING_AUDIOOUTPUT_MAINTAINORIGINALVOLUME, false);
   settings->SetBool(CSettings::SETTING_AUDIOOUTPUT_DTSHDCOREFALLBACK, false);
   settings->SetBool(CSettings::SETTING_AUDIOOUTPUT_LOWLATENCY, false);
+}
+
+bool CActiveAESettings::IsExternalClockMasterForMediaSource()
+{
+  return g_mediaSourceExternalClockMaster.load();
 }
 
 void CActiveAESettings::SettingOptionsAudioDevicesFillerGeneral(

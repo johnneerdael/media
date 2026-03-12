@@ -17,6 +17,7 @@
 package androidx.media3.exoplayer.audio.kodi;
 
 import android.media.AudioDeviceInfo;
+import android.util.Log;
 import androidx.annotation.Nullable;
 import androidx.media3.common.AudioAttributes;
 import androidx.media3.common.C;
@@ -76,6 +77,9 @@ public final class KodiNativeAudioSink extends ForwardingAudioSink
   private float volume;
   private PlaybackParameters playbackParameters;
   private long rendererClockUs;
+  private boolean playCommandReceived;
+  private boolean handledEndOfStream;
+  private static final String TAG = "KodiNativeSink";
 
   public KodiNativeAudioSink(AudioSink sink) {
     super(sink);
@@ -83,6 +87,8 @@ public final class KodiNativeAudioSink extends ForwardingAudioSink
     volume = 1f;
     playbackParameters = PlaybackParameters.DEFAULT;
     rendererClockUs = C.TIME_UNSET;
+    playCommandReceived = false;
+    handledEndOfStream = false;
   }
 
   @Override
@@ -139,6 +145,7 @@ public final class KodiNativeAudioSink extends ForwardingAudioSink
   public void configure(Format inputFormat, int specifiedBufferSize, @Nullable int[] outputChannels)
       throws ConfigurationException {
     configuredFormat = inputFormat;
+    handledEndOfStream = false;
     ensureSession(inputFormat);
     boolean configured =
         nConfigure(
@@ -178,15 +185,36 @@ public final class KodiNativeAudioSink extends ForwardingAudioSink
             writeBuffer.remaining(),
             presentationTimeUs,
             encodedAccessUnitCount);
+    if (AudioCapabilities.isFireOsIecVerboseLoggingEnabled()
+        && bytesConsumed > 0
+        && !playCommandReceived) {
+      Log.w(
+          TAG,
+          "Accepted audio bytes before Media3 play() command; consumed="
+              + bytesConsumed
+              + " ptsUs="
+              + presentationTimeUs);
+    }
     if (bytesConsumed <= 0) {
       return false;
     }
+    handledEndOfStream = false;
     buffer.position(buffer.position() + Math.min(bytesConsumed, originalRemaining));
     return bytesConsumed >= originalRemaining;
   }
 
   @Override
   public void play() {
+    playCommandReceived = true;
+    if (AudioCapabilities.isFireOsIecVerboseLoggingEnabled()) {
+      Log.i(
+          TAG,
+          "Media3 -> AudioSink play()"
+              + " nativeHandle="
+              + nativeHandle
+              + " format="
+              + (configuredFormat != null ? configuredFormat.sampleMimeType : "null"));
+    }
     if (nativeHandle != 0L) {
       nPlay(nativeHandle);
     }
@@ -194,13 +222,20 @@ public final class KodiNativeAudioSink extends ForwardingAudioSink
 
   @Override
   public void pause() {
+    if (AudioCapabilities.isFireOsIecVerboseLoggingEnabled()) {
+      Log.i(TAG, "Media3 -> AudioSink pause()");
+    }
     if (nativeHandle != 0L) {
       nPause(nativeHandle);
     }
   }
 
   @Override
-  public void handleDiscontinuity() {}
+  public void handleDiscontinuity() {
+    if (nativeHandle != 0L) {
+      nHandleDiscontinuity(nativeHandle);
+    }
+  }
 
   @Override
   public long getCurrentPositionUs(boolean sourceEnded) {
@@ -213,11 +248,12 @@ public final class KodiNativeAudioSink extends ForwardingAudioSink
       return;
     }
     nDrain(nativeHandle);
+    handledEndOfStream = true;
   }
 
   @Override
   public boolean isEnded() {
-    return nativeHandle == 0L || nIsEnded(nativeHandle);
+    return nativeHandle == 0L || (handledEndOfStream && nIsEnded(nativeHandle));
   }
 
   @Override
@@ -232,6 +268,11 @@ public final class KodiNativeAudioSink extends ForwardingAudioSink
 
   @Override
   public void flush() {
+    playCommandReceived = false;
+    handledEndOfStream = false;
+    if (AudioCapabilities.isFireOsIecVerboseLoggingEnabled()) {
+      Log.i(TAG, "Media3 -> AudioSink flush()");
+    }
     if (nativeHandle != 0L) {
       nFlush(nativeHandle);
     }
@@ -239,6 +280,8 @@ public final class KodiNativeAudioSink extends ForwardingAudioSink
 
   @Override
   public void reset() {
+    playCommandReceived = false;
+    handledEndOfStream = false;
     closeSession(true);
     configuredFormat = null;
     super.reset();
@@ -246,6 +289,8 @@ public final class KodiNativeAudioSink extends ForwardingAudioSink
 
   @Override
   public void release() {
+    playCommandReceived = false;
+    handledEndOfStream = false;
     closeSession(false);
     configuredFormat = null;
     super.release();
@@ -331,6 +376,8 @@ public final class KodiNativeAudioSink extends ForwardingAudioSink
   private static native void nFlush(long nativeHandle);
 
   private static native void nDrain(long nativeHandle);
+
+  private static native void nHandleDiscontinuity(long nativeHandle);
 
   private static native void nSetVolume(long nativeHandle, float volume);
 

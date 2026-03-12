@@ -1,20 +1,38 @@
+/*
+ * Copyright (C) 2026 Nuvio
+ *
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program. If not, see <https://www.gnu.org/licenses/>.
+ */
+
 #pragma once
 
-#include "cores/AudioEngine/Engines/ActiveAE/ActiveAE.h"
+#include "KodiAudioTrackOutput.h"
+#include "KodiIecPipeline.h"
 #include "cores/AudioEngine/Engines/ActiveAE/ActiveAESettings.h"
-#include "cores/AudioEngine/Engines/ActiveAE/ActiveAEStream.h"
-#include "cores/AudioEngine/Interfaces/AEStream.h"
-#include "cores/AudioEngine/Utils/AEStreamData.h"
+#include "threads/CriticalSection.h"
 
 #include <atomic>
-#include <chrono>
+#include <array>
+#include <cstdint>
+#include <deque>
 #include <limits>
-#include <memory>
+#include <vector>
 
 namespace androidx_media3
 {
 
-class KodiActiveAEEngine : public IAEClockCallback
+class KodiActiveAEEngine
 {
 public:
   KodiActiveAEEngine() = default;
@@ -26,6 +44,7 @@ public:
   void Pause();
   void Flush();
   void Drain();
+  void HandleDiscontinuity();
   void SetVolume(float volume);
   void SetHostClockUs(int64_t host_clock_us);
   void SetHostClockSpeed(double speed);
@@ -35,50 +54,130 @@ public:
   int64_t GetBufferSizeUs() const;
   void Reset();
 
-  double GetClock() override;
-  double GetClockSpeed() override;
-
 private:
   static constexpr int64_t NO_PTS = std::numeric_limits<int64_t>::min();
-  static constexpr int64_t POSITION_NOT_SET = std::numeric_limits<int64_t>::min();
+  static constexpr int64_t CURRENT_POSITION_NOT_SET = std::numeric_limits<int64_t>::min();
+  static constexpr int64_t MAX_POSITION_DRIFT_FOR_SMOOTHING_US = 1000000;
+  static constexpr int64_t MIN_PLAYHEAD_OFFSET_SAMPLE_INTERVAL_US = 30000;
+  static constexpr int64_t FAST_TIMESTAMP_POLL_INTERVAL_US = 10000;
+  static constexpr int64_t SLOW_TIMESTAMP_POLL_INTERVAL_US = 10000000;
+  static constexpr int64_t ERROR_TIMESTAMP_POLL_INTERVAL_US = 500000;
+  static constexpr int64_t INITIALIZING_DURATION_US = 500000;
+  static constexpr int64_t WAIT_FOR_TIMESTAMP_ADVANCE_US = 2000000;
+  static constexpr int64_t MAX_ADVANCING_TIMESTAMP_DRIFT_US = 1000;
+  static constexpr int64_t MAX_AUDIO_TIMESTAMP_OFFSET_US = 5000000;
+  static constexpr int64_t MAX_RESUME_TIMESTAMP_DRIFT_US = 200000;
+  static constexpr int MAX_POSITION_SMOOTHING_SPEED_CHANGE_PERCENT = 10;
+  static constexpr int64_t DISCONTINUITY_THRESHOLD_US = 200000;
+  enum class TimestampState
+  {
+    INITIALIZING,
+    TIMESTAMP,
+    TIMESTAMP_ADVANCING,
+    NO_TIMESTAMP,
+    ERROR
+  };
 
-  bool RecreateEngineLocked();
-  bool CreateStreamLocked(const AEAudioFormat& stream_format);
-  void DestroyEngineLocked();
+  struct PendingPcmChunk
+  {
+    std::vector<uint8_t> bytes;
+    int64_t ptsUs{NO_PTS};
+  };
 
-  int WritePassthroughLocked(const uint8_t* data, int size, int64_t presentation_time_us);
-  int WritePcmLocked(const uint8_t* data, int size, int64_t presentation_time_us);
+  struct MediaPositionParameters
+  {
+    double playbackSpeed{1.0};
+    int64_t mediaTimeUs{0};
+    int64_t audioOutputPositionUs{0};
+    int64_t mediaPositionDriftUs{0};
+  };
 
-  // Direct write to stream with short deadline retry (like AudioSinkAE::AddPackets).
-  // Returns true if at least some data was accepted.
-  bool AddDataToStreamLocked(const uint8_t* data, unsigned int frames,
-                             int64_t ptsUs, int64_t durationUs);
+  int WritePassthroughLocked(const uint8_t* data,
+                             int size,
+                             int64_t ptsUs,
+                             int encodedAccessUnitCount);
+  int WritePcmLocked(const uint8_t* data, int size, int64_t ptsUs);
+  void EnsurePassthroughOutputConfiguredLocked(const KodiPackedAccessUnit& packet);
+  bool EnsurePcmOutputConfiguredLocked();
+  int FlushPackedQueueToHardwareLocked();
+  int FlushPcmQueueToHardwareLocked();
+  bool StartOutputIfPrimedLocked();
 
-  // Kodi-style position helpers.
-  void UpdatePlayingPtsLocked(int64_t packetPtsUs, int64_t packetDurationUs);
-  int64_t ComputeCurrentPositionUsLocked() const;
-  double GetDelaySecsLocked() const;
-  double GetCacheTimeSecsLocked() const;
+  void OnBytesWrittenLocked(int64_t packetPtsUs, int bytesWritten, unsigned int sampleRate, unsigned int frameSizeBytes);
+  int64_t ComputePositionFromHardwareLocked();
+  int64_t GetAudioOutputPositionUsLocked();
+  int64_t ApplyMediaPositionParametersLocked(int64_t outputPositionUs);
+  int64_t ApplySkippingLocked(int64_t mediaPositionUs) const;
+  int64_t GetWrittenAudioOutputPositionUsLocked() const;
+  uint64_t GetSafePlayedFramesLocked();
+  void UpdateTimestampStateLocked(TimestampState state, int64_t systemTimeUs);
+  bool IsTimestampAdvancingFromInitialLocked(uint64_t tsFrames,
+                                             int64_t tsSystemTimeUs,
+                                             int64_t systemTimeUs,
+                                             int64_t playbackHeadEstimateUs) const;
+  int64_t QueueDurationUsLocked() const;
+  void UpdateExpectedPtsLocked(int64_t packetPtsUs, int64_t packetDurationUs);
+  bool TryResolvePendingDiscontinuityLocked();
+  void ReanchorForDiscontinuityLocked(int64_t packetPtsUs);
+  void ResetOutputPositionEstimatorLocked();
+  void ResetPositionLocked();
 
   mutable CCriticalSection lock_;
-  std::unique_ptr<ActiveAE::CActiveAE> engine_;
-  IAE::StreamPtr stream_;
-  ActiveAE::CActiveAEMediaStreamAdapter stream_adapter_;
+  ActiveAE::CActiveAEMediaSettings config_{};
+  AEAudioFormat requestedFormat_{};
+  bool configured_{false};
+  bool playRequested_{false};
+  bool outputStarted_{false};
+  bool passthrough_{false};
+  bool ended_{false};
 
-  bool play_requested_ = false;
-  bool has_pending_data_ = false;  // set when Write accepts data; cleared on flush/reset/drain-complete
-  std::atomic_bool abort_add_packets_{false};
+  KodiIecPipeline iecPipeline_;
+  KodiAudioTrackOutput output_;
+  std::deque<KodiPackedAccessUnit> packedQueue_;
+  std::deque<PendingPcmChunk> pcmQueue_;
+  int64_t queuedDurationUs_{0};
+  int64_t firstQueuedPtsUs_{NO_PTS};
 
-  // Kodi-style played position tracking (mirrors AudioSinkAE).
-  int64_t playing_pts_us_ = POSITION_NOT_SET;
-  std::chrono::steady_clock::time_point time_of_pts_;
-  // IAEClockCallback timeline anchor (player-style clock domain from incoming packet PTS).
-  int64_t clock_pts_us_ = POSITION_NOT_SET;
-  std::chrono::steady_clock::time_point time_of_clock_pts_;
-  // Explicit host media clock feed (closest equivalent to AudioSinkAE's CDVDClock contract).
-  int64_t host_clock_us_ = POSITION_NOT_SET;
-  std::chrono::steady_clock::time_point time_of_host_clock_;
-  double host_clock_speed_ = 1.0;
+  uint64_t totalWrittenFrames_{0};
+  bool anchorValid_{false};
+  int64_t anchorPtsUs_{CURRENT_POSITION_NOT_SET};
+  uint64_t anchorPlaybackFrames_{0};
+  unsigned int anchorMediaSampleRate_{0};
+  unsigned int anchorSinkSampleRate_{0};
+  int64_t systemTimeAtAnchorUs_{0};
+  int64_t lastPositionUs_{CURRENT_POSITION_NOT_SET};
+  int64_t hostClockUs_{CURRENT_POSITION_NOT_SET};
+  double hostClockSpeed_{1.0};
+  float volume_{1.0f};
+  bool hasPendingData_{false};
+
+  std::array<int64_t, 10> playheadOffsetsUs_{};
+  int playheadOffsetCount_{0};
+  int nextPlayheadOffsetIndex_{0};
+  int64_t smoothedPlayheadOffsetUs_{0};
+  int64_t lastPlayheadSampleTimeUs_{0};
+  int64_t lastOutputPositionUs_{CURRENT_POSITION_NOT_SET};
+  int64_t lastOutputPositionSystemTimeUs_{CURRENT_POSITION_NOT_SET};
+  int64_t systemTimeAtPlayUs_{CURRENT_POSITION_NOT_SET};
+  uint64_t framesAtPlay_{0};
+  uint64_t lastStablePlayedFrames_{0};
+  TimestampState timestampState_{TimestampState::INITIALIZING};
+  int64_t timestampInitializeSystemTimeUs_{0};
+  int64_t timestampSampleIntervalUs_{FAST_TIMESTAMP_POLL_INTERVAL_US};
+  int64_t timestampLastSampleTimeUs_{0};
+  uint64_t timestampInitialFrames_{0};
+  int64_t timestampInitialSystemTimeUs_{CURRENT_POSITION_NOT_SET};
+  uint64_t lastTimestampFrames_{0};
+  int64_t lastTimestampSystemTimeUs_{CURRENT_POSITION_NOT_SET};
+
+  MediaPositionParameters mediaPositionParameters_{};
+  std::deque<MediaPositionParameters> mediaPositionParametersCheckpoints_;
+  int64_t skippedOutputFrameCount_{0};
+  int64_t skippedOutputFrameCountAtLastPosition_{0};
+  bool nextExpectedPtsValid_{false};
+  int64_t nextExpectedPtsUs_{0};
+  bool startMediaTimeUsNeedsSync_{false};
+  int64_t pendingSyncPtsUs_{NO_PTS};
 };
 
 }  // namespace androidx_media3

@@ -18,6 +18,7 @@ class CJNIAudioTrack
 public:
   static int MODE_STREAM;
   static int WRITE_BLOCKING;
+  static int WRITE_NON_BLOCKING;
   static int PLAYSTATE_STOPPED;
   static int PLAYSTATE_PAUSED;
   static int PLAYSTATE_PLAYING;
