@@ -1,0 +1,1 @@
+# Intentionally empty. This module exposes JNI entry points and copied Kodi C++ code only.

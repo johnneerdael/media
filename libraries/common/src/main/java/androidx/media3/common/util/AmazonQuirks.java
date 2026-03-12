@@ -49,7 +49,11 @@ public final class AmazonQuirks {
   private static volatile boolean iecPackerTruehdPassthroughEnabled = true;
   private static volatile boolean iecPackerDtshdPassthroughEnabled = true;
   private static volatile boolean iecPackerDtshdCoreFallbackEnabled = true;
+  private static volatile boolean iecPackerAc3TranscodeEnabled;
+  private static volatile int iecPackerAudioConfig;
   private static volatile int iecPackerMaxPcmChannelLayout = 10;
+  private static volatile String iecPackerAudioDevice = "";
+  private static volatile String iecPackerPassthroughDevice = "";
   private static final CopyOnWriteArraySet<Listener> listeners = new CopyOnWriteArraySet<>();
 
   private AmazonQuirks() {}
@@ -153,6 +157,24 @@ public final class AmazonQuirks {
     return iecPackerDtshdCoreFallbackEnabled;
   }
 
+  public static void setIecPackerAc3TranscodeEnabled(boolean enabled) {
+    iecPackerAc3TranscodeEnabled = enabled;
+    notifyListeners();
+  }
+
+  public static boolean isIecPackerAc3TranscodeEnabled() {
+    return iecPackerAc3TranscodeEnabled;
+  }
+
+  public static void setIecPackerAudioConfig(int config) {
+    iecPackerAudioConfig = config;
+    notifyListeners();
+  }
+
+  public static int getIecPackerAudioConfig() {
+    return iecPackerAudioConfig;
+  }
+
   public static void setIecPackerMaxPcmChannelLayout(int channelLayout) {
     iecPackerMaxPcmChannelLayout = channelLayout;
     notifyListeners();
@@ -160,6 +182,24 @@ public final class AmazonQuirks {
 
   public static int getIecPackerMaxPcmChannelLayout() {
     return iecPackerMaxPcmChannelLayout;
+  }
+
+  public static void setIecPackerAudioDevice(String device) {
+    iecPackerAudioDevice = device != null ? device : "";
+    notifyListeners();
+  }
+
+  public static String getIecPackerAudioDevice() {
+    return iecPackerAudioDevice;
+  }
+
+  public static void setIecPackerPassthroughDevice(String device) {
+    iecPackerPassthroughDevice = device != null ? device : "";
+    notifyListeners();
+  }
+
+  public static String getIecPackerPassthroughDevice() {
+    return iecPackerPassthroughDevice;
   }
 
   public static boolean isFireOsCompatibilityFallbackEnabled() {

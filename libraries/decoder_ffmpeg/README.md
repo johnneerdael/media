@@ -49,15 +49,11 @@ HOST_PLATFORM="linux-x86_64"
 ANDROID_ABI=21
 ```
 
-*   Fetch FFmpeg and checkout an appropriate branch. We cannot guarantee
-    compatibility with all versions of FFmpeg. We currently recommend version
-    6.1 (or 6.0):
+*   Use this repository's FFmpeg checkout. The decoder module, VC-1 path and
+    DV5 tone-map path are maintained against the repo's FFmpeg 8.0 tree:
 
 ```
-cd "<preferred location for ffmpeg>" && \
-git clone git://source.ffmpeg.org/ffmpeg && \
-cd ffmpeg && \
-git checkout release/6.1 && \
+cd "<path to project checkout>/media/FFmpeg" && \
 FFMPEG_PATH="$(pwd)"
 ```
 
@@ -102,7 +98,7 @@ To enable the experimental DV5 software tone-mapping path, build FFmpeg with
 <LIBPLACEBO_PREBUILT_ROOT>/<abi>/lib/pkgconfig
 ```
 
-2. Build Shield-safe libplacebo dependencies (Vulkan 1.1 runtime target):
+2. Build libplacebo dependencies using the current repo default tag:
 
 ```
 cd "${FFMPEG_MODULE_PATH}/jni" && \
@@ -111,9 +107,8 @@ cd "${FFMPEG_MODULE_PATH}/jni" && \
 ```
 
 Notes:
-- Default `LIBPLACEBO_TAG` is `v5.264.1`.
-- `v5.229.2` is also supported:
-  `LIBPLACEBO_TAG=v5.229.2 ./build_libplacebo_android.sh ...`
+- Default `LIBPLACEBO_TAG` is `v7.360.0`.
+- This matches the current validated build default in `build_ffmpeg.sh`.
 
 3. Re-run the FFmpeg build script with:
 
@@ -126,11 +121,10 @@ LIBPLACEBO_PREBUILT_ROOT="<path to staged libplacebo prebuilts>" \
 
 Notes:
 - If `libavfilter.a` is absent, the JNI builds without the tone-map path.
-- For Android TV boxes limited to Vulkan 1.1, use FFmpeg 6.x and `libplacebo`
-  v5.x (`v5.264.1` default; `v5.229.2` also supported by
-  `build_libplacebo_android.sh`).
-- FFmpeg 7.x is not supported for this path. `build_ffmpeg.sh` will fail fast
-  unless the detected FFmpeg version is 6.x when
+- Default `libplacebo` is `v7.360.0`, which upstream documents as requiring
+  Vulkan 1.3 headers at build time and Vulkan 1.2 as the minimum runtime.
+- FFmpeg 6.x/7.x are not supported for this path. `build_ffmpeg.sh` will fail
+  fast unless the detected FFmpeg version is 8.x when
   `FFMPEG_ENABLE_LIBPLACEBO=1`.
 
 * [Install CMake][]
