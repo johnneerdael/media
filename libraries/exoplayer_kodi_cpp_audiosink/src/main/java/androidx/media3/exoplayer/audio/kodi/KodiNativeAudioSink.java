@@ -17,6 +17,7 @@
 package androidx.media3.exoplayer.audio.kodi;
 
 import android.media.AudioDeviceInfo;
+import android.os.SystemClock;
 import android.util.Log;
 import androidx.annotation.Nullable;
 import androidx.media3.common.AudioAttributes;
@@ -80,6 +81,13 @@ public final class KodiNativeAudioSink extends ForwardingAudioSink
   private boolean playCommandReceived;
   private boolean handledEndOfStream;
   private static final String TAG = "KodiNativeSink";
+  private static final long RETRY_DURATION_MS = 200;
+  private static final long RETRY_DELAY_MS = 50;
+
+  private int pendingWriteErrorCode;
+  private long pendingWriteErrorDeadlineMs;
+  private long pendingWriteEarliestRetryMs;
+  private long pendingReleaseUntilMs;
 
   public KodiNativeAudioSink(AudioSink sink) {
     super(sink);
@@ -89,6 +97,8 @@ public final class KodiNativeAudioSink extends ForwardingAudioSink
     rendererClockUs = C.TIME_UNSET;
     playCommandReceived = false;
     handledEndOfStream = false;
+    clearPendingWriteError();
+    pendingReleaseUntilMs = C.TIME_UNSET;
   }
 
   @Override
@@ -147,22 +157,23 @@ public final class KodiNativeAudioSink extends ForwardingAudioSink
     configuredFormat = inputFormat;
     handledEndOfStream = false;
     ensureSession(inputFormat);
-    boolean configured =
-        nConfigure(
-            nativeHandle,
-            new NativeConfig(
-                inputFormat.sampleMimeType,
-                inputFormat.sampleRate,
-                inputFormat.channelCount,
-                inputFormat.pcmEncoding != Format.NO_VALUE ? inputFormat.pcmEncoding : C.ENCODING_INVALID,
-                resolvePreferredDeviceName(preferredDevice),
-                volume,
-                AmazonQuirks.isFireOsIecSuperviseAudioDelayEnabled(),
-                AudioCapabilities.isFireOsIecVerboseLoggingEnabled()));
+    NativeConfig config =
+        new NativeConfig(
+            inputFormat.sampleMimeType,
+            inputFormat.sampleRate,
+            inputFormat.channelCount,
+            inputFormat.pcmEncoding != Format.NO_VALUE ? inputFormat.pcmEncoding : C.ENCODING_INVALID,
+            resolvePreferredDeviceName(preferredDevice),
+            volume,
+            AmazonQuirks.isFireOsIecSuperviseAudioDelayEnabled(),
+            AudioCapabilities.isFireOsIecVerboseLoggingEnabled());
+    boolean configured = configureWithRetry(config);
     if (!configured) {
       throw new ConfigurationException(
           new IllegalStateException("Failed to configure Kodi native sink session"), inputFormat);
     }
+    clearPendingWriteError();
+    pendingReleaseUntilMs = C.TIME_UNSET;
   }
 
   @Override
@@ -177,6 +188,9 @@ public final class KodiNativeAudioSink extends ForwardingAudioSink
 
     int originalRemaining = buffer.remaining();
     ByteBuffer writeBuffer = buffer.isDirect() ? buffer.slice() : copyToDirectBuffer(buffer);
+    if (pendingWriteErrorCode != 0 && shouldWaitBeforeWriteRetry()) {
+      return false;
+    }
     int bytesConsumed =
         nWrite(
             nativeHandle,
@@ -185,6 +199,8 @@ public final class KodiNativeAudioSink extends ForwardingAudioSink
             writeBuffer.remaining(),
             presentationTimeUs,
             encodedAccessUnitCount);
+    nConsumeLastWriteOutputBytes(nativeHandle);
+    int nativeWriteErrorCode = nConsumeLastWriteErrorCode(nativeHandle);
     if (AudioCapabilities.isFireOsIecVerboseLoggingEnabled()
         && bytesConsumed > 0
         && !playCommandReceived) {
@@ -195,9 +211,16 @@ public final class KodiNativeAudioSink extends ForwardingAudioSink
               + " ptsUs="
               + presentationTimeUs);
     }
+    if (nativeWriteErrorCode < 0 && bytesConsumed <= 0) {
+      maybeHandlePendingWriteError(nativeWriteErrorCode);
+      return false;
+    }
     if (bytesConsumed <= 0) {
       return false;
     }
+    // Match DefaultAudioSink contract: once this call consumed bytes, report
+    // forward progress and do not introduce extra retry gating for the same write.
+    clearPendingWriteError();
     handledEndOfStream = false;
     buffer.position(buffer.position() + Math.min(bytesConsumed, originalRemaining));
     return bytesConsumed >= originalRemaining;
@@ -270,6 +293,8 @@ public final class KodiNativeAudioSink extends ForwardingAudioSink
   public void flush() {
     playCommandReceived = false;
     handledEndOfStream = false;
+    clearPendingWriteError();
+    pendingReleaseUntilMs = SystemClock.elapsedRealtime() + RETRY_DURATION_MS;
     if (AudioCapabilities.isFireOsIecVerboseLoggingEnabled()) {
       Log.i(TAG, "Media3 -> AudioSink flush()");
     }
@@ -282,6 +307,7 @@ public final class KodiNativeAudioSink extends ForwardingAudioSink
   public void reset() {
     playCommandReceived = false;
     handledEndOfStream = false;
+    clearPendingWriteError();
     closeSession(true);
     configuredFormat = null;
     super.reset();
@@ -291,6 +317,7 @@ public final class KodiNativeAudioSink extends ForwardingAudioSink
   public void release() {
     playCommandReceived = false;
     handledEndOfStream = false;
+    clearPendingWriteError();
     closeSession(false);
     configuredFormat = null;
     super.release();
@@ -357,6 +384,96 @@ public final class KodiNativeAudioSink extends ForwardingAudioSink
         || "audio/vnd.dts.uhd;profile=p2".equals(sampleMimeType);
   }
 
+  private boolean configureWithRetry(NativeConfig config) {
+    long startMs = SystemClock.elapsedRealtime();
+    long deadlineMs = startMs + RETRY_DURATION_MS;
+    boolean configured = false;
+    int attempts = 0;
+    while (!configured) {
+      if (isInPendingReleaseWindow()) {
+        try {
+          Thread.sleep(RETRY_DELAY_MS);
+        } catch (InterruptedException e) {
+          Thread.currentThread().interrupt();
+          return false;
+        }
+        continue;
+      }
+      attempts++;
+      configured = nConfigure(nativeHandle, config);
+      if (configured) {
+        pendingReleaseUntilMs = C.TIME_UNSET;
+        return true;
+      }
+      long nowMs = SystemClock.elapsedRealtime();
+      if (nowMs >= deadlineMs) {
+        if (AudioCapabilities.isFireOsIecVerboseLoggingEnabled()) {
+          Log.w(TAG, "nConfigure retry deadline reached attempts=" + attempts);
+        }
+        return false;
+      }
+      if (AudioCapabilities.isFireOsIecVerboseLoggingEnabled()) {
+        Log.w(TAG, "nConfigure failed, retrying attempt=" + attempts);
+      }
+      try {
+        Thread.sleep(RETRY_DELAY_MS);
+      } catch (InterruptedException e) {
+        Thread.currentThread().interrupt();
+        return false;
+      }
+    }
+    return false;
+  }
+
+  private boolean shouldWaitBeforeWriteRetry() {
+    long nowMs = SystemClock.elapsedRealtime();
+    if (isInPendingReleaseWindow()) {
+      return true;
+    }
+    if (pendingWriteErrorDeadlineMs != C.TIME_UNSET && nowMs >= pendingWriteErrorDeadlineMs) {
+      return false;
+    }
+    return pendingWriteEarliestRetryMs != C.TIME_UNSET && nowMs < pendingWriteEarliestRetryMs;
+  }
+
+  private void maybeHandlePendingWriteError(int errorCode) throws WriteException {
+    long nowMs = SystemClock.elapsedRealtime();
+    if (pendingWriteErrorCode == 0) {
+      pendingWriteErrorCode = errorCode;
+      pendingWriteErrorDeadlineMs = isInPendingReleaseWindow() ? C.TIME_UNSET : nowMs + RETRY_DURATION_MS;
+      pendingWriteEarliestRetryMs = nowMs + RETRY_DELAY_MS;
+      if (AudioCapabilities.isFireOsIecVerboseLoggingEnabled()) {
+        Log.w(TAG, "nWrite error=" + errorCode + " scheduling retry window");
+      }
+      return;
+    }
+
+    if (pendingWriteErrorDeadlineMs == C.TIME_UNSET && !isInPendingReleaseWindow()) {
+      pendingWriteErrorDeadlineMs = nowMs + RETRY_DURATION_MS;
+    }
+
+    if (pendingWriteErrorDeadlineMs != C.TIME_UNSET && nowMs >= pendingWriteErrorDeadlineMs) {
+      int finalErrorCode = pendingWriteErrorCode;
+      clearPendingWriteError();
+      throw new WriteException(finalErrorCode, configuredFormat, /* isRecoverable= */ true);
+    }
+
+    pendingWriteEarliestRetryMs = nowMs + RETRY_DELAY_MS;
+  }
+
+  private void clearPendingWriteError() {
+    pendingWriteErrorCode = 0;
+    pendingWriteErrorDeadlineMs = C.TIME_UNSET;
+    pendingWriteEarliestRetryMs = C.TIME_UNSET;
+  }
+
+  private boolean isInPendingReleaseWindow() {
+    if (nativeHandle != 0L && nIsReleasePending(nativeHandle)) {
+      return true;
+    }
+    return pendingReleaseUntilMs != C.TIME_UNSET && SystemClock.elapsedRealtime() < pendingReleaseUntilMs;
+  }
+
   private static native long nCreate();
 
   private static native boolean nConfigure(long nativeHandle, NativeConfig config);
@@ -368,6 +485,12 @@ public final class KodiNativeAudioSink extends ForwardingAudioSink
       int size,
       long presentationTimeUs,
       int encodedAccessUnitCount);
+
+  private static native int nConsumeLastWriteOutputBytes(long nativeHandle);
+
+  private static native int nConsumeLastWriteErrorCode(long nativeHandle);
+
+  private static native boolean nIsReleasePending(long nativeHandle);
 
   private static native void nPlay(long nativeHandle);
 

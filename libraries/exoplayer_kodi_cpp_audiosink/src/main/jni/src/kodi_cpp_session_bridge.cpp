@@ -101,6 +101,33 @@ Java_androidx_media3_exoplayer_audio_kodi_KodiNativeAudioSink_nWrite(
       ->Write(data + offset, size, static_cast<int64_t>(presentation_time_us), encoded_access_unit_count);
 }
 
+extern "C" JNIEXPORT jint JNICALL
+Java_androidx_media3_exoplayer_audio_kodi_KodiNativeAudioSink_nConsumeLastWriteOutputBytes(
+    JNIEnv* env, jclass clazz, jlong native_handle)
+{
+  (void)env;
+  (void)clazz;
+  return static_cast<jint>(AsSession(native_handle)->ConsumeLastWriteOutputBytes());
+}
+
+extern "C" JNIEXPORT jint JNICALL
+Java_androidx_media3_exoplayer_audio_kodi_KodiNativeAudioSink_nConsumeLastWriteErrorCode(
+    JNIEnv* env, jclass clazz, jlong native_handle)
+{
+  (void)env;
+  (void)clazz;
+  return static_cast<jint>(AsSession(native_handle)->ConsumeLastWriteErrorCode());
+}
+
+extern "C" JNIEXPORT jboolean JNICALL
+Java_androidx_media3_exoplayer_audio_kodi_KodiNativeAudioSink_nIsReleasePending(
+    JNIEnv* env, jclass clazz, jlong native_handle)
+{
+  (void)env;
+  (void)clazz;
+  return AsSession(native_handle)->IsReleasePending() ? JNI_TRUE : JNI_FALSE;
+}
+
 extern "C" JNIEXPORT void JNICALL
 Java_androidx_media3_exoplayer_audio_kodi_KodiNativeAudioSink_nPlay(
     JNIEnv* env, jclass clazz, jlong native_handle)
