@@ -30,6 +30,7 @@ void KodiIecPipeline::Configure(const AEAudioFormat& requestedFormat)
   bitstreamPacker_.Reset();
   pendingBurstPtsUs_ = NO_PTS;
   pendingBurstDurationUs_ = 0;
+  pendingBurstInputBytes_ = 0;
 }
 
 void KodiIecPipeline::Reset()
@@ -38,6 +39,7 @@ void KodiIecPipeline::Reset()
   bitstreamPacker_.Reset();
   pendingBurstPtsUs_ = NO_PTS;
   pendingBurstDurationUs_ = 0;
+  pendingBurstInputBytes_ = 0;
 }
 
 int KodiIecPipeline::Feed(const uint8_t* data,
@@ -70,6 +72,7 @@ int KodiIecPipeline::Feed(const uint8_t* data,
       current += consumed;
       remaining -= consumed;
       consumedTotal += consumed;
+      pendingBurstInputBytes_ += consumed;
       currentPtsUs = NO_PTS;
     }
 
@@ -84,6 +87,13 @@ int KodiIecPipeline::Feed(const uint8_t* data,
   }
 
   return consumedTotal;
+}
+
+void KodiIecPipeline::AcknowledgeConsumedInputBytes(int bytes)
+{
+  if (bytes <= 0)
+    return;
+  pendingBurstInputBytes_ = std::max(0, pendingBurstInputBytes_ - bytes);
 }
 
 void KodiIecPipeline::EmitPackedPacket(const uint8_t* auData,
@@ -109,6 +119,7 @@ void KodiIecPipeline::EmitPackedPacket(const uint8_t* auData,
 
   KodiPackedAccessUnit packet;
   packet.bytes.assign(bitstreamPacker_.GetBuffer(), bitstreamPacker_.GetBuffer() + packedSize);
+  packet.inputBytesConsumed = pendingBurstInputBytes_;
   packet.ptsUs = pendingBurstPtsUs_;
   packet.durationUs = pendingBurstDurationUs_ > 0 ? pendingBurstDurationUs_ : auDurationUs;
   packet.outputRate = CAEBitstreamPacker::GetOutputRate(info);
@@ -120,6 +131,7 @@ void KodiIecPipeline::EmitPackedPacket(const uint8_t* auData,
   if (pendingBurstPtsUs_ != NO_PTS && pendingBurstDurationUs_ > 0)
     pendingBurstPtsUs_ += pendingBurstDurationUs_;
   pendingBurstDurationUs_ = 0;
+  pendingBurstInputBytes_ = 0;
 }
 
 }  // namespace androidx_media3

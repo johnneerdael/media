@@ -24,6 +24,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <thread>
 
 namespace androidx_media3
 {
@@ -31,6 +32,19 @@ namespace androidx_media3
 KodiActiveAEEngine::~KodiActiveAEEngine()
 {
   Reset();
+}
+
+void KodiActiveAEEngine::MarkReleasePendingLocked()
+{
+  const int64_t nowUs = std::chrono::duration_cast<std::chrono::microseconds>(
+                            std::chrono::steady_clock::now().time_since_epoch())
+                            .count();
+  releasePendingUntilUs_ = nowUs + RELEASE_PENDING_HOLD_US;
+}
+
+bool KodiActiveAEEngine::IsReleasePendingLocked(int64_t nowUs) const
+{
+  return releasePendingUntilUs_ != CURRENT_POSITION_NOT_SET && nowUs < releasePendingUntilUs_;
 }
 
 bool KodiActiveAEEngine::Configure(const ActiveAE::CActiveAEMediaSettings& config)
@@ -50,10 +64,15 @@ bool KodiActiveAEEngine::Configure(const ActiveAE::CActiveAEMediaSettings& confi
   pcmQueue_.clear();
   queuedDurationUs_ = 0;
   firstQueuedPtsUs_ = NO_PTS;
+  pendingPassthroughAckBytes_ = 0;
   totalWrittenFrames_ = 0;
   iecPipeline_.Configure(requestedFormat_);
   output_.Release();
+  MarkReleasePendingLocked();
   ResetPositionLocked();
+  lastPrePlayAcceptSystemTimeUs_ = CURRENT_POSITION_NOT_SET;
+  lastPrePlayWriteSystemTimeUs_ = CURRENT_POSITION_NOT_SET;
+  startupPhase_ = StartupPhase::IDLE;
 
   CLog::Log(LOGINFO,
             ActiveAE::CActiveAESettings::DescribeMediaSourceConfiguration(config, requestedFormat_));
@@ -69,6 +88,8 @@ int KodiActiveAEEngine::Write(const uint8_t* data,
   if (!configured_ || data == nullptr || size <= 0)
     return 0;
 
+  lastWriteOutputBytes_ = 0;
+  lastWriteErrorCode_ = 0;
   ended_ = false;
   const int consumed =
       passthrough_
@@ -116,73 +137,7 @@ void KodiActiveAEEngine::Play()
             pcmQueue_.size(),
             totalWrittenFrames_,
             GetSafePlayedFramesLocked());
-
-  // Deferred prime: write queued data only after play() is requested.
-  if (passthrough_)
-    FlushPackedQueueToHardwareLocked();
-  else
-    FlushPcmQueueToHardwareLocked();
-
-  bool started = StartOutputIfPrimedLocked();
-
-  // One-shot startup recovery for passthrough invalidation:
-  // if the initial prime/start made no progress and queue data remains, rebuild
-  // output and re-prime before attempting to start again.
-  if (passthrough_ && !started && !packedQueue_.empty() && totalWrittenFrames_ == 0)
-  {
-    CLog::Log(LOGWARNING,
-              "KodiActiveAEEngine::Play startup recovery trigger packedQueue={} totalWrittenFrames={}",
-              packedQueue_.size(),
-              totalWrittenFrames_);
-
-    output_.Release();
-    outputStarted_ = false;
-    EnsurePassthroughOutputConfiguredLocked(packedQueue_.front());
-    ResetPositionLocked();
-
-    const uint64_t recoveryWrittenFramesBefore = totalWrittenFrames_;
-    FlushPackedQueueToHardwareLocked();
-    const uint64_t recoveryWrittenFramesAfter = totalWrittenFrames_;
-    started = StartOutputIfPrimedLocked();
-    CLog::Log(LOGINFO,
-              "KodiActiveAEEngine::Play startup recovery refill wroteFramesDelta={} packedQueue={} started={}",
-              recoveryWrittenFramesAfter >= recoveryWrittenFramesBefore
-                  ? (recoveryWrittenFramesAfter - recoveryWrittenFramesBefore)
-                  : 0,
-              packedQueue_.size(),
-              started ? 1 : 0);
-  }
-
-  // Post-start refill guard: top off once playback has started.
-  if (started)
-  {
-    const uint64_t writtenFramesBeforeRefill = totalWrittenFrames_;
-    const uint64_t playedFramesBeforeRefill = GetSafePlayedFramesLocked();
-    if (passthrough_)
-      FlushPackedQueueToHardwareLocked();
-    else
-      FlushPcmQueueToHardwareLocked();
-    const uint64_t writtenFramesAfterRefill = totalWrittenFrames_;
-    const uint64_t playedFramesAfterRefill = GetSafePlayedFramesLocked();
-    CLog::Log(LOGINFO,
-              "KodiActiveAEEngine::Play startup refill started=true wroteFramesDelta={} "
-              "playedFramesDelta={} packedQueue={} pcmQueue={}",
-              writtenFramesAfterRefill >= writtenFramesBeforeRefill
-                  ? (writtenFramesAfterRefill - writtenFramesBeforeRefill)
-                  : 0,
-              playedFramesAfterRefill >= playedFramesBeforeRefill
-                  ? (playedFramesAfterRefill - playedFramesBeforeRefill)
-                  : 0,
-              packedQueue_.size(),
-              pcmQueue_.size());
-  }
-  else
-  {
-    CLog::Log(LOGINFO,
-              "KodiActiveAEEngine::Play startup refill started=false packedQueue={} pcmQueue={}",
-              packedQueue_.size(),
-              pcmQueue_.size());
-  }
+  StartOutputIfPrimedLocked();
 }
 
 void KodiActiveAEEngine::Pause()
@@ -190,6 +145,8 @@ void KodiActiveAEEngine::Pause()
   std::unique_lock lock(lock_);
   playRequested_ = false;
   outputStarted_ = false;
+  lastPrePlayAcceptSystemTimeUs_ = CURRENT_POSITION_NOT_SET;
+  lastPrePlayWriteSystemTimeUs_ = CURRENT_POSITION_NOT_SET;
   output_.Pause();
   // Pause/resume on direct tracks can return stale timestamps; clear estimator
   // state so next position samples rebuild from fresh data.
@@ -205,12 +162,17 @@ void KodiActiveAEEngine::Flush()
   pcmQueue_.clear();
   queuedDurationUs_ = 0;
   firstQueuedPtsUs_ = NO_PTS;
+  pendingPassthroughAckBytes_ = 0;
   hasPendingData_ = false;
   ended_ = false;
   iecPipeline_.Reset();
   // Align stock DefaultAudioSink compatibility behavior: release on every flush.
   output_.Release();
+  MarkReleasePendingLocked();
   ResetPositionLocked();
+  lastPrePlayAcceptSystemTimeUs_ = CURRENT_POSITION_NOT_SET;
+  lastPrePlayWriteSystemTimeUs_ = CURRENT_POSITION_NOT_SET;
+  startupPhase_ = StartupPhase::IDLE;
 }
 
 void KodiActiveAEEngine::Drain()
@@ -236,6 +198,7 @@ void KodiActiveAEEngine::HandleDiscontinuity()
   pendingSyncPtsUs_ = NO_PTS;
   nextExpectedPtsValid_ = false;
   nextExpectedPtsUs_ = 0;
+  pendingPassthroughAckBytes_ = 0;
 }
 
 void KodiActiveAEEngine::SetVolume(float volume)
@@ -314,6 +277,31 @@ int64_t KodiActiveAEEngine::GetBufferSizeUs() const
   return static_cast<int64_t>(frames) * 1000000LL / output_.SampleRate();
 }
 
+int KodiActiveAEEngine::ConsumeLastWriteOutputBytes()
+{
+  std::unique_lock lock(lock_);
+  const int value = lastWriteOutputBytes_;
+  lastWriteOutputBytes_ = 0;
+  return value;
+}
+
+int KodiActiveAEEngine::ConsumeLastWriteErrorCode()
+{
+  std::unique_lock lock(lock_);
+  const int value = lastWriteErrorCode_;
+  lastWriteErrorCode_ = 0;
+  return value;
+}
+
+bool KodiActiveAEEngine::IsReleasePending()
+{
+  std::unique_lock lock(lock_);
+  const int64_t nowUs = std::chrono::duration_cast<std::chrono::microseconds>(
+                            std::chrono::steady_clock::now().time_since_epoch())
+                            .count();
+  return IsReleasePendingLocked(nowUs);
+}
+
 void KodiActiveAEEngine::Reset()
 {
   std::unique_lock lock(lock_);
@@ -323,13 +311,20 @@ void KodiActiveAEEngine::Reset()
   passthrough_ = false;
   ended_ = false;
   hasPendingData_ = false;
+  lastWriteOutputBytes_ = 0;
+  lastWriteErrorCode_ = 0;
   packedQueue_.clear();
   pcmQueue_.clear();
   queuedDurationUs_ = 0;
   firstQueuedPtsUs_ = NO_PTS;
+  pendingPassthroughAckBytes_ = 0;
   iecPipeline_.Reset();
   output_.Release();
+  MarkReleasePendingLocked();
   ResetPositionLocked();
+  lastPrePlayAcceptSystemTimeUs_ = CURRENT_POSITION_NOT_SET;
+  lastPrePlayWriteSystemTimeUs_ = CURRENT_POSITION_NOT_SET;
+  startupPhase_ = StartupPhase::IDLE;
 }
 
 int KodiActiveAEEngine::WritePassthroughLocked(const uint8_t* data,
@@ -351,30 +346,33 @@ int KodiActiveAEEngine::WritePassthroughLocked(const uint8_t* data,
       break;
 
     FlushPackedQueueToHardwareLocked();
-    // Backpressure is strictly output-progress driven: while previously packed bytes
-    // are not fully accepted by AudioTrack, don't consume additional upstream input.
+    if (pendingPassthroughAckBytes_ > 0)
+    {
+      const int acknowledgedBytes = std::min(remaining, pendingPassthroughAckBytes_);
+      pendingPassthroughAckBytes_ -= acknowledgedBytes;
+      consumedTotal += acknowledgedBytes;
+      cursor += acknowledgedBytes;
+      remaining -= acknowledgedBytes;
+      if (remainingAccessUnits > 1)
+        --remainingAccessUnits;
+      currentPtsUs = NO_PTS;
+      continue;
+    }
+
+    // Stock-like write-progress backpressure: if previously packed bytes are still
+    // pending (i.e. no write progress), do not consume additional upstream input.
     if (!packedQueue_.empty())
     {
-      if (playRequested_)
+      if (config_.iecVerboseLogging && !playRequested_)
       {
-        break;
+        CLog::Log(LOGINFO,
+                  "KodiActiveAEEngine::WritePassthroughLocked paused backpressure packedQueue={} "
+                  "queuedDurationUs={} queuedBytes={}",
+                  packedQueue_.size(),
+                  QueueDurationUsLocked(),
+                  QueueBytesLocked());
       }
-      // While paused, cap pre-roll to physical output capacity so Media3 receives
-      // truthful backpressure and keeps waking frequently enough to feed startup.
-      int64_t hardwareCapacityUs = 21000;
-      if (output_.IsConfigured() && output_.SampleRate() > 0)
-      {
-        const int bufferFrames = std::max(0, output_.GetBufferSizeInFrames());
-        if (bufferFrames > 0)
-        {
-          hardwareCapacityUs =
-              static_cast<int64_t>((static_cast<uint64_t>(bufferFrames) * 1000000ULL) /
-                                   std::max(1u, output_.SampleRate()));
-        }
-      }
-      queuedDurationUs_ = QueueDurationUsLocked();
-      if (queuedDurationUs_ >= hardwareCapacityUs)
-        break;
+      break;
     }
 
     const int chunkBytes = std::max(1, remaining / remainingAccessUnits);
@@ -385,19 +383,23 @@ int KodiActiveAEEngine::WritePassthroughLocked(const uint8_t* data,
     if (consumed <= 0)
       break;
 
-    consumedTotal += consumed;
-    cursor += consumed;
-    remaining -= consumed;
-    if (remainingAccessUnits > 1)
-      --remainingAccessUnits;
-    currentPtsUs = NO_PTS;
-
     if (packedQueue_.size() > queueSizeBeforeFeed)
     {
       if (!output_.IsConfigured())
         EnsurePassthroughOutputConfiguredLocked(packedQueue_.front());
       FlushPackedQueueToHardwareLocked();
       StartOutputIfPrimedLocked();
+      if (pendingPassthroughAckBytes_ > 0)
+      {
+        const int acknowledgedBytes = std::min(consumed, pendingPassthroughAckBytes_);
+        pendingPassthroughAckBytes_ -= acknowledgedBytes;
+        consumedTotal += acknowledgedBytes;
+        cursor += acknowledgedBytes;
+        remaining -= acknowledgedBytes;
+        if (remainingAccessUnits > 1)
+          --remainingAccessUnits;
+        currentPtsUs = NO_PTS;
+      }
       if (!packedQueue_.empty())
         break;
     }
@@ -406,7 +408,24 @@ int KodiActiveAEEngine::WritePassthroughLocked(const uint8_t* data,
       // Parser accepted bytes into internal backlog but did not emit a packet yet.
       // Stop here to force upstream re-entry rather than over-consuming while no
       // output write progress has occurred.
+      iecPipeline_.AcknowledgeConsumedInputBytes(consumed);
+      consumedTotal += consumed;
+      cursor += consumed;
+      remaining -= consumed;
+      if (remainingAccessUnits > 1)
+        --remainingAccessUnits;
+      currentPtsUs = NO_PTS;
       break;
+    }
+    else
+    {
+      iecPipeline_.AcknowledgeConsumedInputBytes(consumed);
+      consumedTotal += consumed;
+      cursor += consumed;
+      remaining -= consumed;
+      if (remainingAccessUnits > 1)
+        --remainingAccessUnits;
+      currentPtsUs = NO_PTS;
     }
 
     if (firstQueuedPtsUs_ == NO_PTS && ptsUs != NO_PTS)
@@ -435,25 +454,21 @@ int KodiActiveAEEngine::WritePcmLocked(const uint8_t* data, int size, int64_t pt
   if (startMediaTimeUsNeedsSync_ && !TryResolvePendingDiscontinuityLocked())
     return 0;
 
-  // Headroom-bounded direct write, even while paused.
-  const int frameSizeBytes = std::max(1u, output_.FrameSizeBytes());
-  const int bufferFrames = std::max(0, output_.GetBufferSizeInFrames());
-  const uint64_t playedFrames = GetSafePlayedFramesLocked();
-  const uint64_t pendingFrames = totalWrittenFrames_ > playedFrames ? (totalWrittenFrames_ - playedFrames) : 0;
-  if (static_cast<uint64_t>(bufferFrames) <= pendingFrames)
-    return 0;
-
-  const int64_t writableBytes =
-      static_cast<int64_t>((static_cast<uint64_t>(bufferFrames) - pendingFrames) * frameSizeBytes);
-  const int chunkBytes = static_cast<int>(std::min<int64_t>(bytesToWrite, writableBytes));
-  if (chunkBytes <= 0)
-    return 0;
-
-  int written = output_.WriteNonBlocking(data, chunkBytes);
+  // Unified stock-like behavior: let AudioTrack.write(WRITE_NON_BLOCKING)
+  // dictate write progress instead of pre-computed pending-frame clamps.
+  int written = output_.WriteNonBlocking(data, bytesToWrite);
   if (written > 0)
   {
+    lastWriteOutputBytes_ += written;
     OnBytesWrittenLocked(ptsUs, written, output_.SampleRate(), output_.FrameSizeBytes());
     StartOutputIfPrimedLocked();
+  }
+  else if (written < 0)
+  {
+    lastWriteErrorCode_ = written;
+    InvalidateCurrentOutputLocked();
+    output_.Release();
+    MarkReleasePendingLocked();
   }
   return std::max(0, written);
 }
@@ -464,13 +479,45 @@ void KodiActiveAEEngine::EnsurePassthroughOutputConfiguredLocked(const KodiPacke
       output_.ChannelCount() == packet.outputChannels)
     return;
 
+  InvalidateCurrentOutputLocked();
   output_.Release();
-  output_.Configure(packet.outputRate,
-                    packet.outputChannels,
-                    CJNIAudioFormat::ENCODING_IEC61937,
-                    true);
-  if (playRequested_ && outputStarted_)
-    output_.Play();
+  MarkReleasePendingLocked();
+  bool configured = false;
+  for (int attempt = 1; attempt <= PASSTHROUGH_CONFIG_RETRY_ATTEMPTS && !configured; ++attempt)
+  {
+    configured = output_.Configure(packet.outputRate,
+                                   packet.outputChannels,
+                                   CJNIAudioFormat::ENCODING_IEC61937,
+                                   true);
+    if (configured)
+      break;
+
+    if (config_.iecVerboseLogging)
+    {
+      CLog::Log(LOGWARNING,
+                "KodiActiveAEEngine::EnsurePassthroughOutputConfiguredLocked configure retry "
+                "attempt={} sampleRate={} channels={}",
+                attempt,
+                packet.outputRate,
+                packet.outputChannels);
+    }
+    if (attempt < PASSTHROUGH_CONFIG_RETRY_ATTEMPTS)
+    {
+      std::this_thread::sleep_for(
+          std::chrono::milliseconds(PASSTHROUGH_CONFIG_RETRY_DELAY_MS));
+    }
+  }
+  if (!configured)
+    return;
+
+  releasePendingUntilUs_ = CURRENT_POSITION_NOT_SET;
+  if (playRequested_ && outputStarted_ && !output_.Play())
+  {
+    outputStarted_ = false;
+    CLog::Log(LOGWARNING,
+              "KodiActiveAEEngine::EnsurePassthroughOutputConfiguredLocked failed to enter "
+              "PLAYING state after reconfigure");
+  }
   lastStablePlayedFrames_ = 0;
   UpdateTimestampStateLocked(TimestampState::INITIALIZING,
                              std::chrono::duration_cast<std::chrono::microseconds>(
@@ -489,7 +536,10 @@ bool KodiActiveAEEngine::EnsurePcmOutputConfiguredLocked()
   if (encoding <= 0)
     encoding = requestedFormat_.m_dataFormat == AE_FMT_FLOAT ? CJNIAudioFormat::ENCODING_PCM_FLOAT
                                                              : CJNIAudioFormat::ENCODING_PCM_16BIT;
-  return output_.Configure(requestedFormat_.m_sampleRate, channels, encoding, false);
+  const bool configured = output_.Configure(requestedFormat_.m_sampleRate, channels, encoding, false);
+  if (configured)
+    releasePendingUntilUs_ = CURRENT_POSITION_NOT_SET;
+  return configured;
 }
 
 int KodiActiveAEEngine::FlushPackedQueueToHardwareLocked()
@@ -501,21 +551,12 @@ int KodiActiveAEEngine::FlushPackedQueueToHardwareLocked()
     EnsurePassthroughOutputConfiguredLocked(packedQueue_.front());
   if (!output_.IsConfigured())
     return 0;
-  // Deferred priming for passthrough startup: keep queued data in C++ until play().
-  if (passthrough_ && !playRequested_)
-    return 0;
-
-  const int frameSizeBytes = std::max(1u, output_.FrameSizeBytes());
-  const int bufferFrames = std::max(0, output_.GetBufferSizeInFrames());
-  const uint64_t playedFrames = GetSafePlayedFramesLocked();
-  const uint64_t pendingFrames = totalWrittenFrames_ > playedFrames ? (totalWrittenFrames_ - playedFrames) : 0;
-  if (static_cast<uint64_t>(bufferFrames) <= pendingFrames)
-    return 0;
-
-  int64_t writableBytes =
-      static_cast<int64_t>((static_cast<uint64_t>(bufferFrames) - pendingFrames) * frameSizeBytes);
   int totalConsumedPackets = 0;
-  while (writableBytes > 0 && !packedQueue_.empty())
+  int totalWriteCalls = 0;
+  int totalWriteAttempts = 0;
+  int totalBytesWritten = 0;
+  int lastWriteResult = 0;
+  while (!packedQueue_.empty() && totalWriteCalls < MAX_WRITE_CALLS_PER_FLUSH)
   {
     KodiPackedAccessUnit& packet = packedQueue_.front();
 
@@ -527,25 +568,52 @@ int KodiActiveAEEngine::FlushPackedQueueToHardwareLocked()
       continue;
     }
 
-    const int chunkBytes = static_cast<int>(std::min<int64_t>(remaining, writableBytes));
-    if (chunkBytes <= 0)
-      break;
-
-    const int written =
-        output_.WriteNonBlocking(packet.bytes.data() + packet.writeOffset, chunkBytes);
+    ++totalWriteAttempts;
+    const int written = output_.WriteNonBlocking(packet.bytes.data() + packet.writeOffset, remaining);
+    lastWriteResult = written;
     if (written <= 0)
+    {
+      if (written < 0)
+      {
+        lastWriteErrorCode_ = written;
+        InvalidateCurrentOutputLocked();
+        output_.Release();
+        MarkReleasePendingLocked();
+      }
       break;
+    }
 
-    OnBytesWrittenLocked(packet.ptsUs, written, output_.SampleRate(), output_.FrameSizeBytes());
+    ++totalWriteCalls;
+    totalBytesWritten += written;
+    lastWriteOutputBytes_ += written;
     packet.writeOffset += static_cast<size_t>(written);
-    writableBytes -= written;
     if (packet.writeOffset >= packet.bytes.size())
     {
+      // Stock AudioTrackAudioOutput only advances non-PCM written-frame accounting once the
+      // whole encoded access unit has been submitted.
+      pendingPassthroughAckBytes_ += std::max(0, packet.inputBytesConsumed);
+      OnBytesWrittenLocked(packet.ptsUs,
+                           static_cast<int>(packet.bytes.size()),
+                           output_.SampleRate(),
+                           output_.FrameSizeBytes());
       packedQueue_.pop_front();
       ++totalConsumedPackets;
     }
   }
   queuedDurationUs_ = QueueDurationUsLocked();
+  if (totalWriteAttempts > 0 && config_.iecVerboseLogging)
+  {
+    CLog::Log(LOGINFO,
+              "KodiActiveAEEngine::FlushPackedQueueToHardwareLocked phase={} attempts={} "
+              "writes={} bytesWritten={} lastWriteResult={} packedQueue={} queuedDurationUs={}",
+              StartupPhaseToString(startupPhase_),
+              totalWriteAttempts,
+              totalWriteCalls,
+              totalBytesWritten,
+              lastWriteResult,
+              packedQueue_.size(),
+              queuedDurationUs_);
+  }
   if (packedQueue_.empty() && pcmQueue_.empty())
     firstQueuedPtsUs_ = NO_PTS;
   return totalConsumedPackets;
@@ -557,17 +625,11 @@ int KodiActiveAEEngine::FlushPcmQueueToHardwareLocked()
     return 0;
   if (!EnsurePcmOutputConfiguredLocked())
     return 0;
-  const int frameSizeBytes = std::max(1u, output_.FrameSizeBytes());
-  const int bufferFrames = std::max(0, output_.GetBufferSizeInFrames());
-  const uint64_t playedFrames = GetSafePlayedFramesLocked();
-  const uint64_t pendingFrames = totalWrittenFrames_ > playedFrames ? (totalWrittenFrames_ - playedFrames) : 0;
-  if (static_cast<uint64_t>(bufferFrames) <= pendingFrames)
-    return 0;
-
-  int64_t writableBytes =
-      static_cast<int64_t>((static_cast<uint64_t>(bufferFrames) - pendingFrames) * frameSizeBytes);
   int totalConsumedBytes = 0;
-  while (writableBytes > 0 && !pcmQueue_.empty())
+  int totalWriteCalls = 0;
+  int totalWriteAttempts = 0;
+  int lastWriteResult = 0;
+  while (!pcmQueue_.empty() && totalWriteCalls < MAX_WRITE_CALLS_PER_FLUSH)
   {
     PendingPcmChunk& chunk = pcmQueue_.front();
     const int remaining = static_cast<int>(chunk.bytes.size());
@@ -577,17 +639,25 @@ int KodiActiveAEEngine::FlushPcmQueueToHardwareLocked()
       continue;
     }
 
-    const int chunkBytes = static_cast<int>(std::min<int64_t>(remaining, writableBytes));
-    if (chunkBytes <= 0)
-      break;
-
-    const int written = output_.WriteNonBlocking(chunk.bytes.data(), chunkBytes);
+    ++totalWriteAttempts;
+    const int written = output_.WriteNonBlocking(chunk.bytes.data(), remaining);
+    lastWriteResult = written;
     if (written <= 0)
+    {
+      if (written < 0)
+      {
+        lastWriteErrorCode_ = written;
+        InvalidateCurrentOutputLocked();
+        output_.Release();
+        MarkReleasePendingLocked();
+      }
       break;
+    }
 
+    ++totalWriteCalls;
+    lastWriteOutputBytes_ += written;
     OnBytesWrittenLocked(chunk.ptsUs, written, output_.SampleRate(), output_.FrameSizeBytes());
     totalConsumedBytes += written;
-    writableBytes -= written;
     if (written >= remaining)
     {
       pcmQueue_.pop_front();
@@ -599,6 +669,19 @@ int KodiActiveAEEngine::FlushPcmQueueToHardwareLocked()
     }
   }
   queuedDurationUs_ = QueueDurationUsLocked();
+  if (totalWriteAttempts > 0 && config_.iecVerboseLogging)
+  {
+    CLog::Log(LOGINFO,
+              "KodiActiveAEEngine::FlushPcmQueueToHardwareLocked phase={} attempts={} "
+              "writes={} bytesWritten={} lastWriteResult={} pcmQueue={} queuedDurationUs={}",
+              StartupPhaseToString(startupPhase_),
+              totalWriteAttempts,
+              totalWriteCalls,
+              totalConsumedBytes,
+              lastWriteResult,
+              pcmQueue_.size(),
+              queuedDurationUs_);
+  }
   if (packedQueue_.empty() && pcmQueue_.empty())
     firstQueuedPtsUs_ = NO_PTS;
   return totalConsumedBytes;
@@ -910,6 +993,18 @@ int64_t KodiActiveAEEngine::QueueDurationUsLocked() const
   return total;
 }
 
+uint64_t KodiActiveAEEngine::QueueBytesLocked() const
+{
+  uint64_t total = 0;
+  for (const auto& packet : packedQueue_)
+  {
+    const size_t totalBytes = packet.bytes.size();
+    const size_t writtenBytes = std::min(packet.writeOffset, totalBytes);
+    total += static_cast<uint64_t>(totalBytes - writtenBytes);
+  }
+  return total;
+}
+
 void KodiActiveAEEngine::UpdateExpectedPtsLocked(int64_t packetPtsUs, int64_t packetDurationUs)
 {
   if (packetPtsUs == NO_PTS)
@@ -987,13 +1082,62 @@ bool KodiActiveAEEngine::StartOutputIfPrimedLocked()
                              std::chrono::duration_cast<std::chrono::microseconds>(
                                  std::chrono::steady_clock::now().time_since_epoch())
                                  .count());
+  if (!output_.Play())
+  {
+    CLog::Log(LOGWARNING,
+              "KodiActiveAEEngine::StartOutputIfPrimedLocked failed to enter PLAYING state "
+              "totalWrittenFrames={} safePlayedFrames={}",
+              totalWrittenFrames_,
+              playedFrames);
+    return false;
+  }
   systemTimeAtPlayUs_ = std::chrono::duration_cast<std::chrono::microseconds>(
                             std::chrono::steady_clock::now().time_since_epoch())
                             .count();
   framesAtPlay_ = std::min(output_.GetPlaybackFrames64(), totalWrittenFrames_);
-  output_.Play();
   outputStarted_ = true;
+  SetStartupPhaseLocked(StartupPhase::STARTED);
   return true;
+}
+
+void KodiActiveAEEngine::SetStartupPhaseLocked(StartupPhase phase)
+{
+  if (startupPhase_ == phase)
+    return;
+  startupPhase_ = phase;
+  if (config_.iecVerboseLogging)
+  {
+    CLog::Log(LOGINFO,
+              "KodiActiveAEEngine::Startup phase={} packedQueue={} pcmQueue={} totalWrittenFrames={} "
+              "safePlayedFrames={}",
+              StartupPhaseToString(phase),
+              packedQueue_.size(),
+              pcmQueue_.size(),
+              totalWrittenFrames_,
+              GetSafePlayedFramesLocked());
+  }
+}
+
+const char* KodiActiveAEEngine::StartupPhaseToString(StartupPhase phase) const
+{
+  switch (phase)
+  {
+    case StartupPhase::IDLE:
+      return "IDLE";
+    case StartupPhase::PREPARED:
+      return "PREPARED";
+    case StartupPhase::PRIME_ATTEMPTED:
+      return "PRIME_ATTEMPTED";
+    case StartupPhase::STARTED:
+      return "STARTED";
+    case StartupPhase::POST_START_REFILL:
+      return "POST_START_REFILL";
+    case StartupPhase::RUNNING:
+      return "RUNNING";
+    case StartupPhase::RECOVERY_RECREATE:
+      return "RECOVERY_RECREATE";
+  }
+  return "UNKNOWN";
 }
 
 void KodiActiveAEEngine::UpdateTimestampStateLocked(TimestampState state, int64_t systemTimeUs)
@@ -1069,12 +1213,23 @@ void KodiActiveAEEngine::ResetPositionLocked()
   pendingSyncPtsUs_ = NO_PTS;
   skippedOutputFrameCount_ = 0;
   skippedOutputFrameCountAtLastPosition_ = 0;
+  lastWriteOutputBytes_ = 0;
+  lastWriteErrorCode_ = 0;
   mediaPositionParameters_ = {hostClockSpeed_, 0, 0, 0};
   mediaPositionParametersCheckpoints_.clear();
   lastPrePlayAcceptSystemTimeUs_ = CURRENT_POSITION_NOT_SET;
   lastPrePlayWriteSystemTimeUs_ = CURRENT_POSITION_NOT_SET;
   lastStablePlayedFrames_ = 0;
   ResetOutputPositionEstimatorLocked();
+}
+
+void KodiActiveAEEngine::InvalidateCurrentOutputLocked()
+{
+  outputStarted_ = false;
+  pendingPassthroughAckBytes_ = 0;
+  for (auto& packet : packedQueue_)
+    packet.writeOffset = 0;
+  ResetPositionLocked();
 }
 
 void KodiActiveAEEngine::ResetOutputPositionEstimatorLocked()

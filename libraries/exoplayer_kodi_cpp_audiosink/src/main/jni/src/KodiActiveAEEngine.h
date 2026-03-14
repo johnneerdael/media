@@ -52,6 +52,9 @@ public:
   bool HasPendingData();
   bool IsEnded();
   int64_t GetBufferSizeUs() const;
+  int ConsumeLastWriteOutputBytes();
+  int ConsumeLastWriteErrorCode();
+  bool IsReleasePending();
   void Reset();
 
 private:
@@ -69,6 +72,21 @@ private:
   static constexpr int64_t MAX_RESUME_TIMESTAMP_DRIFT_US = 200000;
   static constexpr int MAX_POSITION_SMOOTHING_SPEED_CHANGE_PERCENT = 10;
   static constexpr int64_t DISCONTINUITY_THRESHOLD_US = 200000;
+  static constexpr int MAX_WRITE_CALLS_PER_FLUSH = 256;
+  static constexpr int PASSTHROUGH_CONFIG_RETRY_ATTEMPTS = 6;
+  static constexpr int PASSTHROUGH_CONFIG_RETRY_DELAY_MS = 20;
+  static constexpr int64_t RELEASE_PENDING_HOLD_US = 200000;
+
+  enum class StartupPhase
+  {
+    IDLE,
+    PREPARED,
+    PRIME_ATTEMPTED,
+    STARTED,
+    POST_START_REFILL,
+    RUNNING,
+    RECOVERY_RECREATE
+  };
   enum class TimestampState
   {
     INITIALIZING,
@@ -111,16 +129,22 @@ private:
   int64_t GetWrittenAudioOutputPositionUsLocked() const;
   uint64_t GetSafePlayedFramesLocked();
   void UpdateTimestampStateLocked(TimestampState state, int64_t systemTimeUs);
+  void SetStartupPhaseLocked(StartupPhase phase);
+  const char* StartupPhaseToString(StartupPhase phase) const;
   bool IsTimestampAdvancingFromInitialLocked(uint64_t tsFrames,
                                              int64_t tsSystemTimeUs,
                                              int64_t systemTimeUs,
                                              int64_t playbackHeadEstimateUs) const;
   int64_t QueueDurationUsLocked() const;
+  uint64_t QueueBytesLocked() const;
   void UpdateExpectedPtsLocked(int64_t packetPtsUs, int64_t packetDurationUs);
   bool TryResolvePendingDiscontinuityLocked();
   void ReanchorForDiscontinuityLocked(int64_t packetPtsUs);
   void ResetOutputPositionEstimatorLocked();
   void ResetPositionLocked();
+  void InvalidateCurrentOutputLocked();
+  void MarkReleasePendingLocked();
+  bool IsReleasePendingLocked(int64_t nowUs) const;
 
   mutable CCriticalSection lock_;
   ActiveAE::CActiveAEMediaSettings config_{};
@@ -137,6 +161,7 @@ private:
   std::deque<PendingPcmChunk> pcmQueue_;
   int64_t queuedDurationUs_{0};
   int64_t firstQueuedPtsUs_{NO_PTS};
+  int pendingPassthroughAckBytes_{0};
 
   uint64_t totalWrittenFrames_{0};
   bool anchorValid_{false};
@@ -150,6 +175,9 @@ private:
   double hostClockSpeed_{1.0};
   float volume_{1.0f};
   bool hasPendingData_{false};
+  int lastWriteOutputBytes_{0};
+  int lastWriteErrorCode_{0};
+  int64_t releasePendingUntilUs_{CURRENT_POSITION_NOT_SET};
 
   std::array<int64_t, 10> playheadOffsetsUs_{};
   int playheadOffsetCount_{0};
@@ -180,6 +208,7 @@ private:
   int64_t nextExpectedPtsUs_{0};
   bool startMediaTimeUsNeedsSync_{false};
   int64_t pendingSyncPtsUs_{NO_PTS};
+  StartupPhase startupPhase_{StartupPhase::IDLE};
 };
 
 }  // namespace androidx_media3

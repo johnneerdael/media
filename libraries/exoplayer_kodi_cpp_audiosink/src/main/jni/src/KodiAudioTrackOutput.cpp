@@ -97,10 +97,14 @@ bool KodiAudioTrackOutput::Configure(unsigned int sampleRate,
   return true;
 }
 
-void KodiAudioTrackOutput::Play()
+bool KodiAudioTrackOutput::Play()
 {
-  if (track_)
-    track_->play();
+  if (!track_)
+    return false;
+
+  track_->play();
+  return track_->getState() == CJNIAudioTrack::STATE_INITIALIZED &&
+         track_->getPlayState() == CJNIAudioTrack::PLAYSTATE_PLAYING;
 }
 
 void KodiAudioTrackOutput::Pause()
@@ -184,6 +188,11 @@ int KodiAudioTrackOutput::GetBufferSizeInFrames() const
   if (!track_)
     return 0;
   return track_->getBufferSizeInFrames();
+}
+
+bool KodiAudioTrackOutput::IsPlaying() const
+{
+  return track_ != nullptr && track_->getPlayState() == CJNIAudioTrack::PLAYSTATE_PLAYING;
 }
 
 }  // namespace androidx_media3

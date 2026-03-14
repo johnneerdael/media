@@ -36,7 +36,7 @@ public:
                  unsigned int channelCount,
                  int encoding,
                  bool passthrough);
-  void Play();
+  bool Play();
   void Pause();
   void Flush();
   void Release();
@@ -44,6 +44,7 @@ public:
   uint64_t GetPlaybackFrames64();
   bool GetTimestamp(uint64_t* framePosition, int64_t* systemTimeUs);
   int GetBufferSizeInFrames() const;
+  bool IsPlaying() const;
   bool IsConfigured() const { return track_ != nullptr; }
   unsigned int SampleRate() const { return sampleRate_; }
   unsigned int ChannelCount() const { return channelCount_; }

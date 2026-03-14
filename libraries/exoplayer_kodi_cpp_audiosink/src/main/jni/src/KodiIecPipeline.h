@@ -32,6 +32,7 @@ struct KodiPackedAccessUnit
 {
   std::vector<uint8_t> bytes;
   size_t writeOffset{0};
+  int inputBytesConsumed{0};
   int64_t ptsUs{std::numeric_limits<int64_t>::min()};
   int64_t durationUs{0};
   unsigned int outputRate{48000};
@@ -52,6 +53,7 @@ public:
            std::deque<KodiPackedAccessUnit>& outPackets,
            int maxPackets = std::numeric_limits<int>::max());
   bool HasParserBacklog() const { return streamAdapter_.HasBacklog(); }
+  void AcknowledgeConsumedInputBytes(int bytes);
 
 private:
   static constexpr int64_t NO_PTS = std::numeric_limits<int64_t>::min();
@@ -67,6 +69,7 @@ private:
 
   int64_t pendingBurstPtsUs_{NO_PTS};
   int64_t pendingBurstDurationUs_{0};
+  int pendingBurstInputBytes_{0};
 };
 
 }  // namespace androidx_media3
