@@ -91,6 +91,7 @@ bool KodiAudioTrackOutput::Configure(unsigned int sampleRate,
   sampleRate_ = safeSampleRate;
   channelCount_ = safeChannels;
   encoding_ = safeEncoding;
+  passthroughIec_ = passthrough;
   frameSizeBytes_ = safeChannels * (safeEncoding == CJNIAudioFormat::ENCODING_PCM_FLOAT ? 4 : 2);
   lastPlaybackHead32_ = 0;
   playbackWrapCount_ = 0;
@@ -134,15 +135,30 @@ void KodiAudioTrackOutput::Release()
   channelCount_ = 0;
   frameSizeBytes_ = 0;
   encoding_ = CJNIAudioFormat::ENCODING_PCM_16BIT;
+  passthroughIec_ = false;
   lastPlaybackHead32_ = 0;
   playbackWrapCount_ = 0;
   writeBuffer_.clear();
+  writeShortBuffer_.clear();
 }
 
 int KodiAudioTrackOutput::WriteNonBlocking(const uint8_t* data, int size)
 {
   if (!track_ || data == nullptr || size <= 0)
     return 0;
+
+  if (passthroughIec_)
+  {
+    const int sampleCount = size / static_cast<int>(sizeof(int16_t));
+    if (sampleCount <= 0)
+      return 0;
+    if (static_cast<int>(writeShortBuffer_.size()) < sampleCount)
+      writeShortBuffer_.resize(sampleCount);
+    std::memcpy(writeShortBuffer_.data(), data, static_cast<size_t>(sampleCount) * sizeof(int16_t));
+    const int writtenSamples =
+        track_->write(writeShortBuffer_, 0, sampleCount, CJNIAudioTrack::WRITE_NON_BLOCKING);
+    return writtenSamples > 0 ? writtenSamples * static_cast<int>(sizeof(int16_t)) : writtenSamples;
+  }
 
   if (static_cast<int>(writeBuffer_.size()) < size)
     writeBuffer_.resize(size);

@@ -22,6 +22,7 @@ extern "C" {
 }
 
 # define LOGD(...)  __android_log_print(ANDROID_LOG_DEBUG, LOG_TAG, __VA_ARGS__)
+# define LOGI(...)  __android_log_print(ANDROID_LOG_INFO, LOG_TAG, __VA_ARGS__)
 
 // Output format corresponding to AudioFormat.ENCODING_PCM_16BIT.
 static const AVSampleFormat OUTPUT_FORMAT_PCM_16BIT = AV_SAMPLE_FMT_S16;
@@ -32,6 +33,16 @@ static const int AUDIO_DECODER_ERROR_INVALID_DATA = -1;
 static const int AUDIO_DECODER_ERROR_OTHER = -2;
 
 static jmethodID growOutputBufferMethod;
+struct GrowOutputBufferCallback;
+
+struct AudioDecoderContext {
+    AVCodecContext *codecContext;
+    AVCodecParserContext *parserContext;
+    SwrContext *resampleContext;
+    AVChannelLayout resampleInChLayout;
+    int resampleInSampleRate;
+    AVSampleFormat resampleInSampleFormat;
+};
 
 
 /**
@@ -39,17 +50,17 @@ static jmethodID growOutputBufferMethod;
  * provided extraData as initialization data for the decoder if it is non-NULL.
  * Returns the created context.
  */
-AVCodecContext *createContext(JNIEnv *env, AVCodec *codec, jbyteArray extraData,
-                              jboolean outputFloat, jint rawSampleRate,
-                              jint rawChannelCount);
+AudioDecoderContext *createContext(JNIEnv *env, AVCodec *codec, jbyteArray extraData,
+                                   jboolean outputFloat, jint rawSampleRate,
+                                   jint rawChannelCount);
 
 /**
  * Decodes the packet into the output buffer, returning the number of bytes
  * written, or a negative AUDIO_DECODER_ERROR constant value in the case of an
  * error.
  */
-int decodePacket(AVCodecContext *context, AVPacket *packet,
-                 uint8_t *outputBuffer, int outputSize);
+int decodePacket(AudioDecoderContext *decoderContext, uint8_t *inputBuffer, int inputSize,
+                 uint8_t *outputBuffer, int outputSize, GrowOutputBufferCallback growBuffer);
 
 /**
  * Transforms ffmpeg AVERROR into a negative AUDIO_DECODER_ERROR constant value.
@@ -74,9 +85,9 @@ uint8_t *GrowOutputBufferCallback::operator()(int requiredSize) const {
     return static_cast<uint8_t *>(env->GetDirectBufferAddress(newOutputData));
 }
 
-AVCodecContext *createContext(JNIEnv *env, AVCodec *codec, jbyteArray extraData,
-                              jboolean outputFloat, jint rawSampleRate,
-                              jint rawChannelCount) {
+AudioDecoderContext *createContext(JNIEnv *env, AVCodec *codec, jbyteArray extraData,
+                                   jboolean outputFloat, jint rawSampleRate,
+                                   jint rawChannelCount) {
     AVCodecContext *context = avcodec_alloc_context3(codec);
     if (!context) {
         LOGE("Failed to allocate context.");
@@ -109,21 +120,34 @@ AVCodecContext *createContext(JNIEnv *env, AVCodec *codec, jbyteArray extraData,
         releaseContext(context);
         return nullptr;
     }
-    return context;
-}
 
-int decodePacket(AVCodecContext *context, AVPacket *packet,
-                 uint8_t *outputBuffer, int outputSize, GrowOutputBufferCallback growBuffer) {
-    int result = 0;
-    // Queue input data.
-    result = avcodec_send_packet(context, packet);
-    if (result) {
-        logError("avcodec_send_packet", result);
-        return transformError(result);
+    AVCodecParserContext *parserContext = nullptr;
+    if (context->codec_id == AV_CODEC_ID_DTS) {
+        parserContext = av_parser_init(context->codec_id);
+        if (!parserContext) {
+            LOGE("Failed to allocate DTS parser.");
+            releaseContext(context);
+            return nullptr;
+        }
     }
 
-    // Dequeue output data until it runs out.
-    int outSize = 0;
+    AVChannelLayout emptyLayout;
+    memset(&emptyLayout, 0, sizeof(emptyLayout));
+    auto *decoderContext =
+            new AudioDecoderContext{
+                    context,
+                    parserContext,
+                    nullptr,
+                    emptyLayout,
+                    0,
+                    AV_SAMPLE_FMT_NONE};
+    return decoderContext;
+}
+
+int receiveFrames(AudioDecoderContext *decoderContext, uint8_t *&outputBuffer, int &outputSize, int &outSize,
+                  GrowOutputBufferCallback growBuffer) {
+    AVCodecContext *context = decoderContext->codecContext;
+    int result = 0;
     while (true) {
         AVFrame *frame = av_frame_alloc();
         if (!frame) {
@@ -141,20 +165,42 @@ int decodePacket(AVCodecContext *context, AVPacket *packet,
         }
 
         // Resample output.
-        AVSampleFormat sampleFormat = context->sample_fmt;
-        int channelCount = context->ch_layout.nb_channels;
-        int channelLayout = (int) context->ch_layout.u.mask;
-        int sampleRate = context->sample_rate;
+        AVSampleFormat sampleFormat = static_cast<AVSampleFormat>(frame->format);
+        int channelCount = frame->ch_layout.nb_channels;
+        int sampleRate = frame->sample_rate;
         int sampleCount = frame->nb_samples;
-        int dataSize = av_samples_get_buffer_size(nullptr, channelCount, sampleCount,
-                                                  sampleFormat, 1);
-        SwrContext *resampleContext;
-        if (context->opaque) {
-            resampleContext = (SwrContext *) context->opaque;
-        } else {
+        SwrContext *resampleContext = decoderContext->resampleContext;
+        bool needsResampleReconfigure =
+                resampleContext == nullptr ||
+                decoderContext->resampleInSampleFormat != sampleFormat ||
+                decoderContext->resampleInSampleRate != sampleRate ||
+                av_channel_layout_compare(&decoderContext->resampleInChLayout, &frame->ch_layout) != 0;
+        if (needsResampleReconfigure) {
+            if (resampleContext) {
+                swr_free(&resampleContext);
+                decoderContext->resampleContext = nullptr;
+            }
+            av_channel_layout_uninit(&decoderContext->resampleInChLayout);
             resampleContext = swr_alloc();
-            av_opt_set_int(resampleContext, "in_channel_layout", channelLayout, 0);
-            av_opt_set_int(resampleContext, "out_channel_layout", channelLayout, 0);
+            if (!resampleContext) {
+                LOGE("Failed to allocate resample context.");
+                av_frame_free(&frame);
+                return AUDIO_DECODER_ERROR_OTHER;
+            }
+            result = av_opt_set_chlayout(resampleContext, "in_chlayout", &frame->ch_layout, 0);
+            if (result < 0) {
+                logError("av_opt_set_chlayout(in_chlayout)", result);
+                swr_free(&resampleContext);
+                av_frame_free(&frame);
+                return transformError(result);
+            }
+            result = av_opt_set_chlayout(resampleContext, "out_chlayout", &frame->ch_layout, 0);
+            if (result < 0) {
+                logError("av_opt_set_chlayout(out_chlayout)", result);
+                swr_free(&resampleContext);
+                av_frame_free(&frame);
+                return transformError(result);
+            }
             av_opt_set_int(resampleContext, "in_sample_rate", sampleRate, 0);
             av_opt_set_int(resampleContext, "out_sample_rate", sampleRate, 0);
             av_opt_set_int(resampleContext, "in_sample_fmt", sampleFormat, 0);
@@ -164,12 +210,33 @@ int decodePacket(AVCodecContext *context, AVPacket *packet,
             result = swr_init(resampleContext);
             if (result < 0) {
                 logError("swr_init", result);
+                swr_free(&resampleContext);
                 av_frame_free(&frame);
                 return transformError(result);
             }
-            context->opaque = resampleContext;
+            result = av_channel_layout_copy(&decoderContext->resampleInChLayout, &frame->ch_layout);
+            if (result < 0) {
+                logError("av_channel_layout_copy", result);
+                swr_free(&resampleContext);
+                av_frame_free(&frame);
+                return transformError(result);
+            }
+            decoderContext->resampleContext = resampleContext;
+            decoderContext->resampleInSampleRate = sampleRate;
+            decoderContext->resampleInSampleFormat = sampleFormat;
+            if (ffmpegIsExperimentalIecDebugLoggingEnabled()) {
+                char layoutDescription[128];
+                av_channel_layout_describe(&frame->ch_layout, layoutDescription, sizeof(layoutDescription));
+                LOGI(
+                        "IEC_FFMPEG: resample-config codec=%d sampleRate=%d channels=%d frameFmt=%d reqFmt=%d layout=%s",
+                        context->codec_id,
+                        sampleRate,
+                        channelCount,
+                        sampleFormat,
+                        context->request_sample_fmt,
+                        layoutDescription);
+            }
         }
-        int inSampleSize = av_get_bytes_per_sample(sampleFormat);
         int outSampleSize = av_get_bytes_per_sample(context->request_sample_fmt);
         int outSamples = swr_get_out_samples(resampleContext, sampleCount);
         int bufferOutSize = outSampleSize * channelCount * outSamples;
@@ -186,12 +253,24 @@ int decodePacket(AVCodecContext *context, AVPacket *packet,
                 return AUDIO_DECODER_ERROR_OTHER;
             }
         }
-        result = swr_convert(resampleContext, &outputBuffer, bufferOutSize,
+        uint8_t *writePtr = outputBuffer;
+        result = swr_convert(resampleContext, &writePtr, outSamples,
                              (const uint8_t **) frame->data, frame->nb_samples);
         av_frame_free(&frame);
         if (result < 0) {
             logError("swr_convert", result);
             return AUDIO_DECODER_ERROR_INVALID_DATA;
+        }
+        int convertedOutSize = outSampleSize * channelCount * result;
+        if (ffmpegIsExperimentalIecDebugLoggingEnabled()) {
+            LOGI(
+                    "IEC_FFMPEG: frame codec=%d inSamples=%d outSamples=%d outBytes=%d sampleRate=%d channels=%d",
+                    context->codec_id,
+                    sampleCount,
+                    result,
+                    convertedOutSize,
+                    sampleRate,
+                    channelCount);
         }
         int available = swr_get_out_samples(resampleContext, 0);
         if (available != 0) {
@@ -199,9 +278,92 @@ int decodePacket(AVCodecContext *context, AVPacket *packet,
                  available);
             return AUDIO_DECODER_ERROR_INVALID_DATA;
         }
-        outputBuffer += bufferOutSize;
-        outSize += bufferOutSize;
+        outputBuffer += convertedOutSize;
+        outSize += convertedOutSize;
     }
+    return outSize;
+}
+
+int sendPacket(AudioDecoderContext *decoderContext, AVPacket *packet, uint8_t *&outputBuffer, int &outputSize,
+               int &outSize, GrowOutputBufferCallback growBuffer) {
+    AVCodecContext *context = decoderContext->codecContext;
+    int result = avcodec_send_packet(context, packet);
+    if (result) {
+        logError("avcodec_send_packet", result);
+        return transformError(result);
+    }
+    return receiveFrames(decoderContext, outputBuffer, outputSize, outSize, growBuffer);
+}
+
+int decodePacket(AudioDecoderContext *decoderContext, uint8_t *inputBuffer, int inputSize,
+                 uint8_t *outputBuffer, int outputSize, GrowOutputBufferCallback growBuffer) {
+    AVCodecContext *context = decoderContext->codecContext;
+    int outSize = 0;
+
+    if (!decoderContext->parserContext) {
+        AVPacket *packet = av_packet_alloc();
+        if (!packet) {
+            LOGE("audio_decoder_decode_frame: av_packet_alloc failed");
+            return AUDIO_DECODER_ERROR_OTHER;
+        }
+        packet->data = inputBuffer;
+        packet->size = inputSize;
+        int result = sendPacket(decoderContext, packet, outputBuffer, outputSize, outSize, growBuffer);
+        av_packet_free(&packet);
+        return result;
+    }
+
+    while (inputSize > 0) {
+        uint8_t *parsedData = nullptr;
+        int parsedSize = 0;
+        int consumed =
+                av_parser_parse2(
+                        decoderContext->parserContext,
+                        context,
+                        &parsedData,
+                        &parsedSize,
+                        inputBuffer,
+                        inputSize,
+                        AV_NOPTS_VALUE,
+                        AV_NOPTS_VALUE,
+                        0);
+        if (consumed < 0) {
+            logError("av_parser_parse2", consumed);
+            return transformError(consumed);
+        }
+        if (consumed == 0 && parsedSize == 0) {
+            LOGE("DTS parser made no progress.");
+            return AUDIO_DECODER_ERROR_INVALID_DATA;
+        }
+        if (ffmpegIsExperimentalIecDebugLoggingEnabled()) {
+            LOGI(
+                    "IEC_FFMPEG: dts-parser consumed=%d parsedSize=%d remaining=%d",
+                    consumed,
+                    parsedSize,
+                    inputSize - consumed);
+        }
+
+        inputBuffer += consumed;
+        inputSize -= consumed;
+
+        if (parsedSize == 0) {
+            continue;
+        }
+
+        AVPacket *packet = av_packet_alloc();
+        if (!packet) {
+            LOGE("audio_decoder_decode_frame: av_packet_alloc failed");
+            return AUDIO_DECODER_ERROR_OTHER;
+        }
+        packet->data = parsedData;
+        packet->size = parsedSize;
+        int result = sendPacket(decoderContext, packet, outputBuffer, outputSize, outSize, growBuffer);
+        av_packet_free(&packet);
+        if (result < 0) {
+            return result;
+        }
+    }
+
     return outSize;
 }
 
@@ -258,20 +420,8 @@ Java_androidx_media3_decoder_ffmpeg_FfmpegAudioDecoder_ffmpegDecode(JNIEnv *env,
     }
     auto *inputBuffer = (uint8_t *) env->GetDirectBufferAddress(input_data);
     auto *outputBuffer = (uint8_t *) env->GetDirectBufferAddress(output_data);
-    AVPacket *packet;
-    packet = av_packet_alloc();
-
-    if (packet == nullptr) {
-        LOGE("audio_decoder_decode_frame: av_packet_alloc failed");
-        return -1;
-    }
-
-    packet->data = inputBuffer;
-    packet->size = input_size;
-    int decodedPacket = decodePacket((AVCodecContext *) context, packet, outputBuffer,
-                                     output_size, GrowOutputBufferCallback{env, thiz, decoderOutputBuffer});
-    av_packet_free(&packet);
-    return decodedPacket;
+    return decodePacket((AudioDecoderContext *) context, inputBuffer, input_size, outputBuffer,
+                        output_size, GrowOutputBufferCallback{env, thiz, decoderOutputBuffer});
 }
 
 extern "C"
@@ -282,7 +432,7 @@ Java_androidx_media3_decoder_ffmpeg_FfmpegAudioDecoder_ffmpegGetChannelCount(
         LOGE("Context must be non-NULL.");
         return -1;
     }
-    return ((AVCodecContext *) context)->ch_layout.nb_channels;
+    return ((AudioDecoderContext *) context)->codecContext->ch_layout.nb_channels;
 }
 
 extern "C"
@@ -294,7 +444,7 @@ Java_androidx_media3_decoder_ffmpeg_FfmpegAudioDecoder_ffmpegGetSampleRate(JNIEn
         LOGE("Context must be non-NULL.");
         return -1;
     }
-    return ((AVCodecContext *) context)->sample_rate;
+    return ((AudioDecoderContext *) context)->codecContext->sample_rate;
 }
 
 extern "C"
@@ -303,31 +453,56 @@ Java_androidx_media3_decoder_ffmpeg_FfmpegAudioDecoder_ffmpegReset(JNIEnv *env,
                                                                    jobject thiz,
                                                                    jlong jContext,
                                                                    jbyteArray extra_data) {
-    auto *context = (AVCodecContext *) jContext;
-    if (!context) {
+    auto *decoderContext = (AudioDecoderContext *) jContext;
+    if (!decoderContext || !decoderContext->codecContext) {
         LOGE("Tried to reset without a context.");
         return 0L;
     }
 
+    AVCodecContext *context = decoderContext->codecContext;
     AVCodecID codecId = context->codec_id;
     if (codecId == AV_CODEC_ID_TRUEHD) {
         // Release and recreate the context if the codec is TrueHD.
         // TODO: Figure out why flushing doesn't work for this codec.
+        auto outputFloat =
+                (jboolean) (context->request_sample_fmt == OUTPUT_FORMAT_PCM_FLOAT);
+        if (decoderContext->parserContext) {
+            av_parser_close(decoderContext->parserContext);
+        }
+        if (decoderContext->resampleContext) {
+            swr_free(&decoderContext->resampleContext);
+        }
+        av_channel_layout_uninit(&decoderContext->resampleInChLayout);
         releaseContext(context);
+        delete decoderContext;
         auto *codec = const_cast<AVCodec *>(avcodec_find_decoder(codecId));
         if (!codec) {
             LOGE("Unexpected error finding codec %d.", codecId);
             return 0L;
         }
-        auto outputFloat =
-                (jboolean) (context->request_sample_fmt == OUTPUT_FORMAT_PCM_FLOAT);
         return (jlong) createContext(env, codec, extra_data, outputFloat,
                 /* rawSampleRate= */ -1,
                 /* rawChannelCount= */ -1);
     }
 
     avcodec_flush_buffers(context);
-    return (jlong) context;
+    if (decoderContext->parserContext) {
+        av_parser_close(decoderContext->parserContext);
+        decoderContext->parserContext = av_parser_init(codecId);
+        if (!decoderContext->parserContext) {
+            LOGE("Failed to reset DTS parser.");
+            releaseContext(context);
+            delete decoderContext;
+            return 0L;
+        }
+    }
+    if (decoderContext->resampleContext) {
+        swr_free(&decoderContext->resampleContext);
+    }
+    av_channel_layout_uninit(&decoderContext->resampleInChLayout);
+    decoderContext->resampleInSampleRate = 0;
+    decoderContext->resampleInSampleFormat = AV_SAMPLE_FMT_NONE;
+    return (jlong) decoderContext;
 }
 
 extern "C"
@@ -336,6 +511,15 @@ Java_androidx_media3_decoder_ffmpeg_FfmpegAudioDecoder_ffmpegRelease(JNIEnv *env
                                                                      jobject thiz,
                                                                      jlong context) {
     if (context) {
-        releaseContext((AVCodecContext *) context);
+        auto *decoderContext = (AudioDecoderContext *) context;
+        if (decoderContext->parserContext) {
+            av_parser_close(decoderContext->parserContext);
+        }
+        if (decoderContext->resampleContext) {
+            swr_free(&decoderContext->resampleContext);
+        }
+        av_channel_layout_uninit(&decoderContext->resampleInChLayout);
+        releaseContext(decoderContext->codecContext);
+        delete decoderContext;
     }
 }

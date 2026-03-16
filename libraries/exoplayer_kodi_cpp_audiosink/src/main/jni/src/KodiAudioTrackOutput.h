@@ -55,12 +55,14 @@ private:
 
   std::unique_ptr<CJNIAudioTrack> track_;
   std::vector<char> writeBuffer_;
+  std::vector<int16_t> writeShortBuffer_;
   uint32_t lastPlaybackHead32_{0};
   uint64_t playbackWrapCount_{0};
   unsigned int sampleRate_{0};
   unsigned int channelCount_{0};
   unsigned int frameSizeBytes_{0};
   int encoding_{CJNIAudioFormat::ENCODING_PCM_16BIT};
+  bool passthroughIec_{false};
 };
 
 }  // namespace androidx_media3

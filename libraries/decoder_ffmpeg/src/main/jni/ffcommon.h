@@ -30,4 +30,9 @@ AVCodec *getCodecByName(JNIEnv *env, jstring codecName);
  */
 void logError(const char *functionName, int errorNumber);
 
+/**
+ * Returns whether extra native FFmpeg debug logging is enabled for the experimental IEC path.
+ */
+bool ffmpegIsExperimentalIecDebugLoggingEnabled();
+
 #endif //NEXTPLAYER_FFCOMMON_H

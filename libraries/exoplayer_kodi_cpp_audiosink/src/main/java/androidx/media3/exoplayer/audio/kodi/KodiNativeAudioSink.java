@@ -36,6 +36,7 @@ import java.nio.ByteBuffer;
 @UnstableApi
 public final class KodiNativeAudioSink extends ForwardingAudioSink
     implements RendererClockAwareAudioSink {
+  private static final int E_AC3_IEC_BURST_WINDOW_ACCESS_UNITS = 6;
 
   static {
     System.loadLibrary("kodiCppAudioSinkJNI");
@@ -72,6 +73,7 @@ public final class KodiNativeAudioSink extends ForwardingAudioSink
   }
 
   private long nativeHandle;
+  @Nullable private final RendererClockAwareAudioSink rendererClockAwareDelegate;
   @Nullable private AudioAttributes audioAttributes;
   @Nullable private AudioDeviceInfo preferredDevice;
   @Nullable private Format configuredFormat;
@@ -79,26 +81,46 @@ public final class KodiNativeAudioSink extends ForwardingAudioSink
   private PlaybackParameters playbackParameters;
   private long rendererClockUs;
   private boolean playCommandReceived;
+  private boolean nativePlayIssued;
   private boolean handledEndOfStream;
   private static final String TAG = "KodiNativeSink";
   private static final long RETRY_DURATION_MS = 200;
   private static final long RETRY_DELAY_MS = 50;
+  private static final long MIN_PASSTHROUGH_STARTUP_WINDOW_US = 1_000;
+  private static final int MAX_PASSTHROUGH_STARTUP_FLUSH_WRITES = 4;
 
   private int pendingWriteErrorCode;
   private long pendingWriteErrorDeadlineMs;
   private long pendingWriteEarliestRetryMs;
   private long pendingReleaseUntilMs;
+  @Nullable private byte[] pendingPassthroughStartupData;
+  private int pendingPassthroughStartupSize;
+  private int pendingPassthroughStartupAcknowledgedBytes;
+  private int pendingPassthroughStartupAccessUnits;
+  private long pendingPassthroughStartupFirstPtsUs;
+  private long pendingPassthroughStartupLastPtsUs;
+  private long pendingPassthroughStartupLastDurationUs;
+  @Nullable private byte[] pendingEac3BurstWindowData;
+  private int pendingEac3BurstWindowSize;
+  private int pendingEac3BurstWindowAcknowledgedBytes;
+  private int pendingEac3BurstWindowAccessUnits;
+  private long pendingEac3BurstWindowPtsUs;
 
   public KodiNativeAudioSink(AudioSink sink) {
     super(sink);
+    rendererClockAwareDelegate =
+        sink instanceof RendererClockAwareAudioSink ? (RendererClockAwareAudioSink) sink : null;
     nativeHandle = 0L;
     volume = 1f;
     playbackParameters = PlaybackParameters.DEFAULT;
     rendererClockUs = C.TIME_UNSET;
     playCommandReceived = false;
+    nativePlayIssued = false;
     handledEndOfStream = false;
     clearPendingWriteError();
     pendingReleaseUntilMs = C.TIME_UNSET;
+    clearPendingPassthroughStartupWindow();
+    clearPendingEac3BurstWindow();
   }
 
   @Override
@@ -109,7 +131,7 @@ public final class KodiNativeAudioSink extends ForwardingAudioSink
   @Override
   public @SinkFormatSupport int getFormatSupport(Format format) {
     if (AudioCapabilities.isExperimentalFireOsIecPassthroughEnabled()
-        && isKodiPassthroughMime(format.sampleMimeType)) {
+        && isKodiPassthroughEnabledForFormat(format)) {
       return SINK_FORMAT_SUPPORTED_DIRECTLY;
     }
     return super.getFormatSupport(format);
@@ -118,6 +140,7 @@ public final class KodiNativeAudioSink extends ForwardingAudioSink
   @Override
   public void setAudioAttributes(AudioAttributes audioAttributes) {
     this.audioAttributes = audioAttributes;
+    super.setAudioAttributes(audioAttributes);
   }
 
   @Override
@@ -128,11 +151,13 @@ public final class KodiNativeAudioSink extends ForwardingAudioSink
   @Override
   public void setPreferredDevice(@Nullable AudioDeviceInfo audioDeviceInfo) {
     preferredDevice = audioDeviceInfo;
+    super.setPreferredDevice(audioDeviceInfo);
   }
 
   @Override
   public void setVolume(float volume) {
     this.volume = volume;
+    super.setVolume(volume);
     if (nativeHandle != 0L) {
       nSetVolume(nativeHandle, volume);
     }
@@ -141,6 +166,7 @@ public final class KodiNativeAudioSink extends ForwardingAudioSink
   @Override
   public void setPlaybackParameters(PlaybackParameters playbackParameters) {
     this.playbackParameters = playbackParameters;
+    super.setPlaybackParameters(playbackParameters);
     if (nativeHandle != 0L) {
       nSetHostClockSpeed(nativeHandle, playbackParameters.speed);
     }
@@ -156,6 +182,16 @@ public final class KodiNativeAudioSink extends ForwardingAudioSink
       throws ConfigurationException {
     configuredFormat = inputFormat;
     handledEndOfStream = false;
+    nativePlayIssued = false;
+    clearPendingPassthroughStartupWindow();
+    clearPendingEac3BurstWindow();
+    if (!shouldUseNativeKodiPath(inputFormat)) {
+      closeSession(true);
+      clearPendingWriteError();
+      pendingReleaseUntilMs = C.TIME_UNSET;
+      super.configure(inputFormat, specifiedBufferSize, outputChannels);
+      return;
+    }
     ensureSession(inputFormat);
     NativeConfig config =
         new NativeConfig(
@@ -178,12 +214,72 @@ public final class KodiNativeAudioSink extends ForwardingAudioSink
 
   @Override
   public boolean handleBuffer(ByteBuffer buffer, long presentationTimeUs, int encodedAccessUnitCount)
-      throws WriteException {
+      throws InitializationException, WriteException {
     if (!buffer.hasRemaining()) {
       return true;
     }
+    if (!shouldUseNativeKodiPath(configuredFormat)) {
+      return super.handleBuffer(buffer, presentationTimeUs, encodedAccessUnitCount);
+    }
     if (nativeHandle == 0L || configuredFormat == null) {
       throw new WriteException(/* errorCode= */ -1, configuredFormat, /* isRecoverable= */ false);
+    }
+
+    if (shouldUseEac3IecBurstWindow(configuredFormat)) {
+      if (playCommandReceived && hasPendingEac3BurstWindow()) {
+        maybeIssueNativePlayForPassthroughStartup();
+        int flushedBytes = writePendingEac3BurstWindow();
+        if (flushedBytes < 0) {
+          return false;
+        }
+        if (hasPendingEac3BurstWindow()) {
+          return false;
+        }
+      }
+
+      appendToPendingEac3BurstWindow(buffer, presentationTimeUs, encodedAccessUnitCount);
+      handledEndOfStream = false;
+      if (!playCommandReceived
+          || pendingEac3BurstWindowAccessUnits < E_AC3_IEC_BURST_WINDOW_ACCESS_UNITS) {
+        return true;
+      }
+
+      int flushedBytes = writePendingEac3BurstWindow();
+      if (flushedBytes < 0) {
+        return false;
+      }
+      return !hasPendingEac3BurstWindow();
+    }
+
+    if (hasPendingPassthroughStartupWindow()) {
+      if (playCommandReceived && nativePlayIssued) {
+        int flushedBytes = writePendingPassthroughStartupWindow();
+        if (flushedBytes < 0) {
+          return false;
+        }
+        if (hasPendingPassthroughStartupWindow()) {
+          return false;
+        }
+      } else if (isPassthroughStartupWindowFull()) {
+        return false;
+      }
+    }
+
+    if (!playCommandReceived || !nativePlayIssued) {
+      maybeProbePassthroughStartupBuffer(buffer, presentationTimeUs, encodedAccessUnitCount);
+      appendToPendingPassthroughStartupWindow(buffer, presentationTimeUs, encodedAccessUnitCount);
+      handledEndOfStream = false;
+      if (playCommandReceived) {
+        maybeIssueNativePlayForPassthroughStartup();
+        if (nativePlayIssued) {
+          int flushedBytes = writePendingPassthroughStartupWindow();
+          if (flushedBytes < 0) {
+            return false;
+          }
+          return !hasPendingPassthroughStartupWindow();
+        }
+      }
+      return true;
     }
 
     int originalRemaining = buffer.remaining();
@@ -218,8 +314,6 @@ public final class KodiNativeAudioSink extends ForwardingAudioSink
     if (bytesConsumed <= 0) {
       return false;
     }
-    // Match DefaultAudioSink contract: once this call consumed bytes, report
-    // forward progress and do not introduce extra retry gating for the same write.
     clearPendingWriteError();
     handledEndOfStream = false;
     buffer.position(buffer.position() + Math.min(bytesConsumed, originalRemaining));
@@ -229,6 +323,10 @@ public final class KodiNativeAudioSink extends ForwardingAudioSink
   @Override
   public void play() {
     playCommandReceived = true;
+    if (!shouldUseNativeKodiPath(configuredFormat)) {
+      super.play();
+      return;
+    }
     if (AudioCapabilities.isFireOsIecVerboseLoggingEnabled()) {
       Log.i(
           TAG,
@@ -238,13 +336,32 @@ public final class KodiNativeAudioSink extends ForwardingAudioSink
               + " format="
               + (configuredFormat != null ? configuredFormat.sampleMimeType : "null"));
     }
-    if (nativeHandle != 0L) {
-      nPlay(nativeHandle);
+    if (shouldUseEac3IecBurstWindow(configuredFormat)) {
+      if (nativeHandle != 0L) {
+        nPlay(nativeHandle);
+        nativePlayIssued = true;
+      }
+    } else {
+      maybeIssueNativePlayForPassthroughStartup();
+    }
+    if (nativePlayIssued && hasPendingPassthroughStartupWindow()) {
+      flushPendingPassthroughStartupWindowForPlay();
+    }
+    if (nativePlayIssued
+        && shouldUseEac3IecBurstWindow(configuredFormat)
+        && hasPendingEac3BurstWindow()) {
+      flushPendingEac3BurstWindowForPlay();
     }
   }
 
   @Override
   public void pause() {
+    playCommandReceived = false;
+    nativePlayIssued = false;
+    if (!shouldUseNativeKodiPath(configuredFormat)) {
+      super.pause();
+      return;
+    }
     if (AudioCapabilities.isFireOsIecVerboseLoggingEnabled()) {
       Log.i(TAG, "Media3 -> AudioSink pause()");
     }
@@ -255,6 +372,10 @@ public final class KodiNativeAudioSink extends ForwardingAudioSink
 
   @Override
   public void handleDiscontinuity() {
+    if (!shouldUseNativeKodiPath(configuredFormat)) {
+      super.handleDiscontinuity();
+      return;
+    }
     if (nativeHandle != 0L) {
       nHandleDiscontinuity(nativeHandle);
     }
@@ -262,13 +383,29 @@ public final class KodiNativeAudioSink extends ForwardingAudioSink
 
   @Override
   public long getCurrentPositionUs(boolean sourceEnded) {
+    if (!shouldUseNativeKodiPath(configuredFormat)) {
+      return super.getCurrentPositionUs(sourceEnded);
+    }
     return nativeHandle == 0L ? CURRENT_POSITION_NOT_SET : nGetCurrentPositionUs(nativeHandle);
   }
 
   @Override
   public void playToEndOfStream() throws WriteException {
+    if (!shouldUseNativeKodiPath(configuredFormat)) {
+      super.playToEndOfStream();
+      return;
+    }
     if (nativeHandle == 0L || configuredFormat == null) {
       return;
+    }
+    if (!nativePlayIssued) {
+      maybeIssueNativePlayForPassthroughStartup();
+    }
+    if (hasPendingPassthroughStartupWindow()) {
+      writePendingPassthroughStartupWindow();
+    }
+    if (hasPendingEac3BurstWindow()) {
+      writePendingEac3BurstWindow();
     }
     nDrain(nativeHandle);
     handledEndOfStream = true;
@@ -276,24 +413,59 @@ public final class KodiNativeAudioSink extends ForwardingAudioSink
 
   @Override
   public boolean isEnded() {
-    return nativeHandle == 0L || (handledEndOfStream && nIsEnded(nativeHandle));
+    if (!shouldUseNativeKodiPath(configuredFormat)) {
+      return super.isEnded();
+    }
+    return nativeHandle == 0L
+        || (!hasPendingPassthroughStartupWindow()
+            && !hasPendingEac3BurstWindow()
+            && handledEndOfStream
+            && nIsEnded(nativeHandle));
   }
 
   @Override
   public boolean hasPendingData() {
-    return nativeHandle != 0L && nHasPendingData(nativeHandle);
+    if (!shouldUseNativeKodiPath(configuredFormat)) {
+      return super.hasPendingData();
+    }
+    boolean nativeHasPendingData = nativeHandle != 0L && nHasPendingData(nativeHandle);
+    if (nativeHasPendingData) {
+      return true;
+    }
+    if (!nativePlayIssued) {
+      if (shouldUseEac3IecBurstWindow(configuredFormat)) {
+        return hasPendingEac3BurstWindow()
+            && pendingEac3BurstWindowAccessUnits >= E_AC3_IEC_BURST_WINDOW_ACCESS_UNITS;
+      }
+      // Renderer readiness is keyed off AudioSink.hasPendingData(). Before native play is issued,
+      // Java-owned startup bytes should only count as readiness once the passthrough startup
+      // reservoir has reached the real target size. Reporting less than that reintroduces
+      // early video start; reporting nothing deadlocks startup in buffering forever.
+      return isPassthroughStartupWindowFull();
+    }
+    return hasPendingPassthroughStartupWindow() || hasPendingEac3BurstWindow();
   }
 
   @Override
   public long getAudioTrackBufferSizeUs() {
+    if (!shouldUseNativeKodiPath(configuredFormat)) {
+      return super.getAudioTrackBufferSizeUs();
+    }
     return nativeHandle == 0L ? 0L : nGetBufferSizeUs(nativeHandle);
   }
 
   @Override
   public void flush() {
     playCommandReceived = false;
+    nativePlayIssued = false;
     handledEndOfStream = false;
     clearPendingWriteError();
+    clearPendingPassthroughStartupWindow();
+    clearPendingEac3BurstWindow();
+    if (!shouldUseNativeKodiPath(configuredFormat)) {
+      super.flush();
+      return;
+    }
     pendingReleaseUntilMs = SystemClock.elapsedRealtime() + RETRY_DURATION_MS;
     if (AudioCapabilities.isFireOsIecVerboseLoggingEnabled()) {
       Log.i(TAG, "Media3 -> AudioSink flush()");
@@ -306,8 +478,11 @@ public final class KodiNativeAudioSink extends ForwardingAudioSink
   @Override
   public void reset() {
     playCommandReceived = false;
+    nativePlayIssued = false;
     handledEndOfStream = false;
     clearPendingWriteError();
+    clearPendingPassthroughStartupWindow();
+    clearPendingEac3BurstWindow();
     closeSession(true);
     configuredFormat = null;
     super.reset();
@@ -316,8 +491,11 @@ public final class KodiNativeAudioSink extends ForwardingAudioSink
   @Override
   public void release() {
     playCommandReceived = false;
+    nativePlayIssued = false;
     handledEndOfStream = false;
     clearPendingWriteError();
+    clearPendingPassthroughStartupWindow();
+    clearPendingEac3BurstWindow();
     closeSession(false);
     configuredFormat = null;
     super.release();
@@ -326,6 +504,12 @@ public final class KodiNativeAudioSink extends ForwardingAudioSink
   @Override
   public void setRendererClockUs(long rendererClockUs) {
     this.rendererClockUs = rendererClockUs;
+    if (!shouldUseNativeKodiPath(configuredFormat)) {
+      if (rendererClockAwareDelegate != null) {
+        rendererClockAwareDelegate.setRendererClockUs(rendererClockUs);
+      }
+      return;
+    }
     if (nativeHandle != 0L && rendererClockUs != C.TIME_UNSET) {
       nSetHostClockUs(nativeHandle, rendererClockUs);
     }
@@ -382,6 +566,308 @@ public final class KodiNativeAudioSink extends ForwardingAudioSink
         || MimeTypes.AUDIO_DTS_HD.equals(sampleMimeType)
         || MimeTypes.AUDIO_TRUEHD.equals(sampleMimeType)
         || "audio/vnd.dts.uhd;profile=p2".equals(sampleMimeType);
+  }
+
+  private static boolean isKodiPassthroughEnabledForFormat(Format format) {
+    @Nullable String sampleMimeType = format.sampleMimeType;
+    if (!isKodiPassthroughMime(sampleMimeType)) {
+      return false;
+    }
+    if (MimeTypes.AUDIO_AC3.equals(sampleMimeType)) {
+      return AudioCapabilities.isIecPackerAc3PassthroughEnabled();
+    }
+    if (MimeTypes.AUDIO_E_AC3.equals(sampleMimeType)
+        || MimeTypes.AUDIO_E_AC3_JOC.equals(sampleMimeType)) {
+      return AudioCapabilities.isIecPackerEac3PassthroughEnabled();
+    }
+    if (MimeTypes.AUDIO_DTS.equals(sampleMimeType)) {
+      return AudioCapabilities.isIecPackerDtsPassthroughEnabled();
+    }
+    if (MimeTypes.AUDIO_DTS_HD.equals(sampleMimeType)
+        || "audio/vnd.dts.uhd;profile=p2".equals(sampleMimeType)) {
+      return AudioCapabilities.isIecPackerDtshdPassthroughEnabled()
+          || (AudioCapabilities.isIecPackerDtshdCoreFallbackEnabled()
+              && AudioCapabilities.isIecPackerDtsPassthroughEnabled());
+    }
+    if (MimeTypes.AUDIO_TRUEHD.equals(sampleMimeType)) {
+      return AudioCapabilities.isIecPackerTruehdPassthroughEnabled();
+    }
+    return false;
+  }
+
+  private static boolean shouldUseEac3IecBurstWindow(@Nullable Format format) {
+    if (!shouldUseNativeKodiPath(format)) {
+      return false;
+    }
+    return MimeTypes.AUDIO_E_AC3.equals(format.sampleMimeType)
+        || MimeTypes.AUDIO_E_AC3_JOC.equals(format.sampleMimeType);
+  }
+
+  private static boolean shouldUseNativeKodiPath(@Nullable Format format) {
+    return format != null
+        && AudioCapabilities.isExperimentalFireOsIecPassthroughEnabled()
+        && isKodiPassthroughEnabledForFormat(format);
+  }
+
+  private boolean hasPendingEac3BurstWindow() {
+    return pendingEac3BurstWindowData != null && pendingEac3BurstWindowSize > 0;
+  }
+
+  private boolean hasPendingPassthroughStartupWindow() {
+    return pendingPassthroughStartupData != null && pendingPassthroughStartupSize > 0;
+  }
+
+  private void clearPendingPassthroughStartupWindow() {
+    pendingPassthroughStartupData = null;
+    pendingPassthroughStartupSize = 0;
+    pendingPassthroughStartupAcknowledgedBytes = 0;
+    pendingPassthroughStartupAccessUnits = 0;
+    pendingPassthroughStartupFirstPtsUs = C.TIME_UNSET;
+    pendingPassthroughStartupLastPtsUs = C.TIME_UNSET;
+    pendingPassthroughStartupLastDurationUs = 0L;
+  }
+
+  private void appendToPendingPassthroughStartupWindow(
+      ByteBuffer buffer, long presentationTimeUs, int encodedAccessUnitCount) {
+    int bytesToAppend = buffer.remaining();
+    if (bytesToAppend <= 0) {
+      return;
+    }
+    int existingSize = pendingPassthroughStartupSize;
+    int requiredSize = existingSize + bytesToAppend;
+    if (pendingPassthroughStartupData == null
+        || pendingPassthroughStartupData.length < requiredSize) {
+      int newCapacity =
+          Math.max(
+              requiredSize,
+              pendingPassthroughStartupData == null
+                  ? requiredSize
+                  : pendingPassthroughStartupData.length * 2);
+      byte[] newBuffer = new byte[newCapacity];
+      if (pendingPassthroughStartupData != null && existingSize > 0) {
+        System.arraycopy(pendingPassthroughStartupData, 0, newBuffer, 0, existingSize);
+      }
+      pendingPassthroughStartupData = newBuffer;
+    }
+
+    ByteBuffer duplicate = buffer.duplicate();
+    duplicate.get(pendingPassthroughStartupData, existingSize, bytesToAppend);
+    buffer.position(buffer.limit());
+    pendingPassthroughStartupSize = requiredSize;
+    pendingPassthroughStartupAccessUnits += Math.max(1, encodedAccessUnitCount);
+    if (pendingPassthroughStartupFirstPtsUs == C.TIME_UNSET) {
+      pendingPassthroughStartupFirstPtsUs = presentationTimeUs;
+    }
+    if (pendingPassthroughStartupLastPtsUs != C.TIME_UNSET
+        && presentationTimeUs > pendingPassthroughStartupLastPtsUs) {
+      pendingPassthroughStartupLastDurationUs =
+          presentationTimeUs - pendingPassthroughStartupLastPtsUs;
+    }
+    pendingPassthroughStartupLastPtsUs = presentationTimeUs;
+  }
+
+  private void maybeProbePassthroughStartupBuffer(
+      ByteBuffer buffer, long presentationTimeUs, int encodedAccessUnitCount) {
+    if (nativeHandle == 0L
+        || configuredFormat == null
+        || shouldUseEac3IecBurstWindow(configuredFormat)
+        || getAudioTrackBufferSizeUs() > 0L) {
+      return;
+    }
+
+    ByteBuffer probeBuffer = buffer.isDirect() ? buffer.duplicate() : copyToDirectBuffer(buffer);
+    nProbePassthroughStartupBuffer(
+        nativeHandle,
+        probeBuffer,
+        probeBuffer.position(),
+        probeBuffer.remaining(),
+        presentationTimeUs,
+        encodedAccessUnitCount);
+  }
+
+  private long getPendingPassthroughStartupWindowDurationUs() {
+    if (!hasPendingPassthroughStartupWindow() || pendingPassthroughStartupFirstPtsUs == C.TIME_UNSET) {
+      return 0L;
+    }
+    if (pendingPassthroughStartupLastPtsUs == C.TIME_UNSET
+        || pendingPassthroughStartupLastPtsUs <= pendingPassthroughStartupFirstPtsUs) {
+      return pendingPassthroughStartupLastDurationUs;
+    }
+    return (pendingPassthroughStartupLastPtsUs - pendingPassthroughStartupFirstPtsUs)
+        + Math.max(0L, pendingPassthroughStartupLastDurationUs);
+  }
+
+  private long getPassthroughStartupWindowTargetUs() {
+    long bufferSizeUs = getAudioTrackBufferSizeUs();
+    return Math.max(MIN_PASSTHROUGH_STARTUP_WINDOW_US, bufferSizeUs);
+  }
+
+  private boolean isPassthroughStartupWindowFull() {
+    return hasPendingPassthroughStartupWindow()
+        && getPendingPassthroughStartupWindowDurationUs() >= getPassthroughStartupWindowTargetUs();
+  }
+
+  private void maybeIssueNativePlayForPassthroughStartup() {
+    if (nativePlayIssued || nativeHandle == 0L || configuredFormat == null || !playCommandReceived) {
+      return;
+    }
+    if (shouldUseEac3IecBurstWindow(configuredFormat)) {
+      nPlay(nativeHandle);
+      nativePlayIssued = true;
+      return;
+    }
+    if (!hasPendingPassthroughStartupWindow() || !isPassthroughStartupWindowFull()) {
+      return;
+    }
+    nPlay(nativeHandle);
+    nativePlayIssued = true;
+  }
+
+  private void clearPendingEac3BurstWindow() {
+    pendingEac3BurstWindowData = null;
+    pendingEac3BurstWindowSize = 0;
+    pendingEac3BurstWindowAcknowledgedBytes = 0;
+    pendingEac3BurstWindowAccessUnits = 0;
+    pendingEac3BurstWindowPtsUs = C.TIME_UNSET;
+  }
+
+  private void appendToPendingEac3BurstWindow(
+      ByteBuffer buffer, long presentationTimeUs, int encodedAccessUnitCount) {
+    int bytesToAppend = buffer.remaining();
+    if (bytesToAppend <= 0) {
+      return;
+    }
+    int existingSize = pendingEac3BurstWindowSize;
+    int requiredSize = existingSize + bytesToAppend;
+    if (pendingEac3BurstWindowData == null || pendingEac3BurstWindowData.length < requiredSize) {
+      int newCapacity =
+          Math.max(requiredSize, pendingEac3BurstWindowData == null ? requiredSize : pendingEac3BurstWindowData.length * 2);
+      byte[] newBuffer = new byte[newCapacity];
+      if (pendingEac3BurstWindowData != null && existingSize > 0) {
+        System.arraycopy(pendingEac3BurstWindowData, 0, newBuffer, 0, existingSize);
+      }
+      pendingEac3BurstWindowData = newBuffer;
+    }
+
+    ByteBuffer duplicate = buffer.duplicate();
+    duplicate.get(pendingEac3BurstWindowData, existingSize, bytesToAppend);
+    buffer.position(buffer.limit());
+    pendingEac3BurstWindowSize = requiredSize;
+    pendingEac3BurstWindowAccessUnits += Math.max(1, encodedAccessUnitCount);
+    if (pendingEac3BurstWindowPtsUs == C.TIME_UNSET) {
+      pendingEac3BurstWindowPtsUs = presentationTimeUs;
+    }
+  }
+
+  private int writePendingEac3BurstWindow() throws WriteException {
+    if (!hasPendingEac3BurstWindow() || nativeHandle == 0L || configuredFormat == null) {
+      return 0;
+    }
+    if (pendingWriteErrorCode != 0 && shouldWaitBeforeWriteRetry()) {
+      return -1;
+    }
+
+    ByteBuffer writeBuffer =
+        ByteBuffer.allocateDirect(
+            pendingEac3BurstWindowSize - pendingEac3BurstWindowAcknowledgedBytes);
+    writeBuffer.put(
+        pendingEac3BurstWindowData,
+        pendingEac3BurstWindowAcknowledgedBytes,
+        pendingEac3BurstWindowSize - pendingEac3BurstWindowAcknowledgedBytes);
+    writeBuffer.flip();
+
+    int bytesConsumed =
+        nWrite(
+            nativeHandle,
+            writeBuffer,
+            writeBuffer.position(),
+            writeBuffer.remaining(),
+            pendingEac3BurstWindowPtsUs != C.TIME_UNSET ? pendingEac3BurstWindowPtsUs : 0L,
+            pendingEac3BurstWindowAccessUnits);
+    nConsumeLastWriteOutputBytes(nativeHandle);
+    int nativeWriteErrorCode = nConsumeLastWriteErrorCode(nativeHandle);
+    if (nativeWriteErrorCode < 0 && bytesConsumed <= 0) {
+      maybeHandlePendingWriteError(nativeWriteErrorCode);
+      return -1;
+    }
+    if (bytesConsumed <= 0) {
+      return -1;
+    }
+
+    clearPendingWriteError();
+    pendingEac3BurstWindowAcknowledgedBytes += bytesConsumed;
+    if (pendingEac3BurstWindowAcknowledgedBytes >= pendingEac3BurstWindowSize) {
+      clearPendingEac3BurstWindow();
+    }
+    return bytesConsumed;
+  }
+
+  private int writePendingPassthroughStartupWindow() throws WriteException {
+    if (!hasPendingPassthroughStartupWindow() || nativeHandle == 0L || configuredFormat == null) {
+      return 0;
+    }
+    if (pendingWriteErrorCode != 0 && shouldWaitBeforeWriteRetry()) {
+      return -1;
+    }
+
+    ByteBuffer writeBuffer =
+        ByteBuffer.allocateDirect(
+            pendingPassthroughStartupSize - pendingPassthroughStartupAcknowledgedBytes);
+    writeBuffer.put(
+        pendingPassthroughStartupData,
+        pendingPassthroughStartupAcknowledgedBytes,
+        pendingPassthroughStartupSize - pendingPassthroughStartupAcknowledgedBytes);
+    writeBuffer.flip();
+
+    int bytesConsumed =
+        nWrite(
+            nativeHandle,
+            writeBuffer,
+            writeBuffer.position(),
+            writeBuffer.remaining(),
+            pendingPassthroughStartupFirstPtsUs != C.TIME_UNSET
+                ? pendingPassthroughStartupFirstPtsUs
+                : 0L,
+            pendingPassthroughStartupAccessUnits);
+    int outputBytesWritten = nConsumeLastWriteOutputBytes(nativeHandle);
+    int nativeWriteErrorCode = nConsumeLastWriteErrorCode(nativeHandle);
+    if (nativeWriteErrorCode < 0 && bytesConsumed <= 0) {
+      maybeHandlePendingWriteError(nativeWriteErrorCode);
+      return -1;
+    }
+    if (bytesConsumed <= 0) {
+      return -1;
+    }
+
+    clearPendingWriteError();
+    pendingPassthroughStartupAcknowledgedBytes += bytesConsumed;
+    if (pendingPassthroughStartupAcknowledgedBytes >= pendingPassthroughStartupSize) {
+      clearPendingPassthroughStartupWindow();
+    }
+    return outputBytesWritten;
+  }
+
+  private void flushPendingPassthroughStartupWindowForPlay() {
+    try {
+      int writes = 0;
+      while (hasPendingPassthroughStartupWindow() && writes < MAX_PASSTHROUGH_STARTUP_FLUSH_WRITES) {
+        int outputBytesWritten = writePendingPassthroughStartupWindow();
+        if (outputBytesWritten <= 0) {
+          break;
+        }
+        writes++;
+      }
+    } catch (WriteException e) {
+      Log.w(TAG, "Failed to flush pending passthrough startup window on play", e);
+    }
+  }
+
+  private void flushPendingEac3BurstWindowForPlay() {
+    try {
+      writePendingEac3BurstWindow();
+    } catch (WriteException e) {
+      Log.w(TAG, "Failed to flush pending E-AC3 IEC burst window on play", e);
+    }
   }
 
   private boolean configureWithRetry(NativeConfig config) {
@@ -479,6 +965,14 @@ public final class KodiNativeAudioSink extends ForwardingAudioSink
   private static native boolean nConfigure(long nativeHandle, NativeConfig config);
 
   private static native int nWrite(
+      long nativeHandle,
+      ByteBuffer buffer,
+      int offset,
+      int size,
+      long presentationTimeUs,
+      int encodedAccessUnitCount);
+
+  private static native void nProbePassthroughStartupBuffer(
       long nativeHandle,
       ByteBuffer buffer,
       int offset,

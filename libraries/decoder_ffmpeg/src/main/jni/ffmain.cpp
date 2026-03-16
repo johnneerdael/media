@@ -9,6 +9,7 @@ extern "C" {
 #include "ffcommon.h"
 #include <cstddef>
 #include <cstdint>
+#include <atomic>
 
 #ifndef FFMPEG_TONEMAP_FILTERS
 #define FFMPEG_TONEMAP_FILTERS 0
@@ -39,6 +40,12 @@ bool ffmpegRenderExperimentalDv5HardwareFramePure(
         int32_t displayedWidth,
         int32_t displayedHeight,
         jobject outputSurface);
+
+static std::atomic_bool gExperimentalIecDebugLoggingEnabled(false);
+
+bool ffmpegIsExperimentalIecDebugLoggingEnabled() {
+    return gExperimentalIecDebugLoggingEnabled.load();
+}
 
 jint JNI_OnLoad(JavaVM *vm, void *reserved) {
     JNIEnv *env;
@@ -116,6 +123,17 @@ Java_androidx_media3_decoder_ffmpeg_FfmpegLibrary_ffmpegSetExperimentalDv5Hardwa
     (void) env;
     (void) clazz;
     ffmpegSetExperimentalDv5HardwareToneMapRpuBridgeEnabled(enabled == JNI_TRUE);
+}
+
+extern "C"
+JNIEXPORT void JNICALL
+Java_androidx_media3_decoder_ffmpeg_FfmpegLibrary_ffmpegSetExperimentalIecDebugLoggingEnabled(
+        JNIEnv *env,
+        jclass clazz,
+        jboolean enabled) {
+    (void) env;
+    (void) clazz;
+    gExperimentalIecDebugLoggingEnabled.store(enabled == JNI_TRUE);
 }
 
 extern "C"
