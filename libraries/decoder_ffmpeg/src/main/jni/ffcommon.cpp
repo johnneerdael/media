@@ -14,11 +14,6 @@ void releaseContext(AVCodecContext *context) {
     if (!context) {
         return;
     }
-    SwrContext *swrContext;
-    if ((swrContext = (SwrContext *)context->opaque)) {
-        swr_free(&swrContext);
-        context->opaque = nullptr;
-    }
     av_freep(&context->extradata);
     avcodec_free_context(&context);
 }

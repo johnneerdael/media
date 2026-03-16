@@ -138,6 +138,18 @@ public final class FfmpegLibrary {
     }
   }
 
+  /**
+   * Enables extra native FFmpeg debug logging for the IEC experimental playback path.
+   *
+   * <p>This is intended for diagnosis of the custom IEC/Kodi integration and should track the same
+   * runtime toggle.
+   */
+  public static void setExperimentalIecDebugLoggingEnabled(boolean enabled) {
+    if (isAvailable()) {
+      ffmpegSetExperimentalIecDebugLoggingEnabled(enabled);
+    }
+  }
+
   /** Pushes an external DV RPU payload for a sample timestamp. */
   public static void pushExperimentalDv5HardwareRpuSample(long sampleTimeUs, byte[] rpuNalPayload) {
     if (!experimentalDv5HardwareToneMapRpuBridgeEnabled || rpuNalPayload.length == 0) {
@@ -296,6 +308,8 @@ public final class FfmpegLibrary {
 
   private static native void ffmpegSetExperimentalDv5HardwareToneMapRpuBridgeEnabled(
       boolean enabled);
+
+  private static native void ffmpegSetExperimentalIecDebugLoggingEnabled(boolean enabled);
 
   private static native void ffmpegPushExperimentalDv5HardwareRpuSample(
       long sampleTimeUs, byte[] rpuNalPayload);

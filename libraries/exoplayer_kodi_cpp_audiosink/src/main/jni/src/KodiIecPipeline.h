@@ -21,7 +21,6 @@
 #include "cores/AudioEngine/Utils/AEBitstreamPacker.h"
 
 #include <cstdint>
-#include <deque>
 #include <limits>
 #include <vector>
 
@@ -46,12 +45,12 @@ public:
   void Configure(const AEAudioFormat& requestedFormat);
   void Reset();
 
-  // Returns bytes consumed from input. Produced IEC packets are appended to outPackets.
+  // Returns bytes consumed from input. Emits at most one IEC packet per call.
   int Feed(const uint8_t* data,
            int size,
            int64_t presentationTimeUs,
-           std::deque<KodiPackedAccessUnit>& outPackets,
-           int maxPackets = std::numeric_limits<int>::max());
+           KodiPackedAccessUnit* outPacket,
+           bool* emittedPacket);
   bool HasParserBacklog() const { return streamAdapter_.HasBacklog(); }
   void AcknowledgeConsumedInputBytes(int bytes);
 
@@ -62,7 +61,8 @@ private:
                         unsigned int auSize,
                         int64_t auPtsUs,
                         int64_t auDurationUs,
-                        std::deque<KodiPackedAccessUnit>& outPackets);
+                        KodiPackedAccessUnit* outPacket,
+                        bool* emittedPacket);
 
   ActiveAE::CActiveAEMediaStreamAdapter streamAdapter_;
   CAEBitstreamPacker bitstreamPacker_;

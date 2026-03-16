@@ -26,6 +26,7 @@ ANDROID_ABI="$4"
 echo "ANDROID_ABI is ${ANDROID_ABI}"
 ENABLED_DECODERS=("${@:5}")
 echo "Enabled decoders are ${ENABLED_DECODERS[@]}"
+ENABLED_PARSERS=()
 JOBS="$(nproc 2> /dev/null || sysctl -n hw.ncpu 2> /dev/null || echo 4)"
 echo "Using $JOBS jobs for make"
 FFMPEG_ENABLE_LIBPLACEBO="${FFMPEG_ENABLE_LIBPLACEBO:-0}"
@@ -434,6 +435,16 @@ apply_ffmpeg_vulkan_compat_patch() {
 for decoder in "${ENABLED_DECODERS[@]}"
 do
     COMMON_OPTIONS="${COMMON_OPTIONS} --enable-decoder=${decoder}"
+    case "${decoder}" in
+        dca)
+            ENABLED_PARSERS+=("dca")
+            ;;
+    esac
+done
+
+for parser in "${ENABLED_PARSERS[@]}"
+do
+    COMMON_OPTIONS="${COMMON_OPTIONS} --enable-parser=${parser}"
 done
 
 ARMV7_CLANG="${TOOLCHAIN_PREFIX}/armv7a-linux-androideabi${ANDROID_ABI}-clang"

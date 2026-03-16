@@ -45,19 +45,21 @@ void KodiIecPipeline::Reset()
 int KodiIecPipeline::Feed(const uint8_t* data,
                           int size,
                           int64_t presentationTimeUs,
-                          std::deque<KodiPackedAccessUnit>& outPackets,
-                          int maxPackets)
+                          KodiPackedAccessUnit* outPacket,
+                          bool* emittedPacket)
 {
   if (data == nullptr || size <= 0)
+    return 0;
+  if (outPacket == nullptr || emittedPacket == nullptr)
     return 0;
 
   int consumedTotal = 0;
   const uint8_t* current = data;
   int remaining = size;
   int64_t currentPtsUs = presentationTimeUs;
-  int producedPackets = 0;
+  *emittedPacket = false;
 
-  while (remaining > 0 && producedPackets < maxPackets)
+  while (remaining > 0 && !*emittedPacket)
   {
     const uint8_t* auData = nullptr;
     unsigned int auSize = 0;
@@ -78,8 +80,7 @@ int KodiIecPipeline::Feed(const uint8_t* data,
 
     if (auSize > 0 && auData != nullptr)
     {
-      EmitPackedPacket(auData, auSize, auPtsUs, auDurationUs, outPackets);
-      ++producedPackets;
+      EmitPackedPacket(auData, auSize, auPtsUs, auDurationUs, outPacket, emittedPacket);
     }
 
     if (consumed <= 0)
@@ -100,11 +101,14 @@ void KodiIecPipeline::EmitPackedPacket(const uint8_t* auData,
                                        unsigned int auSize,
                                        int64_t auPtsUs,
                                        int64_t auDurationUs,
-                                       std::deque<KodiPackedAccessUnit>& outPackets)
+                                       KodiPackedAccessUnit* outPacket,
+                                       bool* emittedPacket)
 {
   AEAudioFormat resolved = streamAdapter_.GetResolvedFormat();
   CAEStreamInfo info = resolved.m_streamInfo;
   if (info.m_type == CAEStreamInfo::STREAM_TYPE_NULL || info.m_sampleRate == 0)
+    return;
+  if (outPacket == nullptr || emittedPacket == nullptr)
     return;
 
   if (pendingBurstPtsUs_ == NO_PTS && auPtsUs != NO_PTS)
@@ -117,16 +121,16 @@ void KodiIecPipeline::EmitPackedPacket(const uint8_t* auData,
   if (packedSize == 0)
     return;
 
-  KodiPackedAccessUnit packet;
-  packet.bytes.assign(bitstreamPacker_.GetBuffer(), bitstreamPacker_.GetBuffer() + packedSize);
-  packet.inputBytesConsumed = pendingBurstInputBytes_;
-  packet.ptsUs = pendingBurstPtsUs_;
-  packet.durationUs = pendingBurstDurationUs_ > 0 ? pendingBurstDurationUs_ : auDurationUs;
-  packet.outputRate = CAEBitstreamPacker::GetOutputRate(info);
-  packet.outputChannels =
+  outPacket->bytes.assign(bitstreamPacker_.GetBuffer(), bitstreamPacker_.GetBuffer() + packedSize);
+  outPacket->writeOffset = 0;
+  outPacket->inputBytesConsumed = pendingBurstInputBytes_;
+  outPacket->ptsUs = pendingBurstPtsUs_;
+  outPacket->durationUs = pendingBurstDurationUs_ > 0 ? pendingBurstDurationUs_ : auDurationUs;
+  outPacket->outputRate = CAEBitstreamPacker::GetOutputRate(info);
+  outPacket->outputChannels =
       std::max<unsigned int>(1u, CAEBitstreamPacker::GetOutputChannelMap(info).Count());
-  packet.streamInfo = info;
-  outPackets.emplace_back(std::move(packet));
+  outPacket->streamInfo = info;
+  *emittedPacket = true;
 
   if (pendingBurstPtsUs_ != NO_PTS && pendingBurstDurationUs_ > 0)
     pendingBurstPtsUs_ += pendingBurstDurationUs_;
