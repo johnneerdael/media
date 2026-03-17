@@ -4,6 +4,7 @@
 #include <string>
 
 #include "KodiActiveAEEngine.h"
+#include "cores/AudioEngine/Sinks/AESinkAUDIOTRACK.h"
 #include "cores/AudioEngine/Engines/ActiveAE/ActiveAESettings.h"
 
 namespace {
@@ -80,6 +81,17 @@ Java_androidx_media3_exoplayer_audio_kodi_KodiNativeAudioSink_nConfigure(
 {
   (void)clazz;
   return AsSession(native_handle)->Configure(ParseConfig(env, config_obj)) ? JNI_TRUE : JNI_FALSE;
+}
+
+extern "C" JNIEXPORT void JNICALL
+Java_androidx_media3_exoplayer_audio_kodi_KodiNativeAudioSink_nPrimeTrueHdIecAudioTrackPath(
+    JNIEnv* env, jclass clazz)
+{
+  (void)env;
+  (void)clazz;
+  CAESinkAUDIOTRACK::Register();
+  AEDeviceInfoList devices;
+  CAESinkAUDIOTRACK::EnumerateDevicesEx(devices, false);
 }
 
 extern "C" JNIEXPORT jint JNICALL

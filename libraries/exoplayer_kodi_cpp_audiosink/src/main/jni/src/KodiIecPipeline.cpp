@@ -24,6 +24,14 @@
 namespace androidx_media3
 {
 
+namespace
+{
+bool IsTrueHdPassthrough(const ActiveAE::CActiveAEMediaStreamAdapter& streamAdapter)
+{
+  return streamAdapter.GetRequestedFormat().m_streamInfo.m_type == CAEStreamInfo::STREAM_TYPE_TRUEHD;
+}
+}  // namespace
+
 void KodiIecPipeline::Configure(const AEAudioFormat& requestedFormat)
 {
   streamAdapter_.Configure(requestedFormat);
@@ -31,6 +39,7 @@ void KodiIecPipeline::Configure(const AEAudioFormat& requestedFormat)
   pendingBurstPtsUs_ = NO_PTS;
   pendingBurstDurationUs_ = 0;
   pendingBurstInputBytes_ = 0;
+  pendingBurstAccessUnitCount_ = 0;
 }
 
 void KodiIecPipeline::Reset()
@@ -40,6 +49,7 @@ void KodiIecPipeline::Reset()
   pendingBurstPtsUs_ = NO_PTS;
   pendingBurstDurationUs_ = 0;
   pendingBurstInputBytes_ = 0;
+  pendingBurstAccessUnitCount_ = 0;
 }
 
 int KodiIecPipeline::Feed(const uint8_t* data,
@@ -58,6 +68,25 @@ int KodiIecPipeline::Feed(const uint8_t* data,
   int remaining = size;
   int64_t currentPtsUs = presentationTimeUs;
   *emittedPacket = false;
+  const bool truehdPassthrough = IsTrueHdPassthrough(streamAdapter_);
+
+  if (truehdPassthrough && streamAdapter_.HasBacklog())
+  {
+    const uint8_t* backlogData = nullptr;
+    unsigned int backlogSize = 0;
+    int64_t backlogPtsUs = NO_PTS;
+    int64_t backlogDurationUs = 0;
+    if (streamAdapter_.DrainBacklog(
+            &backlogData, &backlogSize, &backlogPtsUs, &backlogDurationUs)
+        && backlogSize > 0 && backlogData != nullptr)
+    {
+      pendingBurstAccessUnitCount_ += 1;
+      EmitPackedPacket(
+          backlogData, backlogSize, backlogPtsUs, backlogDurationUs, outPacket, emittedPacket);
+      if (*emittedPacket)
+        return 0;
+    }
+  }
 
   while (remaining > 0 && !*emittedPacket)
   {
@@ -80,7 +109,24 @@ int KodiIecPipeline::Feed(const uint8_t* data,
 
     if (auSize > 0 && auData != nullptr)
     {
+      pendingBurstAccessUnitCount_ += 1;
       EmitPackedPacket(auData, auSize, auPtsUs, auDurationUs, outPacket, emittedPacket);
+    }
+
+    if (truehdPassthrough && !*emittedPacket && streamAdapter_.HasBacklog())
+    {
+      const uint8_t* backlogData = nullptr;
+      unsigned int backlogSize = 0;
+      int64_t backlogPtsUs = NO_PTS;
+      int64_t backlogDurationUs = 0;
+      if (streamAdapter_.DrainBacklog(
+              &backlogData, &backlogSize, &backlogPtsUs, &backlogDurationUs)
+          && backlogSize > 0 && backlogData != nullptr)
+      {
+        pendingBurstAccessUnitCount_ += 1;
+        EmitPackedPacket(
+            backlogData, backlogSize, backlogPtsUs, backlogDurationUs, outPacket, emittedPacket);
+      }
     }
 
     if (consumed <= 0)
@@ -124,6 +170,7 @@ void KodiIecPipeline::EmitPackedPacket(const uint8_t* auData,
   outPacket->bytes.assign(bitstreamPacker_.GetBuffer(), bitstreamPacker_.GetBuffer() + packedSize);
   outPacket->writeOffset = 0;
   outPacket->inputBytesConsumed = pendingBurstInputBytes_;
+  outPacket->sourceAccessUnitCount = std::max(1, pendingBurstAccessUnitCount_);
   outPacket->ptsUs = pendingBurstPtsUs_;
   outPacket->durationUs = pendingBurstDurationUs_ > 0 ? pendingBurstDurationUs_ : auDurationUs;
   outPacket->outputRate = CAEBitstreamPacker::GetOutputRate(info);
@@ -136,6 +183,7 @@ void KodiIecPipeline::EmitPackedPacket(const uint8_t* auData,
     pendingBurstPtsUs_ += pendingBurstDurationUs_;
   pendingBurstDurationUs_ = 0;
   pendingBurstInputBytes_ = 0;
+  pendingBurstAccessUnitCount_ = 0;
 }
 
 }  // namespace androidx_media3

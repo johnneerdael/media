@@ -35,12 +35,14 @@ public:
   bool Configure(unsigned int sampleRate,
                  unsigned int channelCount,
                  int encoding,
-                 bool passthrough);
+                 bool passthrough,
+                 bool truehdPassthrough);
   bool Play();
   void Pause();
   void Flush();
   void Release();
   int WriteNonBlocking(const uint8_t* data, int size);
+  int WriteBlocking(const uint8_t* data, int size);
   uint64_t GetPlaybackFrames64();
   bool GetTimestamp(uint64_t* framePosition, int64_t* systemTimeUs);
   int GetBufferSizeInFrames() const;
@@ -63,6 +65,7 @@ private:
   unsigned int frameSizeBytes_{0};
   int encoding_{CJNIAudioFormat::ENCODING_PCM_16BIT};
   bool passthroughIec_{false};
+  bool truehdPassthrough_{false};
 };
 
 }  // namespace androidx_media3
