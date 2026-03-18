@@ -49,7 +49,7 @@ struct KodiTrueHdPackedUnit
 class KodiTrueHdIecPipeline
 {
 public:
-  void Configure(const AEAudioFormat& requestedFormat);
+  void Configure(const AEAudioFormat& requestedFormat, bool verboseLogging);
   void Reset();
 
   int Feed(const uint8_t* data,
@@ -70,6 +70,7 @@ private:
 
   ActiveAE::CActiveAEMediaStreamAdapter streamAdapter_;
   CPackerMAT matPacker_;
+  bool verboseLogging_{false};
 
   int64_t pendingBurstPtsUs_{NO_PTS};
   int64_t pendingBurstDurationUs_{0};

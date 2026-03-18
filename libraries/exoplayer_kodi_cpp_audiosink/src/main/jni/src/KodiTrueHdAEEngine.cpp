@@ -63,8 +63,9 @@ bool KodiTrueHdAEEngine::Configure(const ActiveAE::CActiveAEMediaSettings& confi
   totalWrittenFrames_ = 0;
   lastWriteOutputBytes_ = 0;
   lastWriteErrorCode_ = 0;
-  iecPipeline_.Configure(requestedFormat_);
+  iecPipeline_.Configure(requestedFormat_, config.iecVerboseLogging);
   output_.Release();
+  output_.SetVerboseLogging(config.iecVerboseLogging);
   MarkReleasePendingLocked();
   CLog::Log(LOGINFO,
             "KodiTrueHdAEEngine::Configure mimeKind={} sampleRate={} channelCount={} passthrough={}",
@@ -90,6 +91,16 @@ int KodiTrueHdAEEngine::Write(const uint8_t* data,
   ended_ = false;
 
   const int consumed = iecPipeline_.Feed(data, size, presentation_time_us, packedQueue_);
+  if (config_.iecVerboseLogging)
+  {
+    CLog::Log(LOGINFO,
+              "KodiTrueHdAEEngine::Write consumed={} queuedPackets={} ptsUs={} "
+              "releasePending={}",
+              consumed,
+              packedQueue_.size(),
+              presentation_time_us,
+              IsReleasePendingLocked(NowUs()));
+  }
   if (!packedQueue_.empty())
     EnsureOutputConfiguredLocked();
   if (playRequested_)
@@ -261,6 +272,18 @@ bool KodiTrueHdAEEngine::EnsureOutputConfiguredLocked()
   const int encoding = CJNIAudioFormat::ENCODING_IEC61937 > 0
                            ? CJNIAudioFormat::ENCODING_IEC61937
                            : CJNIAudioFormat::ENCODING_PCM_16BIT;
+  if (config_.iecVerboseLogging)
+  {
+    CLog::Log(LOGINFO,
+              "KodiTrueHdAEEngine::EnsureOutputConfigured outputRate={} outputChannels={} "
+              "encoding={} burstBytes={} pc=0x{:04x} pd={}",
+              packet.outputRate,
+              packet.outputChannels,
+              encoding,
+              packet.burstSizeBytes,
+              packet.burstInfo,
+              packet.payloadLengthCode);
+  }
   return output_.Configure(packet.outputRate, packet.outputChannels, encoding, true);
 }
 
@@ -295,6 +318,20 @@ int KodiTrueHdAEEngine::FlushPackedQueueToHardwareLocked()
     packet.writeOffset += static_cast<size_t>(written);
     lastWriteOutputBytes_ += written;
     writtenTotal += written;
+
+    if (config_.iecVerboseLogging)
+    {
+      CLog::Log(LOGINFO,
+                "KodiTrueHdAEEngine::FlushPackedQueueToHardware writeRemaining={} written={} "
+                "writeOffset={} burstBytes={} inputBytes={} ptsUs={} auCount={}",
+                remaining,
+                written,
+                packet.writeOffset,
+                packet.burstSizeBytes,
+                packet.inputBytesConsumed,
+                packet.ptsUs,
+                packet.sourceAccessUnitCount);
+    }
 
     const unsigned int frameSizeBytes = output_.FrameSizeBytes();
     if (frameSizeBytes > 0)

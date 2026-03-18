@@ -19,21 +19,66 @@
 
 #include "utils/log.h"
 
+#include <algorithm>
+#include <cstdio>
+#include <string>
+
 namespace androidx_media3
 {
+
+namespace
+{
+uint32_t HashBytes(const uint8_t* data, size_t size)
+{
+  uint32_t hash = 2166136261u;
+  for (size_t i = 0; i < size; ++i)
+  {
+    hash ^= data[i];
+    hash *= 16777619u;
+  }
+  return hash;
+}
+
+std::string HexPreview(const uint8_t* data, size_t size, size_t maxBytes)
+{
+  if (data == nullptr || size == 0 || maxBytes == 0)
+    return "";
+
+  const size_t count = std::min(size, maxBytes);
+  std::string result;
+  result.reserve(count * 3);
+  char chunk[4];
+  for (size_t i = 0; i < count; ++i)
+  {
+    std::snprintf(chunk, sizeof(chunk), "%02X", data[i]);
+    if (!result.empty())
+      result.push_back(' ');
+    result.append(chunk);
+  }
+  return result;
+}
+}  // namespace
+
+void KodiTrueHdAudioTrackOutput::SetVerboseLogging(bool verboseLogging)
+{
+  verboseLogging_ = verboseLogging;
+}
 
 bool KodiTrueHdAudioTrackOutput::Configure(unsigned int sampleRate,
                                            unsigned int channelCount,
                                            int encoding,
                                            bool passthrough)
 {
-  CLog::Log(LOGINFO,
-            "KodiTrueHdAudioTrackOutput::Configure sampleRate={} channelCount={} encoding={} "
-            "passthrough={}",
-            sampleRate,
-            channelCount,
-            encoding,
-            passthrough);
+  if (verboseLogging_)
+  {
+    CLog::Log(LOGINFO,
+              "KodiTrueHdAudioTrackOutput::Configure sampleRate={} channelCount={} encoding={} "
+              "passthrough={}",
+              sampleRate,
+              channelCount,
+              encoding,
+              passthrough);
+  }
   return output_.Configure(sampleRate, channelCount, encoding, passthrough);
 }
 
@@ -59,7 +104,18 @@ void KodiTrueHdAudioTrackOutput::Release()
 
 int KodiTrueHdAudioTrackOutput::WriteNonBlocking(const uint8_t* data, int size)
 {
-  return output_.WriteNonBlocking(data, size);
+  const int written = output_.WriteNonBlocking(data, size);
+  if (verboseLogging_ && data != nullptr && size > 0)
+  {
+    CLog::Log(LOGINFO,
+              "KodiTrueHdAudioTrackOutput::WriteNonBlocking size={} written={} crc=0x{:08x} "
+              "preview={}",
+              size,
+              written,
+              HashBytes(data, static_cast<size_t>(size)),
+              HexPreview(data, static_cast<size_t>(size), 32));
+  }
+  return written;
 }
 
 uint64_t KodiTrueHdAudioTrackOutput::GetPlaybackFrames64()
