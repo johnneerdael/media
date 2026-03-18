@@ -17,11 +17,15 @@
 
 #pragma once
 
-#include "KodiActiveAEEngine.h"
 #include "KodiTrueHdAudioTrackOutput.h"
+#include "KodiTrueHdIecPipeline.h"
 #include "cores/AudioEngine/Engines/ActiveAE/ActiveAESettings.h"
+#include "threads/CriticalSection.h"
 
+#include <chrono>
 #include <cstdint>
+#include <deque>
+#include <limits>
 
 namespace androidx_media3
 {
@@ -51,8 +55,34 @@ public:
   void Reset();
 
 private:
+  static constexpr int64_t NO_PTS = std::numeric_limits<int64_t>::min();
+  static constexpr int64_t CURRENT_POSITION_NOT_SET = std::numeric_limits<int64_t>::min();
+  static constexpr int64_t RELEASE_PENDING_HOLD_US = 200000;
+
+  bool EnsureOutputConfiguredLocked();
+  int FlushPackedQueueToHardwareLocked();
+  void MarkReleasePendingLocked();
+  bool IsReleasePendingLocked(int64_t nowUs) const;
+
+  mutable CCriticalSection lock_;
+  ActiveAE::CActiveAEMediaSettings config_{};
+  AEAudioFormat requestedFormat_{};
+  bool configured_{false};
+  bool playRequested_{false};
+  bool outputStarted_{false};
+  bool ended_{false};
+  bool passthrough_{false};
+  float volume_{1.0f};
+  int64_t hostClockUs_{CURRENT_POSITION_NOT_SET};
+  double hostClockSpeed_{1.0};
+  int64_t releasePendingUntilUs_{CURRENT_POSITION_NOT_SET};
+
   KodiTrueHdAudioTrackOutput output_;
-  KodiActiveAEEngine engine_;
+  KodiTrueHdIecPipeline iecPipeline_;
+  std::deque<KodiTrueHdPackedUnit> packedQueue_;
+  uint64_t totalWrittenFrames_{0};
+  int lastWriteOutputBytes_{0};
+  int lastWriteErrorCode_{0};
 };
 
 }  // namespace androidx_media3
