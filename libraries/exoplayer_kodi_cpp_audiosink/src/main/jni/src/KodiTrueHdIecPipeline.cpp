@@ -18,13 +18,46 @@
 #include "KodiTrueHdIecPipeline.h"
 
 #include "cores/AudioEngine/Utils/AEPackIEC61937.h"
+#include "utils/log.h"
 
 #include <algorithm>
+#include <cstdio>
+#include <string>
 
 namespace
 {
 constexpr uint16_t IEC61937_PREAMBLE1 = 0xF872;
 constexpr uint16_t IEC61937_PREAMBLE2 = 0x4E1F;
+
+uint32_t HashBytes(const uint8_t* data, size_t size)
+{
+  uint32_t hash = 2166136261u;
+  for (size_t i = 0; i < size; ++i)
+  {
+    hash ^= data[i];
+    hash *= 16777619u;
+  }
+  return hash;
+}
+
+std::string HexPreview(const uint8_t* data, size_t size, size_t maxBytes)
+{
+  if (data == nullptr || size == 0 || maxBytes == 0)
+    return "";
+
+  const size_t count = std::min(size, maxBytes);
+  std::string result;
+  result.reserve(count * 3);
+  char chunk[4];
+  for (size_t i = 0; i < count; ++i)
+  {
+    std::snprintf(chunk, sizeof(chunk), "%02X", data[i]);
+    if (!result.empty())
+      result.push_back(' ');
+    result.append(chunk);
+  }
+  return result;
+}
 
 void SwapEndianInPlace(uint8_t* data, size_t size)
 {
@@ -36,10 +69,11 @@ void SwapEndianInPlace(uint8_t* data, size_t size)
 namespace androidx_media3
 {
 
-void KodiTrueHdIecPipeline::Configure(const AEAudioFormat& requestedFormat)
+void KodiTrueHdIecPipeline::Configure(const AEAudioFormat& requestedFormat, bool verboseLogging)
 {
   streamAdapter_.Configure(requestedFormat);
   matPacker_ = CPackerMAT();
+  verboseLogging_ = verboseLogging;
   pendingBurstPtsUs_ = NO_PTS;
   pendingBurstDurationUs_ = 0;
   pendingBurstInputBytes_ = 0;
@@ -97,6 +131,22 @@ int KodiTrueHdIecPipeline::Feed(const uint8_t* data,
         pendingBurstDurationUs_ += auDurationUs;
       ++pendingBurstAccessUnitCount_;
 
+      if (verboseLogging_)
+      {
+        CLog::Log(LOGINFO,
+                  "KodiTrueHdIecPipeline::InputAccessUnit size={} ptsUs={} durationUs={} "
+                  "auCount={} crc=0x{:08x} preview={}",
+                  static_cast<int>(auSize - IEC61937_DATA_OFFSET),
+                  auPtsUs,
+                  auDurationUs,
+                  pendingBurstAccessUnitCount_,
+                  HashBytes(auData + IEC61937_DATA_OFFSET,
+                            static_cast<size_t>(auSize - IEC61937_DATA_OFFSET)),
+                  HexPreview(auData + IEC61937_DATA_OFFSET,
+                             static_cast<size_t>(auSize - IEC61937_DATA_OFFSET),
+                             32));
+      }
+
       matPacker_.PackTrueHD(
           auData + IEC61937_DATA_OFFSET, static_cast<int>(auSize - IEC61937_DATA_OFFSET));
       EmitPackedMatFrames(outPackets, maxPackets);
@@ -151,6 +201,25 @@ void KodiTrueHdIecPipeline::EmitPackedMatFrames(std::deque<KodiTrueHdPackedUnit>
     packet.matFrameSizeBytes = kMatFramePayloadLengthCode;
     packet.burstSizeBytes = kMatBurstSizeBytes;
     packet.paddingBytes = std::max(0, kMatBurstSizeBytes - IEC61937_DATA_OFFSET - kMatFramePayloadLengthCode);
+
+    if (verboseLogging_)
+    {
+      CLog::Log(LOGINFO,
+                "KodiTrueHdIecPipeline::PackedMatFrame bytes={} inputBytes={} ptsUs={} "
+                "durationUs={} auCount={} pc=0x{:04x} pd={} paddingBytes={} frameOffset={} "
+                "crc=0x{:08x} preview={}",
+                static_cast<int>(packet.bytes.size()),
+                packet.inputBytesConsumed,
+                packet.ptsUs,
+                packet.durationUs,
+                packet.sourceAccessUnitCount,
+                packet.burstInfo,
+                packet.payloadLengthCode,
+                packet.paddingBytes,
+                kTrueHdFrameOffsetBytes,
+                HashBytes(packet.bytes.data(), packet.bytes.size()),
+                HexPreview(packet.bytes.data(), packet.bytes.size(), 32));
+    }
     outPackets.emplace_back(std::move(packet));
 
     if (pendingBurstPtsUs_ != NO_PTS && pendingBurstDurationUs_ > 0)

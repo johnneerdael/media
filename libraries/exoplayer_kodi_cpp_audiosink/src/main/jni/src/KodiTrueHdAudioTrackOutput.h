@@ -31,6 +31,7 @@ public:
                  unsigned int channelCount,
                  int encoding,
                  bool passthrough);
+  void SetVerboseLogging(bool verboseLogging);
   bool Play();
   void Pause();
   void Flush();
@@ -47,6 +48,7 @@ public:
 
 private:
   KodiAudioTrackOutput output_;
+  bool verboseLogging_{false};
 };
 
 }  // namespace androidx_media3
