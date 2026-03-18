@@ -25,8 +25,8 @@
 #include <atomic>
 #include <array>
 #include <cstdint>
+#include <deque>
 #include <limits>
-#include <optional>
 #include <vector>
 
 namespace androidx_media3
@@ -51,13 +51,7 @@ public:
   int64_t GetCurrentPositionUs();
   bool HasPendingData();
   bool IsEnded();
-  bool IsPassthroughStartupReady();
   int64_t GetBufferSizeUs() const;
-  int64_t GetBufferSizeBytes() const;
-  void ProbePassthroughStartupBuffer(const uint8_t* data,
-                                     int size,
-                                     int64_t presentation_time_us,
-                                     int encoded_access_unit_count);
   int ConsumeLastWriteOutputBytes();
   int ConsumeLastWriteErrorCode();
   bool IsReleasePending();
@@ -105,18 +99,7 @@ private:
   struct PendingPcmChunk
   {
     std::vector<uint8_t> bytes;
-    size_t writeOffset{0};
-    int inputBytesConsumed{0};
     int64_t ptsUs{NO_PTS};
-  };
-
-  struct PendingPassthroughInput
-  {
-    std::vector<uint8_t> bytes;
-    size_t feedOffset{0};
-    int acknowledgedBytes{0};
-    int64_t ptsUs{NO_PTS};
-    int encodedAccessUnitCount{1};
   };
 
   struct MediaPositionParameters
@@ -154,7 +137,6 @@ private:
                                              int64_t playbackHeadEstimateUs) const;
   int64_t QueueDurationUsLocked() const;
   uint64_t QueueBytesLocked() const;
-  uint64_t GetSubmittedOutputFramesLocked() const;
   void UpdateExpectedPtsLocked(int64_t packetPtsUs, int64_t packetDurationUs);
   bool TryResolvePendingDiscontinuityLocked();
   void ReanchorForDiscontinuityLocked(int64_t packetPtsUs);
@@ -175,10 +157,11 @@ private:
 
   KodiIecPipeline iecPipeline_;
   KodiAudioTrackOutput output_;
-  std::optional<PendingPassthroughInput> pendingPassthroughInput_;
-  std::optional<KodiPackedAccessUnit> pendingPackedOutput_;
-  std::optional<PendingPcmChunk> pendingPcmOutput_;
+  std::deque<KodiPackedAccessUnit> packedQueue_;
+  std::deque<PendingPcmChunk> pcmQueue_;
   int64_t queuedDurationUs_{0};
+  int64_t firstQueuedPtsUs_{NO_PTS};
+  int pendingPassthroughAckBytes_{0};
 
   uint64_t totalWrittenFrames_{0};
   bool anchorValid_{false};

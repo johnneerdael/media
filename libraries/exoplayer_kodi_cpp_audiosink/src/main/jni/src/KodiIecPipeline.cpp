@@ -24,14 +24,6 @@
 namespace androidx_media3
 {
 
-namespace
-{
-bool IsTrueHdPassthrough(const ActiveAE::CActiveAEMediaStreamAdapter& streamAdapter)
-{
-  return streamAdapter.GetRequestedFormat().m_streamInfo.m_type == CAEStreamInfo::STREAM_TYPE_TRUEHD;
-}
-}  // namespace
-
 void KodiIecPipeline::Configure(const AEAudioFormat& requestedFormat)
 {
   streamAdapter_.Configure(requestedFormat);
@@ -39,7 +31,6 @@ void KodiIecPipeline::Configure(const AEAudioFormat& requestedFormat)
   pendingBurstPtsUs_ = NO_PTS;
   pendingBurstDurationUs_ = 0;
   pendingBurstInputBytes_ = 0;
-  pendingBurstAccessUnitCount_ = 0;
 }
 
 void KodiIecPipeline::Reset()
@@ -49,46 +40,24 @@ void KodiIecPipeline::Reset()
   pendingBurstPtsUs_ = NO_PTS;
   pendingBurstDurationUs_ = 0;
   pendingBurstInputBytes_ = 0;
-  pendingBurstAccessUnitCount_ = 0;
 }
 
 int KodiIecPipeline::Feed(const uint8_t* data,
                           int size,
                           int64_t presentationTimeUs,
-                          KodiPackedAccessUnit* outPacket,
-                          bool* emittedPacket)
+                          std::deque<KodiPackedAccessUnit>& outPackets,
+                          int maxPackets)
 {
   if (data == nullptr || size <= 0)
-    return 0;
-  if (outPacket == nullptr || emittedPacket == nullptr)
     return 0;
 
   int consumedTotal = 0;
   const uint8_t* current = data;
   int remaining = size;
   int64_t currentPtsUs = presentationTimeUs;
-  *emittedPacket = false;
-  const bool truehdPassthrough = IsTrueHdPassthrough(streamAdapter_);
+  int producedPackets = 0;
 
-  if (truehdPassthrough && streamAdapter_.HasBacklog())
-  {
-    const uint8_t* backlogData = nullptr;
-    unsigned int backlogSize = 0;
-    int64_t backlogPtsUs = NO_PTS;
-    int64_t backlogDurationUs = 0;
-    if (streamAdapter_.DrainBacklog(
-            &backlogData, &backlogSize, &backlogPtsUs, &backlogDurationUs)
-        && backlogSize > 0 && backlogData != nullptr)
-    {
-      pendingBurstAccessUnitCount_ += 1;
-      EmitPackedPacket(
-          backlogData, backlogSize, backlogPtsUs, backlogDurationUs, outPacket, emittedPacket);
-      if (*emittedPacket)
-        return 0;
-    }
-  }
-
-  while (remaining > 0 && !*emittedPacket)
+  while (remaining > 0 && producedPackets < maxPackets)
   {
     const uint8_t* auData = nullptr;
     unsigned int auSize = 0;
@@ -109,24 +78,8 @@ int KodiIecPipeline::Feed(const uint8_t* data,
 
     if (auSize > 0 && auData != nullptr)
     {
-      pendingBurstAccessUnitCount_ += 1;
-      EmitPackedPacket(auData, auSize, auPtsUs, auDurationUs, outPacket, emittedPacket);
-    }
-
-    if (truehdPassthrough && !*emittedPacket && streamAdapter_.HasBacklog())
-    {
-      const uint8_t* backlogData = nullptr;
-      unsigned int backlogSize = 0;
-      int64_t backlogPtsUs = NO_PTS;
-      int64_t backlogDurationUs = 0;
-      if (streamAdapter_.DrainBacklog(
-              &backlogData, &backlogSize, &backlogPtsUs, &backlogDurationUs)
-          && backlogSize > 0 && backlogData != nullptr)
-      {
-        pendingBurstAccessUnitCount_ += 1;
-        EmitPackedPacket(
-            backlogData, backlogSize, backlogPtsUs, backlogDurationUs, outPacket, emittedPacket);
-      }
+      EmitPackedPacket(auData, auSize, auPtsUs, auDurationUs, outPackets);
+      ++producedPackets;
     }
 
     if (consumed <= 0)
@@ -147,14 +100,11 @@ void KodiIecPipeline::EmitPackedPacket(const uint8_t* auData,
                                        unsigned int auSize,
                                        int64_t auPtsUs,
                                        int64_t auDurationUs,
-                                       KodiPackedAccessUnit* outPacket,
-                                       bool* emittedPacket)
+                                       std::deque<KodiPackedAccessUnit>& outPackets)
 {
   AEAudioFormat resolved = streamAdapter_.GetResolvedFormat();
   CAEStreamInfo info = resolved.m_streamInfo;
   if (info.m_type == CAEStreamInfo::STREAM_TYPE_NULL || info.m_sampleRate == 0)
-    return;
-  if (outPacket == nullptr || emittedPacket == nullptr)
     return;
 
   if (pendingBurstPtsUs_ == NO_PTS && auPtsUs != NO_PTS)
@@ -167,23 +117,21 @@ void KodiIecPipeline::EmitPackedPacket(const uint8_t* auData,
   if (packedSize == 0)
     return;
 
-  outPacket->bytes.assign(bitstreamPacker_.GetBuffer(), bitstreamPacker_.GetBuffer() + packedSize);
-  outPacket->writeOffset = 0;
-  outPacket->inputBytesConsumed = pendingBurstInputBytes_;
-  outPacket->sourceAccessUnitCount = std::max(1, pendingBurstAccessUnitCount_);
-  outPacket->ptsUs = pendingBurstPtsUs_;
-  outPacket->durationUs = pendingBurstDurationUs_ > 0 ? pendingBurstDurationUs_ : auDurationUs;
-  outPacket->outputRate = CAEBitstreamPacker::GetOutputRate(info);
-  outPacket->outputChannels =
+  KodiPackedAccessUnit packet;
+  packet.bytes.assign(bitstreamPacker_.GetBuffer(), bitstreamPacker_.GetBuffer() + packedSize);
+  packet.inputBytesConsumed = pendingBurstInputBytes_;
+  packet.ptsUs = pendingBurstPtsUs_;
+  packet.durationUs = pendingBurstDurationUs_ > 0 ? pendingBurstDurationUs_ : auDurationUs;
+  packet.outputRate = CAEBitstreamPacker::GetOutputRate(info);
+  packet.outputChannels =
       std::max<unsigned int>(1u, CAEBitstreamPacker::GetOutputChannelMap(info).Count());
-  outPacket->streamInfo = info;
-  *emittedPacket = true;
+  packet.streamInfo = info;
+  outPackets.emplace_back(std::move(packet));
 
   if (pendingBurstPtsUs_ != NO_PTS && pendingBurstDurationUs_ > 0)
     pendingBurstPtsUs_ += pendingBurstDurationUs_;
   pendingBurstDurationUs_ = 0;
   pendingBurstInputBytes_ = 0;
-  pendingBurstAccessUnitCount_ = 0;
 }
 
 }  // namespace androidx_media3

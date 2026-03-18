@@ -696,9 +696,6 @@ public class MediaCodecAudioRenderer extends MediaCodecRenderer implements Media
   /** See {@link AudioSink.Listener#onPositionDiscontinuity()}. */
   @CallSuper
   protected void onPositionDiscontinuity() {
-    if (MimeTypes.AUDIO_TRUEHD.equals(inputFormat != null ? inputFormat.sampleMimeType : null)) {
-      Log.i(TAG, "TrueHD renderer onPositionDiscontinuity()");
-    }
     // We are out of sync so allow currentPositionUs to jump backwards.
     allowPositionDiscontinuity = true;
   }
@@ -722,16 +719,6 @@ public class MediaCodecAudioRenderer extends MediaCodecRenderer implements Media
       long positionUs, boolean joining, boolean sampleStreamIsResetToKeyFrame)
       throws ExoPlaybackException {
     super.onPositionReset(positionUs, joining, sampleStreamIsResetToKeyFrame);
-    if (MimeTypes.AUDIO_TRUEHD.equals(inputFormat != null ? inputFormat.sampleMimeType : null)) {
-      Log.i(
-          TAG,
-          "TrueHD renderer onPositionReset() positionUs="
-              + positionUs
-              + " joining="
-              + joining
-              + " sampleStreamIsResetToKeyFrame="
-              + sampleStreamIsResetToKeyFrame);
-    }
     audioSink.flush();
 
     currentPositionUs = positionUs;
@@ -744,9 +731,6 @@ public class MediaCodecAudioRenderer extends MediaCodecRenderer implements Media
   @Override
   protected void onStarted() {
     super.onStarted();
-    if (MimeTypes.AUDIO_TRUEHD.equals(inputFormat != null ? inputFormat.sampleMimeType : null)) {
-      Log.i(TAG, "TrueHD renderer onStarted()");
-    }
     audioSink.play();
     isStarted = true;
   }
@@ -755,9 +739,6 @@ public class MediaCodecAudioRenderer extends MediaCodecRenderer implements Media
   protected void onStopped() {
     updateCurrentPosition();
     isStarted = false;
-    if (MimeTypes.AUDIO_TRUEHD.equals(inputFormat != null ? inputFormat.sampleMimeType : null)) {
-      Log.i(TAG, "TrueHD renderer onStopped() currentPositionUs=" + currentPositionUs);
-    }
     audioSink.pause();
     super.onStopped();
     hasReportedAudioPositionAdvancing = false;
@@ -766,9 +747,6 @@ public class MediaCodecAudioRenderer extends MediaCodecRenderer implements Media
   @Override
   protected void onDisabled() {
     audioSinkNeedsReset = true;
-    if (MimeTypes.AUDIO_TRUEHD.equals(inputFormat != null ? inputFormat.sampleMimeType : null)) {
-      Log.i(TAG, "TrueHD renderer onDisabled()");
-    }
     inputFormat = null;
     nextBufferToWritePresentationTimeUs = C.TIME_UNSET;
     hasReportedAudioPositionAdvancing = false;
@@ -1207,9 +1185,6 @@ public class MediaCodecAudioRenderer extends MediaCodecRenderer implements Media
 
     @Override
     public void onPositionDiscontinuity() {
-      if (MimeTypes.AUDIO_TRUEHD.equals(inputFormat != null ? inputFormat.sampleMimeType : null)) {
-        Log.i(TAG, "TrueHD renderer listener onPositionDiscontinuity()");
-      }
       MediaCodecAudioRenderer.this.onPositionDiscontinuity();
     }
 
@@ -1252,9 +1227,6 @@ public class MediaCodecAudioRenderer extends MediaCodecRenderer implements Media
 
     @Override
     public void onAudioSinkError(Exception audioSinkError) {
-      if (MimeTypes.AUDIO_TRUEHD.equals(inputFormat != null ? inputFormat.sampleMimeType : null)) {
-        Log.e(TAG, "TrueHD renderer listener onAudioSinkError", audioSinkError);
-      }
       Log.e(TAG, "Audio sink error", audioSinkError);
       eventDispatcher.audioSinkError(audioSinkError);
     }

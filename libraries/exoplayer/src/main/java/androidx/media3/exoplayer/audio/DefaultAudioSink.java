@@ -992,14 +992,6 @@ public final class DefaultAudioSink implements AudioSink {
                   getSubmittedFrames() - trimmingAudioProcessor.getTrimmedFrameCount());
       if (!startMediaTimeUsNeedsSync
           && Math.abs(expectedPresentationTimeUs - presentationTimeUs) > 200000) {
-        if (MimeTypes.AUDIO_TRUEHD.equals(configuration.inputFormat.sampleMimeType)) {
-          Log.w(
-              TAG,
-              "TrueHD sink unexpected discontinuity presentationTimeUs="
-                  + presentationTimeUs
-                  + " expectedPresentationTimeUs="
-                  + expectedPresentationTimeUs);
-        }
         if (listener != null) {
           listener.onAudioSinkError(
               new AudioSink.UnexpectedDiscontinuityException(
@@ -1043,9 +1035,6 @@ public final class DefaultAudioSink implements AudioSink {
     }
 
     if (audioOutput.isStalled()) {
-      if (MimeTypes.AUDIO_TRUEHD.equals(configuration.inputFormat.sampleMimeType)) {
-        Log.w(TAG, "TrueHD sink stalled; resetting audio output");
-      }
       Log.w(TAG, "Resetting stalled audio output");
       flush();
       return true;
