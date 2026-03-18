@@ -49,7 +49,9 @@ add_library(kodiCppAudioSinkJNI
             src/kodi_cpp_androidjni.cpp
             src/kodi_cpp_android_context.cpp
             src/KodiActiveAEEngine.cpp
+            src/KodiTrueHdAEEngine.cpp
             src/KodiAudioTrackOutput.cpp
+            src/KodiTrueHdAudioTrackOutput.cpp
             src/KodiIecPipeline.cpp
             ${FMT_ROOT}/src/format.cc
             ${KODI_XBMC_ROOT}/commons/Exception.cpp
