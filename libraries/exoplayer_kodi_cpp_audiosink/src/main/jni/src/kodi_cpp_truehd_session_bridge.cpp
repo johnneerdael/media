@@ -3,16 +3,16 @@
 #include <cstdint>
 #include <string>
 
-#include "KodiActiveAEEngine.h"
+#include "KodiTrueHdAEEngine.h"
 #include "cores/AudioEngine/Engines/ActiveAE/ActiveAESettings.h"
 
 namespace {
 
-using androidx_media3::KodiActiveAEEngine;
+using androidx_media3::KodiTrueHdAEEngine;
 
-KodiActiveAEEngine* AsSession(jlong native_handle)
+KodiTrueHdAEEngine* AsSession(jlong native_handle)
 {
-  return reinterpret_cast<KodiActiveAEEngine*>(native_handle);
+  return reinterpret_cast<KodiTrueHdAEEngine*>(native_handle);
 }
 
 jint GetIntField(JNIEnv* env, jobject obj, jclass clazz, const char* name)
@@ -70,7 +70,7 @@ Java_androidx_media3_exoplayer_audio_kodi_KodiTrueHdNativeAudioSink_nCreate(JNIE
 {
   (void)env;
   (void)clazz;
-  return reinterpret_cast<jlong>(new KodiActiveAEEngine());
+  return reinterpret_cast<jlong>(new KodiTrueHdAEEngine());
 }
 
 extern "C" JNIEXPORT jboolean JNICALL
