@@ -82,16 +82,7 @@ struct AudioIds
   jmethodID audioFormatBuild = nullptr;
 
   jclass audioTrackClass = nullptr;
-  jclass audioTrackBuilderClass = nullptr;
   jmethodID audioTrackCtor = nullptr;
-  jmethodID audioTrackBuilderCtor = nullptr;
-  jmethodID audioTrackBuilderSetAudioAttributes = nullptr;
-  jmethodID audioTrackBuilderSetAudioFormat = nullptr;
-  jmethodID audioTrackBuilderSetTransferMode = nullptr;
-  jmethodID audioTrackBuilderSetBufferSizeInBytes = nullptr;
-  jmethodID audioTrackBuilderSetSessionId = nullptr;
-  jmethodID audioTrackBuilderSetEncapsulationMode = nullptr;
-  jmethodID audioTrackBuilderBuild = nullptr;
   jmethodID audioTrackGetState = nullptr;
   jmethodID audioTrackGetPlayState = nullptr;
   jmethodID audioTrackPlay = nullptr;
@@ -151,12 +142,10 @@ bool EnsureIds() {
   ids.audioAttributesBuilderClass = loadClass("android/media/AudioAttributes$Builder");
   ids.audioFormatBuilderClass = loadClass("android/media/AudioFormat$Builder");
   ids.audioTrackClass = loadClass("android/media/AudioTrack");
-  ids.audioTrackBuilderClass = loadClass("android/media/AudioTrack$Builder");
   ids.audioTimestampClass = loadClass("android/media/AudioTimestamp");
   ids.byteBufferClass = loadClass("java/nio/ByteBuffer");
   if (ids.audioAttributesBuilderClass == nullptr || ids.audioFormatBuilderClass == nullptr ||
-      ids.audioTrackClass == nullptr || ids.audioTrackBuilderClass == nullptr ||
-      ids.audioTimestampClass == nullptr ||
+      ids.audioTrackClass == nullptr || ids.audioTimestampClass == nullptr ||
       ids.byteBufferClass == nullptr) {
     return false;
   }
@@ -187,33 +176,6 @@ bool EnsureIds() {
   ids.audioTrackCtor =
       env->GetMethodID(ids.audioTrackClass, "<init>",
                        "(Landroid/media/AudioAttributes;Landroid/media/AudioFormat;III)V");
-  ids.audioTrackBuilderCtor = env->GetMethodID(ids.audioTrackBuilderClass, "<init>", "()V");
-  ids.audioTrackBuilderSetAudioAttributes =
-      env->GetMethodID(ids.audioTrackBuilderClass,
-                       "setAudioAttributes",
-                       "(Landroid/media/AudioAttributes;)Landroid/media/AudioTrack$Builder;");
-  ids.audioTrackBuilderSetAudioFormat =
-      env->GetMethodID(ids.audioTrackBuilderClass,
-                       "setAudioFormat",
-                       "(Landroid/media/AudioFormat;)Landroid/media/AudioTrack$Builder;");
-  ids.audioTrackBuilderSetTransferMode =
-      env->GetMethodID(ids.audioTrackBuilderClass,
-                       "setTransferMode",
-                       "(I)Landroid/media/AudioTrack$Builder;");
-  ids.audioTrackBuilderSetBufferSizeInBytes =
-      env->GetMethodID(ids.audioTrackBuilderClass,
-                       "setBufferSizeInBytes",
-                       "(I)Landroid/media/AudioTrack$Builder;");
-  ids.audioTrackBuilderSetSessionId =
-      env->GetMethodID(ids.audioTrackBuilderClass,
-                       "setSessionId",
-                       "(I)Landroid/media/AudioTrack$Builder;");
-  ids.audioTrackBuilderSetEncapsulationMode =
-      env->GetMethodID(ids.audioTrackBuilderClass,
-                       "setEncapsulationMode",
-                       "(I)Landroid/media/AudioTrack$Builder;");
-  ids.audioTrackBuilderBuild =
-      env->GetMethodID(ids.audioTrackBuilderClass, "build", "()Landroid/media/AudioTrack;");
   ids.audioTrackGetState = env->GetMethodID(ids.audioTrackClass, "getState", "()I");
   ids.audioTrackGetPlayState = env->GetMethodID(ids.audioTrackClass, "getPlayState", "()I");
   ids.audioTrackPlay = env->GetMethodID(ids.audioTrackClass, "play", "()V");
@@ -344,8 +306,6 @@ int CJNIAudioTrack::PLAYSTATE_PAUSED = 2;
 int CJNIAudioTrack::PLAYSTATE_PLAYING = 3;
 int CJNIAudioTrack::STATE_UNINITIALIZED = 0;
 int CJNIAudioTrack::STATE_INITIALIZED = 1;
-int CJNIAudioTrack::ENCAPSULATION_MODE_NONE = 0;
-int CJNIAudioTrack::ENCAPSULATION_MODE_ELEMENTARY_STREAM = 1;
 
 static bool EnsureAudioConstants() {
   std::lock_guard<std::mutex> lock(g_audio_constants_mutex);
@@ -403,11 +363,6 @@ static bool EnsureAudioConstants() {
       LoadStaticIntField<int>("android/media/AudioTrack", "WRITE_BLOCKING", 0);
   CJNIAudioTrack::WRITE_NON_BLOCKING =
       LoadStaticIntField<int>("android/media/AudioTrack", "WRITE_NON_BLOCKING", 1);
-  CJNIAudioTrack::ENCAPSULATION_MODE_NONE =
-      LoadStaticIntField<int>("android/media/AudioTrack", "ENCAPSULATION_MODE_NONE", 0);
-  CJNIAudioTrack::ENCAPSULATION_MODE_ELEMENTARY_STREAM =
-      LoadStaticIntField<int>(
-          "android/media/AudioTrack", "ENCAPSULATION_MODE_ELEMENTARY_STREAM", 1);
 
   g_audio_constants_loaded = CJNIAudioFormat::CHANNEL_OUT_STEREO != 0 &&
                              CJNIAudioFormat::ENCODING_PCM_16BIT > 0;
@@ -612,62 +567,17 @@ CJNIAudioTrack::CJNIAudioTrack(jobject attributes,
                                jobject format,
                                int bufferSize,
                                int mode,
-                               int audioSessionId,
-                               int encapsulationMode) {
+                               int audioSessionId) {
   EnsureIds();
   EnsureAudioConstants();
   JNIEnv* env = GetEnvOrNull();
   if (env == nullptr) {
     return;
   }
-  const int sessionId =
-      audioSessionId == 0 ? CJNIAudioManager::AUDIO_SESSION_ID_GENERATE : audioSessionId;
-  jobject local = nullptr;
-  if (encapsulationMode != ENCAPSULATION_MODE_NONE &&
-      GetIds().audioTrackBuilderCtor != nullptr &&
-      GetIds().audioTrackBuilderSetAudioAttributes != nullptr &&
-      GetIds().audioTrackBuilderSetAudioFormat != nullptr &&
-      GetIds().audioTrackBuilderSetTransferMode != nullptr &&
-      GetIds().audioTrackBuilderSetBufferSizeInBytes != nullptr &&
-      GetIds().audioTrackBuilderSetSessionId != nullptr &&
-      GetIds().audioTrackBuilderSetEncapsulationMode != nullptr &&
-      GetIds().audioTrackBuilderBuild != nullptr)
-  {
-    jobject builder =
-        env->NewObject(GetIds().audioTrackBuilderClass, GetIds().audioTrackBuilderCtor);
-    if (builder != nullptr)
-    {
-      env->CallObjectMethod(builder, GetIds().audioTrackBuilderSetAudioAttributes, attributes);
-      env->CallObjectMethod(builder, GetIds().audioTrackBuilderSetAudioFormat, format);
-      env->CallObjectMethod(builder, GetIds().audioTrackBuilderSetTransferMode, mode);
-      env->CallObjectMethod(builder, GetIds().audioTrackBuilderSetBufferSizeInBytes, bufferSize);
-      env->CallObjectMethod(builder, GetIds().audioTrackBuilderSetSessionId, sessionId);
-      env->CallObjectMethod(
-          builder, GetIds().audioTrackBuilderSetEncapsulationMode, encapsulationMode);
-      local = env->CallObjectMethod(builder, GetIds().audioTrackBuilderBuild);
-      env->DeleteLocalRef(builder);
-      if (env->ExceptionCheck())
-      {
-        env->ExceptionClear();
-        if (local != nullptr)
-        {
-          env->DeleteLocalRef(local);
-          local = nullptr;
-        }
-      }
-    }
-  }
-  if (local == nullptr)
-  {
-    local = env->NewObject(
-        GetIds().audioTrackClass,
-        GetIds().audioTrackCtor,
-        attributes,
-        format,
-        bufferSize,
-        mode,
-        sessionId);
-  }
+  jobject local = env->NewObject(GetIds().audioTrackClass, GetIds().audioTrackCtor, attributes,
+                                 format, bufferSize, mode,
+                                 audioSessionId == 0 ? CJNIAudioManager::AUDIO_SESSION_ID_GENERATE
+                                                     : audioSessionId);
   if (local != nullptr) {
     m_audioTrack = env->NewGlobalRef(local);
     env->DeleteLocalRef(local);

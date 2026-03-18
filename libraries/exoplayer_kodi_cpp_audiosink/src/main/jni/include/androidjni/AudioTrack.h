@@ -24,15 +24,12 @@ public:
   static int PLAYSTATE_PLAYING;
   static int STATE_UNINITIALIZED;
   static int STATE_INITIALIZED;
-  static int ENCAPSULATION_MODE_NONE;
-  static int ENCAPSULATION_MODE_ELEMENTARY_STREAM;
 
   CJNIAudioTrack(jobject attributes,
                  jobject format,
                  int bufferSize,
                  int mode,
-                 int audioSessionId,
-                 int encapsulationMode = 0);
+                 int audioSessionId);
   ~CJNIAudioTrack();
 
   int getState() const;

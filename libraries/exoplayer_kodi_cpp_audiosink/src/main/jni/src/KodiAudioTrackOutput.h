@@ -35,14 +35,12 @@ public:
   bool Configure(unsigned int sampleRate,
                  unsigned int channelCount,
                  int encoding,
-                 bool passthrough,
-                 bool truehdPassthrough);
+                 bool passthrough);
   bool Play();
   void Pause();
   void Flush();
   void Release();
   int WriteNonBlocking(const uint8_t* data, int size);
-  int WriteBlocking(const uint8_t* data, int size);
   uint64_t GetPlaybackFrames64();
   bool GetTimestamp(uint64_t* framePosition, int64_t* systemTimeUs);
   int GetBufferSizeInFrames() const;
@@ -57,15 +55,12 @@ private:
 
   std::unique_ptr<CJNIAudioTrack> track_;
   std::vector<char> writeBuffer_;
-  std::vector<int16_t> writeShortBuffer_;
   uint32_t lastPlaybackHead32_{0};
   uint64_t playbackWrapCount_{0};
   unsigned int sampleRate_{0};
   unsigned int channelCount_{0};
   unsigned int frameSizeBytes_{0};
   int encoding_{CJNIAudioFormat::ENCODING_PCM_16BIT};
-  bool passthroughIec_{false};
-  bool truehdPassthrough_{false};
 };
 
 }  // namespace androidx_media3

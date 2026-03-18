@@ -4,7 +4,6 @@
 #include <string>
 
 #include "KodiActiveAEEngine.h"
-#include "cores/AudioEngine/Sinks/AESinkAUDIOTRACK.h"
 #include "cores/AudioEngine/Engines/ActiveAE/ActiveAESettings.h"
 
 namespace {
@@ -83,17 +82,6 @@ Java_androidx_media3_exoplayer_audio_kodi_KodiNativeAudioSink_nConfigure(
   return AsSession(native_handle)->Configure(ParseConfig(env, config_obj)) ? JNI_TRUE : JNI_FALSE;
 }
 
-extern "C" JNIEXPORT void JNICALL
-Java_androidx_media3_exoplayer_audio_kodi_KodiNativeAudioSink_nPrimeTrueHdIecAudioTrackPath(
-    JNIEnv* env, jclass clazz)
-{
-  (void)env;
-  (void)clazz;
-  CAESinkAUDIOTRACK::Register();
-  AEDeviceInfoList devices;
-  CAESinkAUDIOTRACK::EnumerateDevicesEx(devices, false);
-}
-
 extern "C" JNIEXPORT jint JNICALL
 Java_androidx_media3_exoplayer_audio_kodi_KodiNativeAudioSink_nWrite(
     JNIEnv* env,
@@ -111,28 +99,6 @@ Java_androidx_media3_exoplayer_audio_kodi_KodiNativeAudioSink_nWrite(
     return 0;
   return AsSession(native_handle)
       ->Write(data + offset, size, static_cast<int64_t>(presentation_time_us), encoded_access_unit_count);
-}
-
-extern "C" JNIEXPORT void JNICALL
-Java_androidx_media3_exoplayer_audio_kodi_KodiNativeAudioSink_nProbePassthroughStartupBuffer(
-    JNIEnv* env,
-    jclass clazz,
-    jlong native_handle,
-    jobject buffer,
-    jint offset,
-    jint size,
-    jlong presentation_time_us,
-    jint encoded_access_unit_count)
-{
-  (void)clazz;
-  auto* data = static_cast<uint8_t*>(env->GetDirectBufferAddress(buffer));
-  if (data == nullptr)
-    return;
-  AsSession(native_handle)
-      ->ProbePassthroughStartupBuffer(data + offset,
-                                      size,
-                                      static_cast<int64_t>(presentation_time_us),
-                                      encoded_access_unit_count);
 }
 
 extern "C" JNIEXPORT jint JNICALL
@@ -261,15 +227,6 @@ Java_androidx_media3_exoplayer_audio_kodi_KodiNativeAudioSink_nIsEnded(
   return AsSession(native_handle)->IsEnded() ? JNI_TRUE : JNI_FALSE;
 }
 
-extern "C" JNIEXPORT jboolean JNICALL
-Java_androidx_media3_exoplayer_audio_kodi_KodiNativeAudioSink_nIsPassthroughStartupReady(
-    JNIEnv* env, jclass clazz, jlong native_handle)
-{
-  (void)env;
-  (void)clazz;
-  return AsSession(native_handle)->IsPassthroughStartupReady() ? JNI_TRUE : JNI_FALSE;
-}
-
 extern "C" JNIEXPORT jlong JNICALL
 Java_androidx_media3_exoplayer_audio_kodi_KodiNativeAudioSink_nGetBufferSizeUs(
     JNIEnv* env, jclass clazz, jlong native_handle)
@@ -277,15 +234,6 @@ Java_androidx_media3_exoplayer_audio_kodi_KodiNativeAudioSink_nGetBufferSizeUs(
   (void)env;
   (void)clazz;
   return static_cast<jlong>(AsSession(native_handle)->GetBufferSizeUs());
-}
-
-extern "C" JNIEXPORT jlong JNICALL
-Java_androidx_media3_exoplayer_audio_kodi_KodiNativeAudioSink_nGetBufferSizeBytes(
-    JNIEnv* env, jclass clazz, jlong native_handle)
-{
-  (void)env;
-  (void)clazz;
-  return static_cast<jlong>(AsSession(native_handle)->GetBufferSizeBytes());
 }
 
 extern "C" JNIEXPORT void JNICALL

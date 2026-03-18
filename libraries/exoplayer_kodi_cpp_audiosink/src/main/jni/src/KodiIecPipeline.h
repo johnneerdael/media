@@ -21,6 +21,7 @@
 #include "cores/AudioEngine/Utils/AEBitstreamPacker.h"
 
 #include <cstdint>
+#include <deque>
 #include <limits>
 #include <vector>
 
@@ -32,7 +33,6 @@ struct KodiPackedAccessUnit
   std::vector<uint8_t> bytes;
   size_t writeOffset{0};
   int inputBytesConsumed{0};
-  int sourceAccessUnitCount{0};
   int64_t ptsUs{std::numeric_limits<int64_t>::min()};
   int64_t durationUs{0};
   unsigned int outputRate{48000};
@@ -46,12 +46,12 @@ public:
   void Configure(const AEAudioFormat& requestedFormat);
   void Reset();
 
-  // Returns bytes consumed from input. Emits at most one IEC packet per call.
+  // Returns bytes consumed from input. Produced IEC packets are appended to outPackets.
   int Feed(const uint8_t* data,
            int size,
            int64_t presentationTimeUs,
-           KodiPackedAccessUnit* outPacket,
-           bool* emittedPacket);
+           std::deque<KodiPackedAccessUnit>& outPackets,
+           int maxPackets = std::numeric_limits<int>::max());
   bool HasParserBacklog() const { return streamAdapter_.HasBacklog(); }
   void AcknowledgeConsumedInputBytes(int bytes);
 
@@ -62,8 +62,7 @@ private:
                         unsigned int auSize,
                         int64_t auPtsUs,
                         int64_t auDurationUs,
-                        KodiPackedAccessUnit* outPacket,
-                        bool* emittedPacket);
+                        std::deque<KodiPackedAccessUnit>& outPackets);
 
   ActiveAE::CActiveAEMediaStreamAdapter streamAdapter_;
   CAEBitstreamPacker bitstreamPacker_;
@@ -71,7 +70,6 @@ private:
   int64_t pendingBurstPtsUs_{NO_PTS};
   int64_t pendingBurstDurationUs_{0};
   int pendingBurstInputBytes_{0};
-  int pendingBurstAccessUnitCount_{0};
 };
 
 }  // namespace androidx_media3
