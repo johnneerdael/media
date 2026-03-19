@@ -47,6 +47,29 @@ bool KodiTrueHdAEEngine::IsReleasePendingLocked(int64_t nowUs) const
   return releasePendingUntilUs_ != CURRENT_POSITION_NOT_SET && nowUs < releasePendingUntilUs_;
 }
 
+void KodiTrueHdAEEngine::CompactPendingPassthroughInputLocked()
+{
+  if (!pendingPassthroughInput_.has_value())
+    return;
+
+  auto& input = *pendingPassthroughInput_;
+  if (input.acknowledgedBytes <= 0)
+    return;
+
+  const size_t acknowledgedPrefix =
+      std::min<size_t>(static_cast<size_t>(input.acknowledgedBytes), input.bytes.size());
+  if (acknowledgedPrefix == 0)
+    return;
+
+  input.bytes.erase(input.bytes.begin(), input.bytes.begin() + acknowledgedPrefix);
+  input.feedOffset = input.feedOffset >= acknowledgedPrefix ? (input.feedOffset - acknowledgedPrefix) : 0;
+  input.acknowledgedBytes -= static_cast<int>(acknowledgedPrefix);
+  input.ptsUs = NO_PTS;
+
+  if (input.bytes.empty())
+    pendingPassthroughInput_.reset();
+}
+
 bool KodiTrueHdAEEngine::Configure(const ActiveAE::CActiveAEMediaSettings& config)
 {
   std::unique_lock lock(lock_);
@@ -190,6 +213,18 @@ void KodiTrueHdAEEngine::Drain()
 void KodiTrueHdAEEngine::HandleDiscontinuity()
 {
   std::unique_lock lock(lock_);
+  if (config_.iecVerboseLogging)
+  {
+    CLog::Log(LOGINFO,
+              "KodiTrueHdAEEngine::HandleDiscontinuity phase={} pendingInput={} pendingPacked={} "
+              "pendingPcm={} totalWrittenFrames={} safePlayedFrames={}",
+              StartupPhaseToString(startupPhase_),
+              pendingPassthroughInput_.has_value() ? 1 : 0,
+              pendingPackedOutput_.has_value() ? 1 : 0,
+              pendingPcmOutput_.has_value() ? 1 : 0,
+              totalWrittenFrames_,
+              GetSafePlayedFramesLocked());
+  }
   startMediaTimeUsNeedsSync_ = true;
   pendingSyncPtsUs_ = NO_PTS;
   nextExpectedPtsValid_ = false;
@@ -276,8 +311,9 @@ bool KodiTrueHdAEEngine::IsPassthroughStartupReady()
   const uint64_t queuedFrames = submittedFrames > playedFrames ? (submittedFrames - playedFrames) : 0;
   const uint64_t startupTargetFrames =
       static_cast<uint64_t>(std::max(1, output_.GetBufferSizeInFrames()));
+  const bool outputPrimed = outputStarted_ && submittedFrames > framesAtPlay_;
   const bool hardwareAdvanced = outputStarted_ && playedFrames > framesAtPlay_;
-  return hardwareAdvanced || queuedFrames >= startupTargetFrames;
+  return outputPrimed || hardwareAdvanced || queuedFrames >= startupTargetFrames;
 }
 
 int64_t KodiTrueHdAEEngine::GetBufferSizeUs() const
@@ -579,11 +615,7 @@ int KodiTrueHdAEEngine::WriteTrueHdPassthroughLocked(const uint8_t* data,
       {
         pendingPassthroughInput_->acknowledgedBytes += acknowledgedThisCall;
         iecPipeline_.AcknowledgeConsumedInputBytes(acknowledgedThisCall);
-        if (pendingPassthroughInput_->acknowledgedBytes >=
-            static_cast<int>(pendingPassthroughInput_->bytes.size()))
-        {
-          pendingPassthroughInput_.reset();
-        }
+        CompactPendingPassthroughInputLocked();
         totalAcknowledgedThisCall += acknowledgedThisCall;
       }
       if (pendingPackedOutput_.has_value())
@@ -593,7 +625,22 @@ int KodiTrueHdAEEngine::WriteTrueHdPassthroughLocked(const uint8_t* data,
     }
 
     if (startMediaTimeUsNeedsSync_ && !TryResolvePendingDiscontinuityLocked())
+    {
+      if (config_.iecVerboseLogging)
+      {
+        CLog::Log(LOGINFO,
+                  "KodiTrueHdAEEngine::WriteTrueHdPassthroughLocked blockedByDiscontinuity "
+                  "phase={} totalAck={} pendingInput={} pendingPacked={} totalWrittenFrames={} "
+                  "safePlayedFrames={}",
+                  StartupPhaseToString(startupPhase_),
+                  totalAcknowledgedThisCall,
+                  pendingPassthroughInput_.has_value() ? 1 : 0,
+                  pendingPackedOutput_.has_value() ? 1 : 0,
+                  totalWrittenFrames_,
+                  GetSafePlayedFramesLocked());
+      }
       return totalAcknowledgedThisCall;
+    }
 
     if (!pendingPassthroughInput_.has_value())
     {
@@ -605,6 +652,35 @@ int KodiTrueHdAEEngine::WriteTrueHdPassthroughLocked(const uint8_t* data,
       input.encodedAccessUnitCount = std::max(1, encodedAccessUnitCount);
       pendingPassthroughInput_ = std::move(input);
     }
+    else
+    {
+      CompactPendingPassthroughInputLocked();
+      if (!pendingPassthroughInput_.has_value())
+      {
+        continue;
+      }
+      auto& input = *pendingPassthroughInput_;
+      const int currentBufferedBytes = static_cast<int>(input.bytes.size());
+      if (size > currentBufferedBytes)
+      {
+        const int appendedBytes = size - currentBufferedBytes;
+        input.bytes.insert(input.bytes.end(),
+                           data + currentBufferedBytes,
+                           data + size);
+        input.encodedAccessUnitCount =
+            std::max(input.encodedAccessUnitCount, std::max(1, encodedAccessUnitCount));
+        if (config_.iecVerboseLogging)
+        {
+          CLog::Log(LOGINFO,
+                    "KodiTrueHdAEEngine::WriteTrueHdPassthroughLocked appendedInput "
+                    "appendedBytes={} totalBytes={} acknowledgedBytes={} feedOffset={}",
+                    appendedBytes,
+                    input.bytes.size(),
+                    input.acknowledgedBytes,
+                    input.feedOffset);
+        }
+      }
+    }
 
     if (!pendingPackedOutput_.has_value() && pendingPassthroughInput_.has_value())
     {
@@ -615,8 +691,26 @@ int KodiTrueHdAEEngine::WriteTrueHdPassthroughLocked(const uint8_t* data,
           static_cast<int>(input.bytes.size() - std::min(input.feedOffset, input.bytes.size()));
       const uint8_t* feedData = input.bytes.data() + input.feedOffset;
       const int64_t feedPtsUs = input.feedOffset == 0 ? input.ptsUs : NO_PTS;
+      const bool backlogBeforeFeed = iecPipeline_.HasParserBacklog();
       const int consumed =
           iecPipeline_.Feed(feedData, remaining, feedPtsUs, &packet, &emittedPacket);
+      const bool backlogAfterFeed = iecPipeline_.HasParserBacklog();
+      if (config_.iecVerboseLogging)
+      {
+        CLog::Log(LOGINFO,
+                  "KodiTrueHdAEEngine::WriteTrueHdPassthroughLocked feed "
+                  "bytesSize={} feedOffset={} remaining={} consumed={} emittedPacket={} "
+                  "backlogBefore={} backlogAfter={} pendingPacked={} inputBytesConsumed={}",
+                  input.bytes.size(),
+                  input.feedOffset,
+                  remaining,
+                  consumed,
+                  emittedPacket ? 1 : 0,
+                  backlogBeforeFeed ? 1 : 0,
+                  backlogAfterFeed ? 1 : 0,
+                  pendingPackedOutput_.has_value() ? 1 : 0,
+                  emittedPacket ? packet.inputBytesConsumed : 0);
+      }
       if (consumed > 0)
         input.feedOffset += static_cast<size_t>(consumed);
       if (emittedPacket)
@@ -635,7 +729,7 @@ int KodiTrueHdAEEngine::WriteTrueHdPassthroughLocked(const uint8_t* data,
       {
         pendingPassthroughInput_->acknowledgedBytes += absorbedBytes;
         iecPipeline_.AcknowledgeConsumedInputBytes(absorbedBytes);
-        pendingPassthroughInput_.reset();
+        CompactPendingPassthroughInputLocked();
         totalAcknowledgedThisCall += absorbedBytes;
         return totalAcknowledgedThisCall;
       }
@@ -650,11 +744,7 @@ int KodiTrueHdAEEngine::WriteTrueHdPassthroughLocked(const uint8_t* data,
     {
       pendingPassthroughInput_->acknowledgedBytes += acknowledgedThisCall;
       iecPipeline_.AcknowledgeConsumedInputBytes(acknowledgedThisCall);
-      if (pendingPassthroughInput_->acknowledgedBytes >=
-          static_cast<int>(pendingPassthroughInput_->bytes.size()))
-      {
-        pendingPassthroughInput_.reset();
-      }
+      CompactPendingPassthroughInputLocked();
       totalAcknowledgedThisCall += acknowledgedThisCall;
       ++burstIterations;
       continue;
@@ -1560,6 +1650,16 @@ void KodiTrueHdAEEngine::UpdateExpectedPtsLocked(int64_t packetPtsUs, int64_t pa
   if (packetPtsUs == NO_PTS)
     return;
 
+  const bool suppressStartupDiscontinuity =
+      passthrough_ && requestedFormat_.m_streamInfo.m_type == CAEStreamInfo::STREAM_TYPE_TRUEHD &&
+      startupPhase_ != StartupPhase::RUNNING;
+  if (suppressStartupDiscontinuity)
+  {
+    nextExpectedPtsUs_ = packetPtsUs + std::max<int64_t>(0, packetDurationUs);
+    nextExpectedPtsValid_ = true;
+    return;
+  }
+
   const bool isDiscontinuity =
       nextExpectedPtsValid_ &&
       std::llabs(packetPtsUs - nextExpectedPtsUs_) > DISCONTINUITY_THRESHOLD_US;
@@ -1567,6 +1667,19 @@ void KodiTrueHdAEEngine::UpdateExpectedPtsLocked(int64_t packetPtsUs, int64_t pa
   {
     // Stock-like handling: request retime after drain; don't immediately jump
     // timing while there is still pending output.
+    if (config_.iecVerboseLogging)
+    {
+      CLog::Log(LOGINFO,
+                "KodiTrueHdAEEngine::UpdateExpectedPtsLocked discontinuity packetPtsUs={} "
+                "nextExpectedPtsUs={} packetDurationUs={} phase={} totalWrittenFrames={} "
+                "safePlayedFrames={}",
+                packetPtsUs,
+                nextExpectedPtsUs_,
+                packetDurationUs,
+                StartupPhaseToString(startupPhase_),
+                totalWrittenFrames_,
+                GetSafePlayedFramesLocked());
+    }
     startMediaTimeUsNeedsSync_ = true;
     pendingSyncPtsUs_ = packetPtsUs;
     return;
@@ -1589,6 +1702,20 @@ bool KodiTrueHdAEEngine::TryResolvePendingDiscontinuityLocked()
   const uint64_t playedFrames = GetSafePlayedFramesLocked();
   const bool drained = !pendingPackedOutput_.has_value() && !pendingPcmOutput_.has_value() &&
                        totalWrittenFrames_ <= playedFrames;
+  if (config_.iecVerboseLogging)
+  {
+    CLog::Log(LOGINFO,
+              "KodiTrueHdAEEngine::TryResolvePendingDiscontinuityLocked drained={} phase={} "
+              "pendingPacked={} pendingPcm={} totalWrittenFrames={} safePlayedFrames={} "
+              "pendingSyncPtsUs={}",
+              drained ? 1 : 0,
+              StartupPhaseToString(startupPhase_),
+              pendingPackedOutput_.has_value() ? 1 : 0,
+              pendingPcmOutput_.has_value() ? 1 : 0,
+              totalWrittenFrames_,
+              playedFrames,
+              pendingSyncPtsUs_);
+  }
   if (!drained)
     return false;
 

@@ -36,6 +36,7 @@ void KodiTrueHdIecPipeline::Configure(const AEAudioFormat& requestedFormat)
 {
   streamAdapter_.Configure(requestedFormat);
   bitstreamPacker_.Reset();
+  matPacker_ = std::make_unique<KodiTrueHdFfmpegMatPacker>();
   pendingBurstPtsUs_ = NO_PTS;
   pendingBurstDurationUs_ = 0;
   pendingBurstInputBytes_ = 0;
@@ -45,6 +46,7 @@ void KodiTrueHdIecPipeline::Reset()
 {
   streamAdapter_.Reset();
   bitstreamPacker_.Reset();
+  matPacker_ = std::make_unique<KodiTrueHdFfmpegMatPacker>();
   pendingBurstPtsUs_ = NO_PTS;
   pendingBurstDurationUs_ = 0;
   pendingBurstInputBytes_ = 0;
@@ -116,19 +118,21 @@ int KodiTrueHdIecPipeline::FeedTrueHd(const uint8_t* data,
                                 KodiPackedAccessUnit* outPacket,
                                 bool* emittedPacket)
 {
-  if (data == nullptr || size <= 0)
-    return 0;
   if (outPacket == nullptr || emittedPacket == nullptr)
+    return 0;
+
+  *emittedPacket = false;
+
+  if (DrainTrueHdBacklog(outPacket, emittedPacket))
+    return 0;
+
+  if (data == nullptr || size <= 0)
     return 0;
 
   int consumedTotal = 0;
   const uint8_t* current = data;
   int remaining = size;
   int64_t currentPtsUs = presentationTimeUs;
-  *emittedPacket = false;
-
-  if (DrainTrueHdBacklog(outPacket, emittedPacket))
-    return 0;
 
   while (remaining > 0 && !*emittedPacket)
   {
@@ -189,7 +193,25 @@ void KodiTrueHdIecPipeline::EmitPackedPacket(const uint8_t* auData,
   if (auDurationUs > 0)
     pendingBurstDurationUs_ += auDurationUs;
 
-  bitstreamPacker_.Pack(info, const_cast<uint8_t*>(auData), static_cast<int>(auSize));
+  const uint8_t* packedInputData = auData;
+  int packedInputSize = static_cast<int>(auSize);
+  std::vector<uint8_t> matFrame;
+  if (info.m_type == CAEStreamInfo::STREAM_TYPE_TRUEHD)
+  {
+    if (!matPacker_)
+      matPacker_ = std::make_unique<KodiTrueHdFfmpegMatPacker>();
+    if (!matPacker_->PackTrueHd(auData, packedInputSize))
+      return;
+    matFrame = matPacker_->GetOutputFrame();
+    if (matFrame.empty())
+      return;
+    packedInputData = matFrame.data();
+    packedInputSize = static_cast<int>(matFrame.size());
+  }
+
+  bitstreamPacker_.Pack(info,
+                        const_cast<uint8_t*>(packedInputData),
+                        packedInputSize);
   const unsigned int packedSize = bitstreamPacker_.GetSize();
   if (packedSize == 0)
     return;

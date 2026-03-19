@@ -53,6 +53,7 @@ add_library(kodiCppAudioSinkJNI
             src/KodiAudioTrackOutput.cpp
             src/KodiTrueHdAudioTrackOutput.cpp
             src/KodiIecPipeline.cpp
+            src/KodiTrueHdFfmpegMatPacker.cpp
             src/KodiTrueHdIecPipeline.cpp
             ${FMT_ROOT}/src/format.cc
             ${KODI_XBMC_ROOT}/commons/Exception.cpp

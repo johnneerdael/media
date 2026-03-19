@@ -17,11 +17,13 @@
 
 #pragma once
 
+#include "KodiTrueHdFfmpegMatPacker.h"
 #include "cores/AudioEngine/Engines/ActiveAE/ActiveAEStream.h"
 #include "cores/AudioEngine/Utils/AEBitstreamPacker.h"
 
 #include <cstdint>
 #include <limits>
+#include <memory>
 #include <vector>
 
 namespace androidx_media3
@@ -77,6 +79,7 @@ private:
 
   ActiveAE::CActiveAEMediaStreamAdapter streamAdapter_;
   CAEBitstreamPacker bitstreamPacker_;
+  std::unique_ptr<KodiTrueHdFfmpegMatPacker> matPacker_;
 
   int64_t pendingBurstPtsUs_{NO_PTS};
   int64_t pendingBurstDurationUs_{0};
