@@ -189,6 +189,7 @@ private:
   void InvalidateCurrentOutputLocked();
   void MarkReleasePendingLocked();
   bool IsReleasePendingLocked(int64_t nowUs) const;
+  void CompactPendingPassthroughInputLocked();
   void RecordPackedBurstLocked(const KodiPackedAccessUnit& packet);
   void RecordAudioTrackWriteChunkLocked(const KodiPackedAccessUnit& packet, int bytesWritten);
   void FinalizeAudioTrackWriteBurstLocked(const KodiPackedAccessUnit& packet);
