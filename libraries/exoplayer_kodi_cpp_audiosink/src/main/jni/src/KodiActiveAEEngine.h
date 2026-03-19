@@ -52,8 +52,15 @@ public:
   bool HasPendingData();
   bool IsEnded();
   int64_t GetBufferSizeUs() const;
+  int GetOutputSampleRate() const;
+  int GetOutputChannelCount() const;
+  int GetOutputEncoding() const;
+  int GetOutputAudioTrackState() const;
+  int GetDirectPlaybackSupportState() const;
   int ConsumeLastWriteOutputBytes();
   int ConsumeLastWriteErrorCode();
+  bool ConsumeNextCapturedPackedBurst(std::vector<uint8_t>& bytes, int64_t& ptsUs);
+  bool ConsumeNextCapturedAudioTrackWriteBurst(std::vector<uint8_t>& bytes, int64_t& ptsUs);
   bool IsReleasePending();
   void Reset();
 
@@ -110,6 +117,12 @@ private:
     int64_t mediaPositionDriftUs{0};
   };
 
+  struct CapturedValidationBurst
+  {
+    std::vector<uint8_t> bytes;
+    int64_t ptsUs{NO_PTS};
+  };
+
   int WritePassthroughLocked(const uint8_t* data,
                              int size,
                              int64_t ptsUs,
@@ -145,6 +158,10 @@ private:
   void InvalidateCurrentOutputLocked();
   void MarkReleasePendingLocked();
   bool IsReleasePendingLocked(int64_t nowUs) const;
+  void RecordPackedBurstLocked(const KodiPackedAccessUnit& packet);
+  void RecordAudioTrackWriteChunkLocked(const KodiPackedAccessUnit& packet, int bytesWritten);
+  void FinalizeAudioTrackWriteBurstLocked(const KodiPackedAccessUnit& packet);
+  void ClearCapturedValidationBurstsLocked();
 
   mutable CCriticalSection lock_;
   ActiveAE::CActiveAEMediaSettings config_{};
@@ -175,9 +192,14 @@ private:
   double hostClockSpeed_{1.0};
   float volume_{1.0f};
   bool hasPendingData_{false};
+  int directPlaybackSupportState_{-1};
   int lastWriteOutputBytes_{0};
   int lastWriteErrorCode_{0};
   int64_t releasePendingUntilUs_{CURRENT_POSITION_NOT_SET};
+  std::deque<CapturedValidationBurst> capturedPackedBursts_;
+  std::deque<CapturedValidationBurst> capturedAudioTrackWriteBursts_;
+  std::vector<uint8_t> pendingAudioTrackWriteCapture_;
+  int64_t pendingAudioTrackWriteCapturePtsUs_{NO_PTS};
 
   std::array<int64_t, 10> playheadOffsetsUs_{};
   int playheadOffsetCount_{0};

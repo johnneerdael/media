@@ -17,11 +17,11 @@
 package androidx.media3.exoplayer.audio.kodi;
 
 import android.media.AudioDeviceInfo;
-import android.os.Build;
 import androidx.annotation.Nullable;
 import androidx.annotation.RequiresApi;
 import androidx.media3.common.AudioAttributes;
 import androidx.media3.common.AuxEffectInfo;
+import androidx.media3.common.C;
 import androidx.media3.common.Format;
 import androidx.media3.common.MimeTypes;
 import androidx.media3.common.PlaybackParameters;
@@ -31,294 +31,380 @@ import androidx.media3.exoplayer.analytics.PlayerId;
 import androidx.media3.exoplayer.audio.AudioOffloadSupport;
 import androidx.media3.exoplayer.audio.AudioOutputProvider;
 import androidx.media3.exoplayer.audio.AudioSink;
+import androidx.media3.exoplayer.audio.DefaultAudioSink;
+import androidx.media3.exoplayer.audio.ForwardingAudioSink;
 import androidx.media3.exoplayer.audio.RendererClockAwareAudioSink;
 import java.nio.ByteBuffer;
 
-/**
- * Entry sink that keeps the shared path unchanged for non-TrueHD and establishes a separate
- * delegate boundary once the real configured format is known.
- */
 @UnstableApi
-public final class KodiTrueHdEntryAudioSink implements AudioSink, RendererClockAwareAudioSink {
+public final class KodiTrueHdEntryAudioSink extends ForwardingAudioSink
+    implements RendererClockAwareAudioSink {
 
-  private final AudioSink baselineSink;
-  private final AudioSink trueHdSink;
+  private final KodiNativeAudioSink baselineSink;
+  private final KodiTrueHdNativeAudioSink trueHdSink;
   private AudioSink activeSink;
   @Nullable private Listener listener;
   @Nullable private PlayerId playerId;
   @Nullable private Clock clock;
-  @Nullable private AudioAttributes audioAttributes;
-  @Nullable private AudioDeviceInfo preferredDevice;
-  @Nullable private AuxEffectInfo auxEffectInfo;
   private PlaybackParameters playbackParameters;
-  private float volume;
   private boolean skipSilenceEnabled;
+  @Nullable private AudioAttributes audioAttributes;
   private int audioSessionId;
+  @Nullable private AuxEffectInfo auxEffectInfo;
+  @Nullable private AudioDeviceInfo preferredDevice;
   private int virtualDeviceId;
   private long outputStreamOffsetUs;
-  private long rendererClockUs;
-  @OffloadMode private int offloadMode;
+  private int offloadMode;
   private int offloadDelayInFrames;
   private int offloadPaddingInFrames;
   @Nullable private AudioOutputProvider audioOutputProvider;
+  private float volume;
+  private long rendererClockUs;
 
-  public KodiTrueHdEntryAudioSink(AudioSink baselineSink, AudioSink trueHdSink) {
+  public static KodiTrueHdEntryAudioSink create(
+      DefaultAudioSink baselineDelegate, DefaultAudioSink trueHdDelegate) {
+    return new KodiTrueHdEntryAudioSink(
+        new KodiNativeAudioSink(baselineDelegate), new KodiTrueHdNativeAudioSink(trueHdDelegate));
+  }
+
+  public KodiTrueHdEntryAudioSink(
+      KodiNativeAudioSink baselineSink, KodiTrueHdNativeAudioSink trueHdSink) {
+    super(baselineSink);
     this.baselineSink = baselineSink;
     this.trueHdSink = trueHdSink;
-    activeSink = baselineSink;
-    playbackParameters = PlaybackParameters.DEFAULT;
-    volume = 1f;
-    offloadMode = OFFLOAD_MODE_DISABLED;
+    this.activeSink = baselineSink;
+    this.playbackParameters = PlaybackParameters.DEFAULT;
+    this.audioSessionId = C.AUDIO_SESSION_ID_UNSET;
+    this.virtualDeviceId = C.INDEX_UNSET;
+    this.outputStreamOffsetUs = 0L;
+    this.offloadMode = OFFLOAD_MODE_DISABLED;
+    this.volume = 1f;
+    this.rendererClockUs = C.TIME_UNSET;
   }
 
   @Override
   public void setListener(Listener listener) {
     this.listener = listener;
-    baselineSink.setListener(listener);
-    trueHdSink.setListener(listener);
+    if (activeSink == baselineSink) {
+      super.setListener(listener);
+    } else {
+      activeSink.setListener(listener);
+    }
   }
 
   @Override
   public void setPlayerId(@Nullable PlayerId playerId) {
     this.playerId = playerId;
-    baselineSink.setPlayerId(playerId);
-    trueHdSink.setPlayerId(playerId);
+    if (activeSink == baselineSink) {
+      super.setPlayerId(playerId);
+    } else {
+      activeSink.setPlayerId(playerId);
+    }
   }
 
   @Override
   public void setClock(Clock clock) {
     this.clock = clock;
-    baselineSink.setClock(clock);
-    trueHdSink.setClock(clock);
+    if (activeSink == baselineSink) {
+      super.setClock(clock);
+    } else {
+      activeSink.setClock(clock);
+    }
   }
 
   @Override
   public boolean supportsFormat(Format format) {
-    return routeForFormat(format).supportsFormat(format);
+    return selectSink(format).supportsFormat(format);
   }
 
   @Override
   public @SinkFormatSupport int getFormatSupport(Format format) {
-    return routeForFormat(format).getFormatSupport(format);
+    return selectSink(format).getFormatSupport(format);
   }
 
   @Override
   public AudioOffloadSupport getFormatOffloadSupport(Format format) {
-    return routeForFormat(format).getFormatOffloadSupport(format);
+    return selectSink(format).getFormatOffloadSupport(format);
   }
 
   @Override
   public long getCurrentPositionUs(boolean sourceEnded) {
-    return activeSink.getCurrentPositionUs(sourceEnded);
+    return activeSink == baselineSink
+        ? super.getCurrentPositionUs(sourceEnded)
+        : activeSink.getCurrentPositionUs(sourceEnded);
   }
 
   @Override
   public void configure(Format inputFormat, int specifiedBufferSize, @Nullable int[] outputChannels)
       throws ConfigurationException {
-    AudioSink selectedSink = routeForFormat(inputFormat);
-    if (activeSink != selectedSink) {
-      activeSink.flush();
+    AudioSink targetSink = selectSink(inputFormat);
+    if (activeSink != targetSink) {
       activeSink.reset();
-      activeSink = selectedSink;
-      reapplyState(activeSink);
+      activeSink = targetSink;
+      applyStoredState(activeSink);
     }
-    activeSink.configure(inputFormat, specifiedBufferSize, outputChannels);
+    if (activeSink == baselineSink) {
+      super.configure(inputFormat, specifiedBufferSize, outputChannels);
+    } else {
+      activeSink.configure(inputFormat, specifiedBufferSize, outputChannels);
+    }
   }
 
   @Override
   public void play() {
-    activeSink.play();
+    if (activeSink == baselineSink) {
+      super.play();
+    } else {
+      activeSink.play();
+    }
   }
 
   @Override
   public void handleDiscontinuity() {
-    activeSink.handleDiscontinuity();
+    if (activeSink == baselineSink) {
+      super.handleDiscontinuity();
+    } else {
+      activeSink.handleDiscontinuity();
+    }
   }
 
   @Override
   public boolean handleBuffer(ByteBuffer buffer, long presentationTimeUs, int encodedAccessUnitCount)
       throws InitializationException, WriteException {
-    return activeSink.handleBuffer(buffer, presentationTimeUs, encodedAccessUnitCount);
+    return activeSink == baselineSink
+        ? super.handleBuffer(buffer, presentationTimeUs, encodedAccessUnitCount)
+        : activeSink.handleBuffer(buffer, presentationTimeUs, encodedAccessUnitCount);
   }
 
   @Override
   public void playToEndOfStream() throws WriteException {
-    activeSink.playToEndOfStream();
+    if (activeSink == baselineSink) {
+      super.playToEndOfStream();
+    } else {
+      activeSink.playToEndOfStream();
+    }
   }
 
   @Override
   public boolean isEnded() {
-    return activeSink.isEnded();
+    return activeSink == baselineSink ? super.isEnded() : activeSink.isEnded();
   }
 
   @Override
   public boolean hasPendingData() {
-    return activeSink.hasPendingData();
+    return activeSink == baselineSink ? super.hasPendingData() : activeSink.hasPendingData();
   }
 
   @Override
   public void setPlaybackParameters(PlaybackParameters playbackParameters) {
     this.playbackParameters = playbackParameters;
-    baselineSink.setPlaybackParameters(playbackParameters);
-    trueHdSink.setPlaybackParameters(playbackParameters);
+    if (activeSink == baselineSink) {
+      super.setPlaybackParameters(playbackParameters);
+    } else {
+      activeSink.setPlaybackParameters(playbackParameters);
+    }
   }
 
   @Override
   public PlaybackParameters getPlaybackParameters() {
-    return playbackParameters;
+    return activeSink == baselineSink ? super.getPlaybackParameters() : activeSink.getPlaybackParameters();
   }
 
   @Override
   public void setSkipSilenceEnabled(boolean skipSilenceEnabled) {
     this.skipSilenceEnabled = skipSilenceEnabled;
-    baselineSink.setSkipSilenceEnabled(skipSilenceEnabled);
-    trueHdSink.setSkipSilenceEnabled(skipSilenceEnabled);
+    if (activeSink == baselineSink) {
+      super.setSkipSilenceEnabled(skipSilenceEnabled);
+    } else {
+      activeSink.setSkipSilenceEnabled(skipSilenceEnabled);
+    }
   }
 
   @Override
   public boolean getSkipSilenceEnabled() {
-    return skipSilenceEnabled;
+    return activeSink == baselineSink ? super.getSkipSilenceEnabled() : activeSink.getSkipSilenceEnabled();
   }
 
   @Override
   public void setAudioAttributes(AudioAttributes audioAttributes) {
     this.audioAttributes = audioAttributes;
-    baselineSink.setAudioAttributes(audioAttributes);
-    trueHdSink.setAudioAttributes(audioAttributes);
+    if (activeSink == baselineSink) {
+      super.setAudioAttributes(audioAttributes);
+    } else {
+      activeSink.setAudioAttributes(audioAttributes);
+    }
   }
 
   @Override
   @Nullable
   public AudioAttributes getAudioAttributes() {
-    return audioAttributes;
+    return activeSink == baselineSink ? super.getAudioAttributes() : activeSink.getAudioAttributes();
   }
 
   @Override
   public void setAudioSessionId(int audioSessionId) {
     this.audioSessionId = audioSessionId;
-    baselineSink.setAudioSessionId(audioSessionId);
-    trueHdSink.setAudioSessionId(audioSessionId);
+    if (activeSink == baselineSink) {
+      super.setAudioSessionId(audioSessionId);
+    } else {
+      activeSink.setAudioSessionId(audioSessionId);
+    }
   }
 
   @Override
   public void setAuxEffectInfo(AuxEffectInfo auxEffectInfo) {
     this.auxEffectInfo = auxEffectInfo;
-    baselineSink.setAuxEffectInfo(auxEffectInfo);
-    trueHdSink.setAuxEffectInfo(auxEffectInfo);
+    if (activeSink == baselineSink) {
+      super.setAuxEffectInfo(auxEffectInfo);
+    } else {
+      activeSink.setAuxEffectInfo(auxEffectInfo);
+    }
   }
 
   @Override
   public void setPreferredDevice(@Nullable AudioDeviceInfo audioDeviceInfo) {
-    preferredDevice = audioDeviceInfo;
-    baselineSink.setPreferredDevice(audioDeviceInfo);
-    trueHdSink.setPreferredDevice(audioDeviceInfo);
+    this.preferredDevice = audioDeviceInfo;
+    if (activeSink == baselineSink) {
+      super.setPreferredDevice(audioDeviceInfo);
+    } else {
+      activeSink.setPreferredDevice(audioDeviceInfo);
+    }
   }
 
   @Override
   public void setVirtualDeviceId(int virtualDeviceId) {
     this.virtualDeviceId = virtualDeviceId;
-    baselineSink.setVirtualDeviceId(virtualDeviceId);
-    trueHdSink.setVirtualDeviceId(virtualDeviceId);
+    if (activeSink == baselineSink) {
+      super.setVirtualDeviceId(virtualDeviceId);
+    } else {
+      activeSink.setVirtualDeviceId(virtualDeviceId);
+    }
   }
 
   @Override
   public void setOutputStreamOffsetUs(long outputStreamOffsetUs) {
     this.outputStreamOffsetUs = outputStreamOffsetUs;
-    baselineSink.setOutputStreamOffsetUs(outputStreamOffsetUs);
-    trueHdSink.setOutputStreamOffsetUs(outputStreamOffsetUs);
+    if (activeSink == baselineSink) {
+      super.setOutputStreamOffsetUs(outputStreamOffsetUs);
+    } else {
+      activeSink.setOutputStreamOffsetUs(outputStreamOffsetUs);
+    }
   }
 
   @Override
   public long getAudioTrackBufferSizeUs() {
-    return activeSink.getAudioTrackBufferSizeUs();
+    return activeSink == baselineSink ? super.getAudioTrackBufferSizeUs() : activeSink.getAudioTrackBufferSizeUs();
   }
 
   @Override
   public void enableTunnelingV21() {
-    baselineSink.enableTunnelingV21();
-    trueHdSink.enableTunnelingV21();
+    if (activeSink == baselineSink) {
+      super.enableTunnelingV21();
+    } else {
+      activeSink.enableTunnelingV21();
+    }
   }
 
   @Override
   public void disableTunneling() {
-    baselineSink.disableTunneling();
-    trueHdSink.disableTunneling();
+    if (activeSink == baselineSink) {
+      super.disableTunneling();
+    } else {
+      activeSink.disableTunneling();
+    }
   }
 
   @Override
   @RequiresApi(29)
   public void setOffloadMode(@OffloadMode int offloadMode) {
     this.offloadMode = offloadMode;
-    baselineSink.setOffloadMode(offloadMode);
-    trueHdSink.setOffloadMode(offloadMode);
+    if (activeSink == baselineSink) {
+      super.setOffloadMode(offloadMode);
+    } else {
+      activeSink.setOffloadMode(offloadMode);
+    }
   }
 
   @Override
   @RequiresApi(29)
   public void setOffloadDelayPadding(int delayInFrames, int paddingInFrames) {
-    offloadDelayInFrames = delayInFrames;
-    offloadPaddingInFrames = paddingInFrames;
-    baselineSink.setOffloadDelayPadding(delayInFrames, paddingInFrames);
-    trueHdSink.setOffloadDelayPadding(delayInFrames, paddingInFrames);
+    this.offloadDelayInFrames = delayInFrames;
+    this.offloadPaddingInFrames = paddingInFrames;
+    if (activeSink == baselineSink) {
+      super.setOffloadDelayPadding(delayInFrames, paddingInFrames);
+    } else {
+      activeSink.setOffloadDelayPadding(delayInFrames, paddingInFrames);
+    }
   }
 
   @Override
   public void setAudioOutputProvider(AudioOutputProvider audioOutputProvider) {
     this.audioOutputProvider = audioOutputProvider;
-    baselineSink.setAudioOutputProvider(audioOutputProvider);
-    trueHdSink.setAudioOutputProvider(audioOutputProvider);
+    if (activeSink == baselineSink) {
+      super.setAudioOutputProvider(audioOutputProvider);
+    } else {
+      activeSink.setAudioOutputProvider(audioOutputProvider);
+    }
   }
 
   @Override
   public void setVolume(float volume) {
     this.volume = volume;
-    baselineSink.setVolume(volume);
-    trueHdSink.setVolume(volume);
+    if (activeSink == baselineSink) {
+      super.setVolume(volume);
+    } else {
+      activeSink.setVolume(volume);
+    }
   }
 
   @Override
   public void pause() {
-    activeSink.pause();
+    if (activeSink == baselineSink) {
+      super.pause();
+    } else {
+      activeSink.pause();
+    }
   }
 
   @Override
   public void flush() {
-    activeSink.flush();
+    if (activeSink == baselineSink) {
+      super.flush();
+    } else {
+      activeSink.flush();
+    }
   }
 
   @Override
   public void reset() {
-    baselineSink.reset();
+    super.reset();
     trueHdSink.reset();
     activeSink = baselineSink;
+    applyStoredState(baselineSink);
   }
 
   @Override
   public void release() {
-    baselineSink.release();
+    super.release();
     trueHdSink.release();
+    activeSink = baselineSink;
   }
 
   @Override
   public void setRendererClockUs(long rendererClockUs) {
     this.rendererClockUs = rendererClockUs;
-    if (baselineSink instanceof RendererClockAwareAudioSink) {
-      ((RendererClockAwareAudioSink) baselineSink).setRendererClockUs(rendererClockUs);
-    }
-    if (trueHdSink instanceof RendererClockAwareAudioSink) {
-      ((RendererClockAwareAudioSink) trueHdSink).setRendererClockUs(rendererClockUs);
+    if (activeSink instanceof RendererClockAwareAudioSink) {
+      ((RendererClockAwareAudioSink) activeSink).setRendererClockUs(rendererClockUs);
     }
   }
 
-  private AudioSink routeForFormat(@Nullable Format format) {
-    return isTrueHdFormat(format) ? trueHdSink : baselineSink;
+  private AudioSink selectSink(@Nullable Format format) {
+    return format != null && MimeTypes.AUDIO_TRUEHD.equals(format.sampleMimeType)
+        ? trueHdSink
+        : baselineSink;
   }
 
-  private static boolean isTrueHdFormat(@Nullable Format format) {
-    return format != null && MimeTypes.AUDIO_TRUEHD.equals(format.sampleMimeType);
-  }
-
-  private void reapplyState(AudioSink sink) {
+  private void applyStoredState(AudioSink sink) {
     if (listener != null) {
       sink.setListener(listener);
     }
@@ -326,27 +412,27 @@ public final class KodiTrueHdEntryAudioSink implements AudioSink, RendererClockA
     if (clock != null) {
       sink.setClock(clock);
     }
+    sink.setPlaybackParameters(playbackParameters);
+    sink.setSkipSilenceEnabled(skipSilenceEnabled);
     if (audioAttributes != null) {
       sink.setAudioAttributes(audioAttributes);
     }
-    sink.setAudioSessionId(audioSessionId);
+    if (audioSessionId != C.AUDIO_SESSION_ID_UNSET) {
+      sink.setAudioSessionId(audioSessionId);
+    }
     if (auxEffectInfo != null) {
       sink.setAuxEffectInfo(auxEffectInfo);
     }
     sink.setPreferredDevice(preferredDevice);
-    sink.setVirtualDeviceId(virtualDeviceId);
+    if (virtualDeviceId != C.INDEX_UNSET) {
+      sink.setVirtualDeviceId(virtualDeviceId);
+    }
     sink.setOutputStreamOffsetUs(outputStreamOffsetUs);
-    sink.setPlaybackParameters(playbackParameters);
-    sink.setSkipSilenceEnabled(skipSilenceEnabled);
-    sink.setVolume(volume);
     if (audioOutputProvider != null) {
       sink.setAudioOutputProvider(audioOutputProvider);
     }
-    if (Build.VERSION.SDK_INT >= 29) {
-      sink.setOffloadMode(offloadMode);
-      sink.setOffloadDelayPadding(offloadDelayInFrames, offloadPaddingInFrames);
-    }
-    if (sink instanceof RendererClockAwareAudioSink) {
+    sink.setVolume(volume);
+    if (sink instanceof RendererClockAwareAudioSink && rendererClockUs != C.TIME_UNSET) {
       ((RendererClockAwareAudioSink) sink).setRendererClockUs(rendererClockUs);
     }
   }

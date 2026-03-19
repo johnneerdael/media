@@ -49,6 +49,8 @@ public:
   unsigned int SampleRate() const { return sampleRate_; }
   unsigned int ChannelCount() const { return channelCount_; }
   unsigned int FrameSizeBytes() const { return frameSizeBytes_; }
+  int Encoding() const { return encoding_; }
+  int AudioTrackState() const { return track_ != nullptr ? track_->getState() : 0; }
 
 private:
   static int ChannelMaskForCount(unsigned int channelCount);

@@ -2,8 +2,10 @@
 
 #include <cstdint>
 #include <string>
+#include <vector>
 
 #include "KodiTrueHdAEEngine.h"
+#include "cores/AudioEngine/Sinks/AESinkAUDIOTRACK.h"
 #include "cores/AudioEngine/Engines/ActiveAE/ActiveAESettings.h"
 
 namespace {
@@ -44,6 +46,37 @@ std::string GetStringField(JNIEnv* env, jobject obj, jclass clazz, const char* n
   return result;
 }
 
+jobject BuildNativeBurst(JNIEnv* env, const std::vector<uint8_t>& bytes, int64_t ptsUs)
+{
+  jclass clazz =
+      env->FindClass("androidx/media3/exoplayer/audio/kodi/validation/TransportValidationNativeBurst");
+  if (clazz == nullptr)
+    return nullptr;
+  jmethodID ctor = env->GetMethodID(clazz, "<init>", "(J[B)V");
+  if (ctor == nullptr)
+  {
+    env->DeleteLocalRef(clazz);
+    return nullptr;
+  }
+  jbyteArray byteArray = env->NewByteArray(static_cast<jsize>(bytes.size()));
+  if (byteArray == nullptr)
+  {
+    env->DeleteLocalRef(clazz);
+    return nullptr;
+  }
+  if (!bytes.empty())
+  {
+    env->SetByteArrayRegion(byteArray,
+                            0,
+                            static_cast<jsize>(bytes.size()),
+                            reinterpret_cast<const jbyte*>(bytes.data()));
+  }
+  jobject result = env->NewObject(clazz, ctor, static_cast<jlong>(ptsUs), byteArray);
+  env->DeleteLocalRef(byteArray);
+  env->DeleteLocalRef(clazz);
+  return result;
+}
+
 ActiveAE::CActiveAEMediaSettings ParseConfig(JNIEnv* env, jobject config_obj)
 {
   jclass clazz = env->GetObjectClass(config_obj);
@@ -70,7 +103,8 @@ Java_androidx_media3_exoplayer_audio_kodi_KodiTrueHdNativeAudioSink_nCreate(JNIE
 {
   (void)env;
   (void)clazz;
-  return reinterpret_cast<jlong>(new KodiTrueHdAEEngine());
+  auto* engine = new KodiTrueHdAEEngine();
+  return reinterpret_cast<jlong>(engine);
 }
 
 extern "C" JNIEXPORT jboolean JNICALL
@@ -79,6 +113,17 @@ Java_androidx_media3_exoplayer_audio_kodi_KodiTrueHdNativeAudioSink_nConfigure(
 {
   (void)clazz;
   return AsSession(native_handle)->Configure(ParseConfig(env, config_obj)) ? JNI_TRUE : JNI_FALSE;
+}
+
+extern "C" JNIEXPORT void JNICALL
+Java_androidx_media3_exoplayer_audio_kodi_KodiTrueHdNativeAudioSink_nPrimeTrueHdIecAudioTrackPath(
+    JNIEnv* env, jclass clazz)
+{
+  (void)env;
+  (void)clazz;
+  CAESinkAUDIOTRACK::Register();
+  AEDeviceInfoList devices;
+  CAESinkAUDIOTRACK::EnumerateDevicesEx(devices, false);
 }
 
 extern "C" JNIEXPORT jint JNICALL
@@ -100,6 +145,28 @@ Java_androidx_media3_exoplayer_audio_kodi_KodiTrueHdNativeAudioSink_nWrite(
       ->Write(data + offset, size, static_cast<int64_t>(presentation_time_us), encoded_access_unit_count);
 }
 
+extern "C" JNIEXPORT void JNICALL
+Java_androidx_media3_exoplayer_audio_kodi_KodiTrueHdNativeAudioSink_nProbePassthroughStartupBuffer(
+    JNIEnv* env,
+    jclass clazz,
+    jlong native_handle,
+    jobject buffer,
+    jint offset,
+    jint size,
+    jlong presentation_time_us,
+    jint encoded_access_unit_count)
+{
+  (void)clazz;
+  auto* data = static_cast<uint8_t*>(env->GetDirectBufferAddress(buffer));
+  if (data == nullptr)
+    return;
+  AsSession(native_handle)
+      ->ProbePassthroughStartupBuffer(data + offset,
+                                      size,
+                                      static_cast<int64_t>(presentation_time_us),
+                                      encoded_access_unit_count);
+}
+
 extern "C" JNIEXPORT jint JNICALL
 Java_androidx_media3_exoplayer_audio_kodi_KodiTrueHdNativeAudioSink_nConsumeLastWriteOutputBytes(
     JNIEnv* env, jclass clazz, jlong native_handle)
@@ -107,6 +174,30 @@ Java_androidx_media3_exoplayer_audio_kodi_KodiTrueHdNativeAudioSink_nConsumeLast
   (void)env;
   (void)clazz;
   return static_cast<jint>(AsSession(native_handle)->ConsumeLastWriteOutputBytes());
+}
+
+extern "C" JNIEXPORT jobject JNICALL
+Java_androidx_media3_exoplayer_audio_kodi_KodiTrueHdNativeAudioSink_nConsumeNextCapturedPackedBurst(
+    JNIEnv* env, jclass clazz, jlong native_handle)
+{
+  (void)clazz;
+  std::vector<uint8_t> bytes;
+  int64_t ptsUs = 0;
+  if (!AsSession(native_handle)->ConsumeNextCapturedPackedBurst(bytes, ptsUs))
+    return nullptr;
+  return BuildNativeBurst(env, bytes, ptsUs);
+}
+
+extern "C" JNIEXPORT jobject JNICALL
+Java_androidx_media3_exoplayer_audio_kodi_KodiTrueHdNativeAudioSink_nConsumeNextCapturedAudioTrackWriteBurst(
+    JNIEnv* env, jclass clazz, jlong native_handle)
+{
+  (void)clazz;
+  std::vector<uint8_t> bytes;
+  int64_t ptsUs = 0;
+  if (!AsSession(native_handle)->ConsumeNextCapturedAudioTrackWriteBurst(bytes, ptsUs))
+    return nullptr;
+  return BuildNativeBurst(env, bytes, ptsUs);
 }
 
 extern "C" JNIEXPORT jint JNICALL
@@ -226,6 +317,15 @@ Java_androidx_media3_exoplayer_audio_kodi_KodiTrueHdNativeAudioSink_nIsEnded(
   return AsSession(native_handle)->IsEnded() ? JNI_TRUE : JNI_FALSE;
 }
 
+extern "C" JNIEXPORT jboolean JNICALL
+Java_androidx_media3_exoplayer_audio_kodi_KodiTrueHdNativeAudioSink_nIsPassthroughStartupReady(
+    JNIEnv* env, jclass clazz, jlong native_handle)
+{
+  (void)env;
+  (void)clazz;
+  return AsSession(native_handle)->IsPassthroughStartupReady() ? JNI_TRUE : JNI_FALSE;
+}
+
 extern "C" JNIEXPORT jlong JNICALL
 Java_androidx_media3_exoplayer_audio_kodi_KodiTrueHdNativeAudioSink_nGetBufferSizeUs(
     JNIEnv* env, jclass clazz, jlong native_handle)
@@ -233,6 +333,60 @@ Java_androidx_media3_exoplayer_audio_kodi_KodiTrueHdNativeAudioSink_nGetBufferSi
   (void)env;
   (void)clazz;
   return static_cast<jlong>(AsSession(native_handle)->GetBufferSizeUs());
+}
+
+extern "C" JNIEXPORT jlong JNICALL
+Java_androidx_media3_exoplayer_audio_kodi_KodiTrueHdNativeAudioSink_nGetBufferSizeBytes(
+    JNIEnv* env, jclass clazz, jlong native_handle)
+{
+  (void)env;
+  (void)clazz;
+  return static_cast<jlong>(AsSession(native_handle)->GetBufferSizeBytes());
+}
+
+extern "C" JNIEXPORT jint JNICALL
+Java_androidx_media3_exoplayer_audio_kodi_KodiTrueHdNativeAudioSink_nGetOutputSampleRate(
+    JNIEnv* env, jclass clazz, jlong native_handle)
+{
+  (void)env;
+  (void)clazz;
+  return static_cast<jint>(AsSession(native_handle)->GetOutputSampleRate());
+}
+
+extern "C" JNIEXPORT jint JNICALL
+Java_androidx_media3_exoplayer_audio_kodi_KodiTrueHdNativeAudioSink_nGetOutputChannelCount(
+    JNIEnv* env, jclass clazz, jlong native_handle)
+{
+  (void)env;
+  (void)clazz;
+  return static_cast<jint>(AsSession(native_handle)->GetOutputChannelCount());
+}
+
+extern "C" JNIEXPORT jint JNICALL
+Java_androidx_media3_exoplayer_audio_kodi_KodiTrueHdNativeAudioSink_nGetOutputEncoding(
+    JNIEnv* env, jclass clazz, jlong native_handle)
+{
+  (void)env;
+  (void)clazz;
+  return static_cast<jint>(AsSession(native_handle)->GetOutputEncoding());
+}
+
+extern "C" JNIEXPORT jint JNICALL
+Java_androidx_media3_exoplayer_audio_kodi_KodiTrueHdNativeAudioSink_nGetOutputAudioTrackState(
+    JNIEnv* env, jclass clazz, jlong native_handle)
+{
+  (void)env;
+  (void)clazz;
+  return static_cast<jint>(AsSession(native_handle)->GetOutputAudioTrackState());
+}
+
+extern "C" JNIEXPORT jint JNICALL
+Java_androidx_media3_exoplayer_audio_kodi_KodiTrueHdNativeAudioSink_nGetDirectPlaybackSupportState(
+    JNIEnv* env, jclass clazz, jlong native_handle)
+{
+  (void)env;
+  (void)clazz;
+  return static_cast<jint>(AsSession(native_handle)->GetDirectPlaybackSupportState());
 }
 
 extern "C" JNIEXPORT void JNICALL

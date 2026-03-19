@@ -19,63 +19,68 @@
 
 #include "cores/AudioEngine/Engines/ActiveAE/ActiveAEStream.h"
 #include "cores/AudioEngine/Utils/AEBitstreamPacker.h"
-#include "cores/AudioEngine/Utils/PackerMAT.h"
 
 #include <cstdint>
-#include <deque>
 #include <limits>
 #include <vector>
 
 namespace androidx_media3
 {
 
-struct KodiTrueHdPackedUnit
+struct KodiPackedAccessUnit
 {
   std::vector<uint8_t> bytes;
   size_t writeOffset{0};
   int inputBytesConsumed{0};
   int64_t ptsUs{std::numeric_limits<int64_t>::min()};
   int64_t durationUs{0};
-  int sourceAccessUnitCount{0};
-  unsigned int outputRate{192000};
-  unsigned int outputChannels{8};
-  uint16_t burstInfo{0x0016};
-  uint16_t payloadLengthCode{61424};
-  int matFrameSizeBytes{61424};
-  int burstSizeBytes{61440};
-  int paddingBytes{0};
+  unsigned int outputRate{48000};
+  unsigned int outputChannels{2};
+  CAEStreamInfo streamInfo{};
 };
 
 class KodiTrueHdIecPipeline
 {
 public:
-  void Configure(const AEAudioFormat& requestedFormat, bool verboseLogging);
+  void Configure(const AEAudioFormat& requestedFormat);
   void Reset();
 
+  // Returns bytes consumed from input. Emits at most one IEC packet per call.
   int Feed(const uint8_t* data,
            int size,
            int64_t presentationTimeUs,
-           std::deque<KodiTrueHdPackedUnit>& outPackets,
-           int maxPackets = std::numeric_limits<int>::max());
+           KodiPackedAccessUnit* outPacket,
+           bool* emittedPacket);
   bool HasParserBacklog() const { return streamAdapter_.HasBacklog(); }
   void AcknowledgeConsumedInputBytes(int bytes);
 
 private:
   static constexpr int64_t NO_PTS = std::numeric_limits<int64_t>::min();
-  static constexpr int kMatFramePayloadLengthCode = 61424;
-  static constexpr int kMatBurstSizeBytes = 61440;
-  static constexpr int kTrueHdFrameOffsetBytes = 2560;
 
-  void EmitPackedMatFrames(std::deque<KodiTrueHdPackedUnit>& outPackets, int maxPackets);
+  void EmitPackedPacket(const uint8_t* auData,
+                        unsigned int auSize,
+                        int64_t auPtsUs,
+                        int64_t auDurationUs,
+                        KodiPackedAccessUnit* outPacket,
+                        bool* emittedPacket);
+  int FeedBaseline(const uint8_t* data,
+                   int size,
+                   int64_t presentationTimeUs,
+                   KodiPackedAccessUnit* outPacket,
+                   bool* emittedPacket);
+  int FeedTrueHd(const uint8_t* data,
+                 int size,
+                 int64_t presentationTimeUs,
+                 KodiPackedAccessUnit* outPacket,
+                 bool* emittedPacket);
+  bool DrainTrueHdBacklog(KodiPackedAccessUnit* outPacket, bool* emittedPacket);
 
   ActiveAE::CActiveAEMediaStreamAdapter streamAdapter_;
-  CPackerMAT matPacker_;
-  bool verboseLogging_{false};
+  CAEBitstreamPacker bitstreamPacker_;
 
   int64_t pendingBurstPtsUs_{NO_PTS};
   int64_t pendingBurstDurationUs_{0};
   int pendingBurstInputBytes_{0};
-  int pendingBurstAccessUnitCount_{0};
 };
 
 }  // namespace androidx_media3
