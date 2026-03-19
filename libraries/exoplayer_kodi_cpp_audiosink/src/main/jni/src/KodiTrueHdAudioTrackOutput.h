@@ -17,9 +17,14 @@
 
 #pragma once
 
-#include "KodiAudioTrackOutput.h"
+#include "androidjni/AudioAttributes.h"
+#include "androidjni/AudioFormat.h"
+#include "androidjni/AudioManager.h"
+#include "androidjni/AudioTrack.h"
 
 #include <cstdint>
+#include <memory>
+#include <vector>
 
 namespace androidx_media3
 {
@@ -31,24 +36,40 @@ public:
                  unsigned int channelCount,
                  int encoding,
                  bool passthrough);
-  void SetVerboseLogging(bool verboseLogging);
+  bool ConfigureTrueHd(unsigned int sampleRate,
+                       unsigned int channelCount,
+                       int encoding,
+                       bool passthrough);
   bool Play();
   void Pause();
   void Flush();
   void Release();
   int WriteNonBlocking(const uint8_t* data, int size);
+  int WriteBlocking(const uint8_t* data, int size);
   uint64_t GetPlaybackFrames64();
   bool GetTimestamp(uint64_t* framePosition, int64_t* systemTimeUs);
   int GetBufferSizeInFrames() const;
   bool IsPlaying() const;
-  bool IsConfigured() const;
-  unsigned int SampleRate() const;
-  unsigned int ChannelCount() const;
-  unsigned int FrameSizeBytes() const;
+  bool IsConfigured() const { return track_ != nullptr; }
+  unsigned int SampleRate() const { return sampleRate_; }
+  unsigned int ChannelCount() const { return channelCount_; }
+  unsigned int FrameSizeBytes() const { return frameSizeBytes_; }
+  int Encoding() const { return encoding_; }
+  int AudioTrackState() const { return track_ != nullptr ? track_->getState() : 0; }
 
 private:
-  KodiAudioTrackOutput output_;
-  bool verboseLogging_{false};
+  static int ChannelMaskForCount(unsigned int channelCount);
+
+  std::unique_ptr<CJNIAudioTrack> track_;
+  std::vector<char> writeBuffer_;
+  std::vector<int16_t> writeShortBuffer_;
+  uint32_t lastPlaybackHead32_{0};
+  uint64_t playbackWrapCount_{0};
+  unsigned int sampleRate_{0};
+  unsigned int channelCount_{0};
+  unsigned int frameSizeBytes_{0};
+  int encoding_{CJNIAudioFormat::ENCODING_PCM_16BIT};
+  bool passthroughIec_{false};
 };
 
 }  // namespace androidx_media3
