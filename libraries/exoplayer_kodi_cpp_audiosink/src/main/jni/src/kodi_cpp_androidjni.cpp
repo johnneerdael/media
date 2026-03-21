@@ -98,6 +98,7 @@ struct AudioIds
   jmethodID audioTrackGetPlaybackHeadPosition = nullptr;
   jmethodID audioTrackGetLatency = nullptr;
   jmethodID audioTrackGetBufferSizeInFrames = nullptr;
+  jmethodID audioTrackGetUnderrunCount = nullptr;
   jmethodID audioTrackGetTimestamp = nullptr;
   jmethodID audioTrackGetMinBufferSize = nullptr;
   jmethodID audioTrackGetNativeOutputSampleRate = nullptr;
@@ -194,6 +195,10 @@ bool EnsureIds() {
   ids.audioTrackGetLatency = env->GetMethodID(ids.audioTrackClass, "getLatency", "()I");
   ids.audioTrackGetBufferSizeInFrames =
       env->GetMethodID(ids.audioTrackClass, "getBufferSizeInFrames", "()I");
+  ids.audioTrackGetUnderrunCount =
+      env->GetMethodID(ids.audioTrackClass, "getUnderrunCount", "()I");
+  if (ids.audioTrackGetUnderrunCount == nullptr)
+    env->ExceptionClear();
   ids.audioTrackGetTimestamp =
       env->GetMethodID(ids.audioTrackClass, "getTimestamp", "(Landroid/media/AudioTimestamp;)Z");
   ids.audioTrackGetMinBufferSize =
@@ -718,6 +723,13 @@ int CJNIAudioTrack::getBufferSizeInFrames() const {
   return (env == nullptr || m_audioTrack == nullptr)
              ? -1
              : env->CallIntMethod(m_audioTrack, GetIds().audioTrackGetBufferSizeInFrames);
+}
+
+int CJNIAudioTrack::getUnderrunCount() const {
+  JNIEnv* env = GetEnvOrNull();
+  return (env == nullptr || m_audioTrack == nullptr || GetIds().audioTrackGetUnderrunCount == nullptr)
+             ? -1
+             : env->CallIntMethod(m_audioTrack, GetIds().audioTrackGetUnderrunCount);
 }
 
 bool CJNIAudioTrack::getTimestamp(CJNIAudioTimestamp& timestamp) const {

@@ -15,7 +15,7 @@
  * along with this program. If not, see <https://www.gnu.org/licenses/>.
  */
 
-#include "KodiAudioTrackOutput.h"
+#include "KodiTrueHdAudioTrackOutput.h"
 
 #include "utils/log.h"
 
@@ -25,7 +25,7 @@
 namespace androidx_media3
 {
 
-int KodiAudioTrackOutput::ChannelMaskForCount(unsigned int channelCount)
+int KodiTrueHdAudioTrackOutput::ChannelMaskForCount(unsigned int channelCount)
 {
   if (channelCount > 6)
     return CJNIAudioFormat::CHANNEL_OUT_7POINT1_SURROUND;
@@ -34,10 +34,10 @@ int KodiAudioTrackOutput::ChannelMaskForCount(unsigned int channelCount)
   return CJNIAudioFormat::CHANNEL_OUT_STEREO;
 }
 
-bool KodiAudioTrackOutput::Configure(unsigned int sampleRate,
-                                     unsigned int channelCount,
-                                     int encoding,
-                                     bool passthrough)
+bool KodiTrueHdAudioTrackOutput::ConfigureInternal(unsigned int sampleRate,
+                                                   unsigned int channelCount,
+                                                   int encoding,
+                                                   bool passthrough)
 {
   const unsigned int safeSampleRate = sampleRate > 0 ? sampleRate : 48000;
   const unsigned int safeChannels = std::max(1u, channelCount);
@@ -77,7 +77,7 @@ bool KodiAudioTrackOutput::Configure(unsigned int sampleRate,
   if (!newTrack || newTrack->getState() != CJNIAudioTrack::STATE_INITIALIZED)
   {
     CLog::Log(LOGERROR,
-              "KodiAudioTrackOutput::Configure failed sampleRate={} channels={} encoding={}",
+              "KodiTrueHdAudioTrackOutput::Configure failed sampleRate={} channels={} encoding={}",
               safeSampleRate,
               safeChannels,
               safeEncoding);
@@ -91,6 +91,7 @@ bool KodiAudioTrackOutput::Configure(unsigned int sampleRate,
   sampleRate_ = safeSampleRate;
   channelCount_ = safeChannels;
   encoding_ = safeEncoding;
+  passthroughIec_ = passthrough;
   frameSizeBytes_ = safeChannels * (safeEncoding == CJNIAudioFormat::ENCODING_PCM_FLOAT ? 4 : 2);
   lastPlaybackHead32_ = 0;
   playbackWrapCount_ = 0;
@@ -102,7 +103,23 @@ bool KodiAudioTrackOutput::Configure(unsigned int sampleRate,
   return true;
 }
 
-bool KodiAudioTrackOutput::Play()
+bool KodiTrueHdAudioTrackOutput::Configure(unsigned int sampleRate,
+                                           unsigned int channelCount,
+                                           int encoding,
+                                           bool passthrough)
+{
+  return ConfigureInternal(sampleRate, channelCount, encoding, passthrough);
+}
+
+bool KodiTrueHdAudioTrackOutput::ConfigureTrueHd(unsigned int sampleRate,
+                                                 unsigned int channelCount,
+                                                 int encoding,
+                                                 bool passthrough)
+{
+  return Configure(sampleRate, channelCount, encoding, passthrough);
+}
+
+bool KodiTrueHdAudioTrackOutput::Play()
 {
   if (!track_)
     return false;
@@ -112,13 +129,13 @@ bool KodiAudioTrackOutput::Play()
          track_->getPlayState() == CJNIAudioTrack::PLAYSTATE_PLAYING;
 }
 
-void KodiAudioTrackOutput::Pause()
+void KodiTrueHdAudioTrackOutput::Pause()
 {
   if (track_)
     track_->pause();
 }
 
-void KodiAudioTrackOutput::Flush()
+void KodiTrueHdAudioTrackOutput::Flush()
 {
   if (!track_)
     return;
@@ -131,7 +148,7 @@ void KodiAudioTrackOutput::Flush()
   lastObservedUnderrunCount_ = track_->getUnderrunCount();
 }
 
-void KodiAudioTrackOutput::Release()
+void KodiTrueHdAudioTrackOutput::Release()
 {
   if (track_)
   {
@@ -142,6 +159,7 @@ void KodiAudioTrackOutput::Release()
   channelCount_ = 0;
   frameSizeBytes_ = 0;
   encoding_ = CJNIAudioFormat::ENCODING_PCM_16BIT;
+  passthroughIec_ = false;
   lastPlaybackHead32_ = 0;
   playbackWrapCount_ = 0;
   restartFrameOffset_ = 0;
@@ -152,7 +170,7 @@ void KodiAudioTrackOutput::Release()
   writeBuffer_.clear();
 }
 
-int KodiAudioTrackOutput::WriteNonBlocking(const uint8_t* data, int size)
+int KodiTrueHdAudioTrackOutput::WriteNonBlocking(const uint8_t* data, int size)
 {
   if (!track_ || data == nullptr || size <= 0)
     return 0;
@@ -163,7 +181,7 @@ int KodiAudioTrackOutput::WriteNonBlocking(const uint8_t* data, int size)
   return track_->write(writeBuffer_, 0, size, CJNIAudioTrack::WRITE_NON_BLOCKING);
 }
 
-uint64_t KodiAudioTrackOutput::GetPlaybackFrames64()
+uint64_t KodiTrueHdAudioTrackOutput::GetPlaybackFrames64()
 {
   if (!track_)
     return 0;
@@ -187,7 +205,7 @@ uint64_t KodiAudioTrackOutput::GetPlaybackFrames64()
   return restartFrameOffset_ + ((playbackWrapCount_ << 32) | head32);
 }
 
-bool KodiAudioTrackOutput::GetTimestamp(uint64_t* framePosition, int64_t* systemTimeUs)
+bool KodiTrueHdAudioTrackOutput::GetTimestamp(uint64_t* framePosition, int64_t* systemTimeUs)
 {
   if (!track_ || framePosition == nullptr || systemTimeUs == nullptr)
     return false;
@@ -206,14 +224,14 @@ bool KodiAudioTrackOutput::GetTimestamp(uint64_t* framePosition, int64_t* system
   return true;
 }
 
-int KodiAudioTrackOutput::GetBufferSizeInFrames() const
+int KodiTrueHdAudioTrackOutput::GetBufferSizeInFrames() const
 {
   if (!track_)
     return 0;
   return track_->getBufferSizeInFrames();
 }
 
-int KodiAudioTrackOutput::GetUnderrunCount() const
+int KodiTrueHdAudioTrackOutput::GetUnderrunCount() const
 {
   if (!track_)
     return accumulatedUnderrunCount_;
@@ -231,7 +249,7 @@ int KodiAudioTrackOutput::GetUnderrunCount() const
   return accumulatedUnderrunCount_;
 }
 
-bool KodiAudioTrackOutput::IsPlaying() const
+bool KodiTrueHdAudioTrackOutput::IsPlaying() const
 {
   return track_ != nullptr && track_->getPlayState() == CJNIAudioTrack::PLAYSTATE_PLAYING;
 }
