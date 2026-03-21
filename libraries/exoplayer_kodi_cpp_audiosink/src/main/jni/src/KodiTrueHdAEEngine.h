@@ -145,7 +145,9 @@ private:
     int firstOffsetBytes_{0};
     int lastOffsetBytes_{0};
     int count_{0};
+    int zeroWriteStreak_{0};
     int lastSuccessfulWriteBytes_{0};
+    int64_t nextEligibleRetryTimeUs_{CURRENT_POSITION_NOT_SET};
     int64_t lastSuccessfulWriteTimeUs_{CURRENT_POSITION_NOT_SET};
     int64_t lastAttemptTimeUs_{CURRENT_POSITION_NOT_SET};
     int64_t lastProgressTimeUs_{CURRENT_POSITION_NOT_SET};
@@ -157,7 +159,9 @@ private:
       firstOffsetBytes_ = 0;
       lastOffsetBytes_ = 0;
       count_ = 0;
+      zeroWriteStreak_ = 0;
       lastSuccessfulWriteBytes_ = 0;
+      nextEligibleRetryTimeUs_ = CURRENT_POSITION_NOT_SET;
       lastSuccessfulWriteTimeUs_ = CURRENT_POSITION_NOT_SET;
       lastAttemptTimeUs_ = CURRENT_POSITION_NOT_SET;
       lastProgressTimeUs_ = CURRENT_POSITION_NOT_SET;
@@ -226,6 +230,7 @@ private:
   bool HasReachedSteadyStatePendingPackedHandoffLocked();
   bool ShouldRetryStartupPendingPackedRemainderLocked(int64_t nowUs, int remainingBytes, uint64_t playedFrames, int bufferFitFrames, int* playbackHeadDeltaFrames, int* bufferFitDeltaFrames, const char** retryReason);
   bool ShouldRetrySteadyStatePendingPackedRemainderLocked(int64_t nowUs, int remainingBytes, uint64_t playedFrames, int bufferFitFrames, int* playbackHeadDeltaFrames, int* bufferFitDeltaFrames, const char** retryReason);
+  int64_t ComputeSteadyStateRetryBackoffUsLocked(const KodiPackedAccessUnit& packet, int remainingBytes) const;
   void RecordPackedBurstLocked(const KodiPackedAccessUnit& packet);
   void RecordAudioTrackWriteChunkLocked(const KodiPackedAccessUnit& packet, int bytesWritten);
   void FinalizeAudioTrackWriteBurstLocked(const KodiPackedAccessUnit& packet);
