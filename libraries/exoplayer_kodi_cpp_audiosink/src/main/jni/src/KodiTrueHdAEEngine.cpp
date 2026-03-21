@@ -208,6 +208,8 @@ bool KodiTrueHdAEEngine::ShouldRetrySteadyStatePendingPackedRemainderLocked(int6
     steadyStateRetryState_.lastOffsetBytes_ = currentOffset;
     steadyStateRetryState_.lastPlayedFrames_ = playedFrames;
     steadyStateRetryState_.lastBufferFitFrames_ = bufferFitFrames;
+    if (retryReason != nullptr)
+      *retryReason = "steady_state_output_driven";
     return true;
   }
 
@@ -1533,7 +1535,7 @@ int KodiTrueHdAEEngine::FlushTrueHdPackedQueueToHardwareLocked()
       const char* fallbackRetryReason =
           retryReason != nullptr
               ? retryReason
-              : (isSteadyState ? "steady_state_retry_reason_unset"
+              : (isSteadyState ? "steady_state_output_driven"
                                : "startup_retry_reason_unset");
       lastWriteDiagnosticDetail_ =
           "requestedBytes=" + std::to_string(remaining) +
@@ -1581,11 +1583,7 @@ int KodiTrueHdAEEngine::FlushTrueHdPackedQueueToHardwareLocked()
             .count();
     pendingPackedRetryLastProgressTimeUs_ = pendingPackedRetryLastSuccessfulWriteTimeUs_;
     pendingPackedRetryLastOffsetBytes_ = static_cast<int>(pendingPackedOutput_->writeOffset);
-    
-    // THIS WAS THE CRITICAL MISSING PIECE FROM THE ORIGINAL IMPLEMENTATION
-    if (retryingPendingRemainder && isSteadyState)
-      activeRetryState->Reset();
-    
+
     if (written < remaining)
     {
       break;
