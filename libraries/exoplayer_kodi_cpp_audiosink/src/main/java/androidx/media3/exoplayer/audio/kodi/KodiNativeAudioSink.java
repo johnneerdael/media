@@ -17,6 +17,7 @@
 package androidx.media3.exoplayer.audio.kodi;
 
 import android.media.AudioDeviceInfo;
+import android.media.AudioFormat;
 import android.os.SystemClock;
 import android.util.Log;
 import androidx.annotation.Nullable;
@@ -31,6 +32,9 @@ import androidx.media3.exoplayer.audio.AudioCapabilities;
 import androidx.media3.exoplayer.audio.AudioSink;
 import androidx.media3.exoplayer.audio.ForwardingAudioSink;
 import androidx.media3.exoplayer.audio.RendererClockAwareAudioSink;
+import androidx.media3.exoplayer.audio.kodi.validation.TransportValidationNativeBurst;
+import androidx.media3.exoplayer.audio.kodi.validation.TransportValidationRuntime;
+import androidx.media3.exoplayer.audio.kodi.validation.TransportValidationRuntimeEventType;
 import java.nio.ByteBuffer;
 
 @UnstableApi
@@ -88,6 +92,8 @@ public final class KodiNativeAudioSink extends ForwardingAudioSink
   private long pendingWriteErrorDeadlineMs;
   private long pendingWriteEarliestRetryMs;
   private long pendingReleaseUntilMs;
+  private int lastReportedOutputUnderrunCount;
+  private int lastReportedOutputRestartCount;
 
   public KodiNativeAudioSink(AudioSink sink) {
     super(sink);
@@ -99,6 +105,7 @@ public final class KodiNativeAudioSink extends ForwardingAudioSink
     handledEndOfStream = false;
     clearPendingWriteError();
     pendingReleaseUntilMs = C.TIME_UNSET;
+    clearTransportValidationRuntimeOutputState();
   }
 
   @Override
@@ -172,8 +179,10 @@ public final class KodiNativeAudioSink extends ForwardingAudioSink
       throw new ConfigurationException(
           new IllegalStateException("Failed to configure Kodi native sink session"), inputFormat);
     }
+    updateTransportValidationRoute();
     clearPendingWriteError();
     pendingReleaseUntilMs = C.TIME_UNSET;
+    clearTransportValidationRuntimeOutputState();
   }
 
   @Override
@@ -200,6 +209,7 @@ public final class KodiNativeAudioSink extends ForwardingAudioSink
             presentationTimeUs,
             encodedAccessUnitCount);
     nConsumeLastWriteOutputBytes(nativeHandle);
+    drainCapturedValidationBursts();
     int nativeWriteErrorCode = nConsumeLastWriteErrorCode(nativeHandle);
     if (AudioCapabilities.isFireOsIecVerboseLoggingEnabled()
         && bytesConsumed > 0
@@ -213,15 +223,19 @@ public final class KodiNativeAudioSink extends ForwardingAudioSink
     }
     if (nativeWriteErrorCode < 0 && bytesConsumed <= 0) {
       maybeHandlePendingWriteError(nativeWriteErrorCode);
+      recordTransportValidationWriteEvent(originalRemaining, bytesConsumed);
       return false;
     }
     if (bytesConsumed <= 0) {
+      recordTransportValidationWriteEvent(originalRemaining, bytesConsumed);
       return false;
     }
     // Match DefaultAudioSink contract: once this call consumed bytes, report
     // forward progress and do not introduce extra retry gating for the same write.
     clearPendingWriteError();
     handledEndOfStream = false;
+    maybeRecordPackerInput(writeBuffer, presentationTimeUs, bytesConsumed);
+    recordTransportValidationWriteEvent(originalRemaining, bytesConsumed);
     buffer.position(buffer.position() + Math.min(bytesConsumed, originalRemaining));
     return bytesConsumed >= originalRemaining;
   }
@@ -262,7 +276,10 @@ public final class KodiNativeAudioSink extends ForwardingAudioSink
 
   @Override
   public long getCurrentPositionUs(boolean sourceEnded) {
-    return nativeHandle == 0L ? CURRENT_POSITION_NOT_SET : nGetCurrentPositionUs(nativeHandle);
+    maybeRecordTransportValidationRuntimeEvents();
+    long currentPositionUs = nativeHandle == 0L ? CURRENT_POSITION_NOT_SET : nGetCurrentPositionUs(nativeHandle);
+    maybeRecordTransportValidationPlaybackHeadPosition(currentPositionUs);
+    return currentPositionUs;
   }
 
   @Override
@@ -276,16 +293,19 @@ public final class KodiNativeAudioSink extends ForwardingAudioSink
 
   @Override
   public boolean isEnded() {
+    maybeRecordTransportValidationRuntimeEvents();
     return nativeHandle == 0L || (handledEndOfStream && nIsEnded(nativeHandle));
   }
 
   @Override
   public boolean hasPendingData() {
+    maybeRecordTransportValidationRuntimeEvents();
     return nativeHandle != 0L && nHasPendingData(nativeHandle);
   }
 
   @Override
   public long getAudioTrackBufferSizeUs() {
+    maybeRecordTransportValidationRuntimeEvents();
     return nativeHandle == 0L ? 0L : nGetBufferSizeUs(nativeHandle);
   }
 
@@ -295,6 +315,7 @@ public final class KodiNativeAudioSink extends ForwardingAudioSink
     handledEndOfStream = false;
     clearPendingWriteError();
     pendingReleaseUntilMs = SystemClock.elapsedRealtime() + RETRY_DURATION_MS;
+    clearTransportValidationRuntimeOutputState();
     if (AudioCapabilities.isFireOsIecVerboseLoggingEnabled()) {
       Log.i(TAG, "Media3 -> AudioSink flush()");
     }
@@ -310,6 +331,7 @@ public final class KodiNativeAudioSink extends ForwardingAudioSink
     clearPendingWriteError();
     closeSession(true);
     configuredFormat = null;
+    clearTransportValidationRuntimeOutputState();
     super.reset();
   }
 
@@ -320,6 +342,7 @@ public final class KodiNativeAudioSink extends ForwardingAudioSink
     clearPendingWriteError();
     closeSession(false);
     configuredFormat = null;
+    clearTransportValidationRuntimeOutputState();
     super.release();
   }
 
@@ -372,6 +395,146 @@ public final class KodiNativeAudioSink extends ForwardingAudioSink
     directBuffer.put(source.duplicate());
     directBuffer.flip();
     return directBuffer;
+  }
+
+  private void maybeRecordPackerInput(ByteBuffer buffer, long presentationTimeUs, int bytesConsumed) {
+    if (!TransportValidationRuntime.isEnabled() || bytesConsumed <= 0) {
+      return;
+    }
+    ByteBuffer duplicate = buffer.duplicate();
+    int length = Math.min(bytesConsumed, duplicate.remaining());
+    if (length <= 0) {
+      return;
+    }
+    byte[] bytes = new byte[length];
+    duplicate.get(bytes, 0, length);
+    TransportValidationRuntime.recordPackerInput(presentationTimeUs, bytes);
+  }
+
+  private void drainCapturedValidationBursts() {
+    if (!TransportValidationRuntime.isEnabled() || nativeHandle == 0L) {
+      return;
+    }
+    for (TransportValidationNativeBurst burst = nConsumeNextCapturedPackedBurst(nativeHandle);
+        burst != null;
+        burst = nConsumeNextCapturedPackedBurst(nativeHandle)) {
+      TransportValidationRuntime.recordPackedBurst(burst.sourcePtsUs, burst.bytes);
+    }
+    for (TransportValidationNativeBurst burst = nConsumeNextCapturedAudioTrackWriteBurst(nativeHandle);
+        burst != null;
+        burst = nConsumeNextCapturedAudioTrackWriteBurst(nativeHandle)) {
+      TransportValidationRuntime.recordAudioTrackWrite(burst.sourcePtsUs, burst.bytes);
+    }
+  }
+
+  private void updateTransportValidationRoute() {
+    if (!TransportValidationRuntime.isEnabled()) {
+      return;
+    }
+    int outputSampleRate = nativeHandle != 0L ? nGetOutputSampleRate(nativeHandle) : 0;
+    int outputChannelCount = nativeHandle != 0L ? nGetOutputChannelCount(nativeHandle) : 0;
+    int outputEncoding = nativeHandle != 0L ? nGetOutputEncoding(nativeHandle) : C.ENCODING_INVALID;
+    int audioTrackState = nativeHandle != 0L ? nGetOutputAudioTrackState(nativeHandle) : 0;
+    int directPlaybackSupportState =
+        nativeHandle != 0L ? nGetDirectPlaybackSupportState(nativeHandle) : -1;
+    TransportValidationRuntime.updateRouteSnapshot(
+        resolvePreferredDeviceName(preferredDevice),
+        encodingLabel(outputEncoding, configuredFormat != null ? configuredFormat.sampleMimeType : null),
+        outputSampleRate,
+        channelMaskLabel(outputChannelCount),
+        directPlaybackSupportState > 0
+            ? Boolean.TRUE
+            : directPlaybackSupportState == 0 ? Boolean.FALSE : null,
+        audioTrackState > 0 ? audioTrackState : null);
+    maybeRecordTransportValidationRuntimeEvents();
+  }
+
+  private void maybeRecordTransportValidationRuntimeEvents() {
+    if (nativeHandle == 0L) {
+      return;
+    }
+    int outputUnderrunCount = nGetOutputUnderrunCount(nativeHandle);
+    if (outputUnderrunCount >= 0) {
+      if (lastReportedOutputUnderrunCount >= 0
+          && outputUnderrunCount > lastReportedOutputUnderrunCount) {
+        TransportValidationRuntime.recordRuntimeEvent(
+            TransportValidationRuntimeEventType.AUDIO_UNDERRUN,
+            outputUnderrunCount - lastReportedOutputUnderrunCount,
+            "source=sink");
+      }
+      lastReportedOutputUnderrunCount = outputUnderrunCount;
+    }
+    int outputRestartCount = nGetOutputRestartCount(nativeHandle);
+    if (outputRestartCount >= 0) {
+      if (lastReportedOutputRestartCount >= 0
+          && outputRestartCount > lastReportedOutputRestartCount) {
+        TransportValidationRuntime.recordRuntimeEvent(
+            TransportValidationRuntimeEventType.AUDIOTRACK_RESTART,
+            outputRestartCount - lastReportedOutputRestartCount,
+            "source=sink");
+      }
+      lastReportedOutputRestartCount = outputRestartCount;
+    }
+  }
+
+  private void maybeRecordTransportValidationPlaybackHeadPosition(long currentPositionUs) {
+    if (nativeHandle == 0L || currentPositionUs == CURRENT_POSITION_NOT_SET) {
+      return;
+    }
+    TransportValidationRuntime.recordRuntimeEvent(
+        TransportValidationRuntimeEventType.PLAYBACK_HEAD_POSITION, currentPositionUs, "unit=us");
+  }
+
+  private void recordTransportValidationWriteEvent(int requestedBytes, int bytesConsumed) {
+    if (!TransportValidationRuntime.isEnabled() || requestedBytes <= 0) {
+      return;
+    }
+    if (bytesConsumed <= 0) {
+      TransportValidationRuntime.recordRuntimeEvent(
+          TransportValidationRuntimeEventType.AUDIO_WRITE_ZERO,
+          requestedBytes,
+          "requestedBytes=" + requestedBytes);
+      return;
+    }
+    if (bytesConsumed < requestedBytes) {
+      TransportValidationRuntime.recordRuntimeEvent(
+          TransportValidationRuntimeEventType.AUDIO_WRITE_PARTIAL,
+          bytesConsumed,
+          "requestedBytes=" + requestedBytes + " remainingBytes=" + (requestedBytes - bytesConsumed));
+      return;
+    }
+    TransportValidationRuntime.recordRuntimeEvent(
+        TransportValidationRuntimeEventType.AUDIO_WRITE_SUCCESS,
+        bytesConsumed,
+        "requestedBytes=" + requestedBytes);
+  }
+
+  private void clearTransportValidationRuntimeOutputState() {
+    lastReportedOutputUnderrunCount = -1;
+    lastReportedOutputRestartCount = -1;
+  }
+
+  private static String channelMaskLabel(int channelCount) {
+    if (channelCount >= 8) {
+      return "7.1";
+    }
+    if (channelCount >= 6) {
+      return "5.1";
+    }
+    if (channelCount >= 2) {
+      return "2.0";
+    }
+    return Integer.toString(channelCount);
+  }
+
+  private static String encodingLabel(int encoding, @Nullable String fallbackMimeType) {
+    if (encoding == C.ENCODING_INVALID || encoding <= 0) {
+      return fallbackMimeType != null ? fallbackMimeType : "unknown";
+    }
+    if (encoding == AudioFormat.ENCODING_IEC61937) {
+      return "IEC61937";
+    }
+    return Integer.toString(encoding);
   }
 
   private static boolean isKodiPassthroughMime(@Nullable String sampleMimeType) {
@@ -488,6 +651,12 @@ public final class KodiNativeAudioSink extends ForwardingAudioSink
 
   private static native int nConsumeLastWriteOutputBytes(long nativeHandle);
 
+  private static native @Nullable TransportValidationNativeBurst nConsumeNextCapturedPackedBurst(
+      long nativeHandle);
+
+  private static native @Nullable TransportValidationNativeBurst nConsumeNextCapturedAudioTrackWriteBurst(
+      long nativeHandle);
+
   private static native int nConsumeLastWriteErrorCode(long nativeHandle);
 
   private static native boolean nIsReleasePending(long nativeHandle);
@@ -515,6 +684,20 @@ public final class KodiNativeAudioSink extends ForwardingAudioSink
   private static native boolean nIsEnded(long nativeHandle);
 
   private static native long nGetBufferSizeUs(long nativeHandle);
+
+  private static native int nGetOutputSampleRate(long nativeHandle);
+
+  private static native int nGetOutputChannelCount(long nativeHandle);
+
+  private static native int nGetOutputEncoding(long nativeHandle);
+
+  private static native int nGetOutputAudioTrackState(long nativeHandle);
+
+  private static native int nGetOutputUnderrunCount(long nativeHandle);
+
+  private static native int nGetOutputRestartCount(long nativeHandle);
+
+  private static native int nGetDirectPlaybackSupportState(long nativeHandle);
 
   private static native void nRelease(long nativeHandle);
 }

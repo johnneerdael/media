@@ -45,11 +45,16 @@ add_library(kodiCppAudioSinkJNI
             SHARED
             src/kodi_cpp_audiosink_bridge.cpp
             src/kodi_cpp_session_bridge.cpp
+            src/kodi_cpp_truehd_session_bridge.cpp
             src/kodi_cpp_androidjni.cpp
             src/kodi_cpp_android_context.cpp
             src/KodiActiveAEEngine.cpp
+            src/KodiTrueHdAEEngine.cpp
             src/KodiAudioTrackOutput.cpp
+            src/KodiTrueHdAudioTrackOutput.cpp
             src/KodiIecPipeline.cpp
+            src/KodiTrueHdFfmpegMatPacker.cpp
+            src/KodiTrueHdIecPipeline.cpp
             ${FMT_ROOT}/src/format.cc
             ${KODI_XBMC_ROOT}/commons/Exception.cpp
             ${KODI_XBMC_ROOT}/cores/FFmpeg.cpp

@@ -59,6 +59,7 @@ bool KodiActiveAEEngine::Configure(const ActiveAE::CActiveAEMediaSettings& confi
   ended_ = false;
   volume_ = config.volume;
   hasPendingData_ = false;
+  directPlaybackSupportState_ = -1;
 
   packedQueue_.clear();
   pcmQueue_.clear();
@@ -66,6 +67,7 @@ bool KodiActiveAEEngine::Configure(const ActiveAE::CActiveAEMediaSettings& confi
   firstQueuedPtsUs_ = NO_PTS;
   pendingPassthroughAckBytes_ = 0;
   totalWrittenFrames_ = 0;
+  ClearCapturedValidationBurstsLocked();
   iecPipeline_.Configure(requestedFormat_);
   output_.Release();
   MarkReleasePendingLocked();
@@ -165,6 +167,7 @@ void KodiActiveAEEngine::Flush()
   pendingPassthroughAckBytes_ = 0;
   hasPendingData_ = false;
   ended_ = false;
+  ClearCapturedValidationBurstsLocked();
   iecPipeline_.Reset();
   // Align stock DefaultAudioSink compatibility behavior: release on every flush.
   output_.Release();
@@ -277,6 +280,48 @@ int64_t KodiActiveAEEngine::GetBufferSizeUs() const
   return static_cast<int64_t>(frames) * 1000000LL / output_.SampleRate();
 }
 
+int KodiActiveAEEngine::GetOutputSampleRate() const
+{
+  std::unique_lock lock(lock_);
+  return static_cast<int>(output_.SampleRate());
+}
+
+int KodiActiveAEEngine::GetOutputChannelCount() const
+{
+  std::unique_lock lock(lock_);
+  return static_cast<int>(output_.ChannelCount());
+}
+
+int KodiActiveAEEngine::GetOutputEncoding() const
+{
+  std::unique_lock lock(lock_);
+  return output_.Encoding();
+}
+
+int KodiActiveAEEngine::GetOutputAudioTrackState() const
+{
+  std::unique_lock lock(lock_);
+  return output_.AudioTrackState();
+}
+
+int KodiActiveAEEngine::GetOutputUnderrunCount() const
+{
+  std::unique_lock lock(lock_);
+  return output_.GetUnderrunCount();
+}
+
+int KodiActiveAEEngine::GetOutputRestartCount() const
+{
+  std::unique_lock lock(lock_);
+  return output_.GetRestartCount();
+}
+
+int KodiActiveAEEngine::GetDirectPlaybackSupportState() const
+{
+  std::unique_lock lock(lock_);
+  return directPlaybackSupportState_;
+}
+
 int KodiActiveAEEngine::ConsumeLastWriteOutputBytes()
 {
   std::unique_lock lock(lock_);
@@ -291,6 +336,31 @@ int KodiActiveAEEngine::ConsumeLastWriteErrorCode()
   const int value = lastWriteErrorCode_;
   lastWriteErrorCode_ = 0;
   return value;
+}
+
+bool KodiActiveAEEngine::ConsumeNextCapturedPackedBurst(std::vector<uint8_t>& bytes, int64_t& ptsUs)
+{
+  std::unique_lock lock(lock_);
+  if (capturedPackedBursts_.empty())
+    return false;
+  auto burst = std::move(capturedPackedBursts_.front());
+  capturedPackedBursts_.pop_front();
+  bytes = std::move(burst.bytes);
+  ptsUs = burst.ptsUs;
+  return true;
+}
+
+bool KodiActiveAEEngine::ConsumeNextCapturedAudioTrackWriteBurst(std::vector<uint8_t>& bytes,
+                                                                 int64_t& ptsUs)
+{
+  std::unique_lock lock(lock_);
+  if (capturedAudioTrackWriteBursts_.empty())
+    return false;
+  auto burst = std::move(capturedAudioTrackWriteBursts_.front());
+  capturedAudioTrackWriteBursts_.pop_front();
+  bytes = std::move(burst.bytes);
+  ptsUs = burst.ptsUs;
+  return true;
 }
 
 bool KodiActiveAEEngine::IsReleasePending()
@@ -311,6 +381,7 @@ void KodiActiveAEEngine::Reset()
   passthrough_ = false;
   ended_ = false;
   hasPendingData_ = false;
+  directPlaybackSupportState_ = -1;
   lastWriteOutputBytes_ = 0;
   lastWriteErrorCode_ = 0;
   packedQueue_.clear();
@@ -318,6 +389,7 @@ void KodiActiveAEEngine::Reset()
   queuedDurationUs_ = 0;
   firstQueuedPtsUs_ = NO_PTS;
   pendingPassthroughAckBytes_ = 0;
+  ClearCapturedValidationBurstsLocked();
   iecPipeline_.Reset();
   output_.Release();
   MarkReleasePendingLocked();
@@ -385,6 +457,7 @@ int KodiActiveAEEngine::WritePassthroughLocked(const uint8_t* data,
 
     if (packedQueue_.size() > queueSizeBeforeFeed)
     {
+      RecordPackedBurstLocked(packedQueue_.back());
       if (!output_.IsConfigured())
         EnsurePassthroughOutputConfiguredLocked(packedQueue_.front());
       FlushPackedQueueToHardwareLocked();
@@ -508,8 +581,12 @@ void KodiActiveAEEngine::EnsurePassthroughOutputConfiguredLocked(const KodiPacke
     }
   }
   if (!configured)
+  {
+    directPlaybackSupportState_ = 0;
     return;
+  }
 
+  directPlaybackSupportState_ = 1;
   releasePendingUntilUs_ = CURRENT_POSITION_NOT_SET;
   if (playRequested_ && outputStarted_ && !output_.Play())
   {
@@ -537,6 +614,7 @@ bool KodiActiveAEEngine::EnsurePcmOutputConfiguredLocked()
     encoding = requestedFormat_.m_dataFormat == AE_FMT_FLOAT ? CJNIAudioFormat::ENCODING_PCM_FLOAT
                                                              : CJNIAudioFormat::ENCODING_PCM_16BIT;
   const bool configured = output_.Configure(requestedFormat_.m_sampleRate, channels, encoding, false);
+  directPlaybackSupportState_ = configured ? 1 : 0;
   if (configured)
     releasePendingUntilUs_ = CURRENT_POSITION_NOT_SET;
   return configured;
@@ -586,6 +664,7 @@ int KodiActiveAEEngine::FlushPackedQueueToHardwareLocked()
     ++totalWriteCalls;
     totalBytesWritten += written;
     lastWriteOutputBytes_ += written;
+    RecordAudioTrackWriteChunkLocked(packet, written);
     packet.writeOffset += static_cast<size_t>(written);
     if (packet.writeOffset >= packet.bytes.size())
     {
@@ -596,6 +675,7 @@ int KodiActiveAEEngine::FlushPackedQueueToHardwareLocked()
                            static_cast<int>(packet.bytes.size()),
                            output_.SampleRate(),
                            output_.FrameSizeBytes());
+      FinalizeAudioTrackWriteBurstLocked(packet);
       packedQueue_.pop_front();
       ++totalConsumedPackets;
     }
@@ -726,6 +806,53 @@ void KodiActiveAEEngine::OnBytesWrittenLocked(int64_t packetPtsUs,
     mediaPositionParametersCheckpoints_.clear();
     lastPositionUs_ = anchorPtsUs_;
   }
+}
+
+void KodiActiveAEEngine::RecordPackedBurstLocked(const KodiPackedAccessUnit& packet)
+{
+  if (packet.bytes.empty())
+    return;
+  CapturedValidationBurst burst;
+  burst.bytes = packet.bytes;
+  burst.ptsUs = packet.ptsUs;
+  capturedPackedBursts_.push_back(std::move(burst));
+}
+
+void KodiActiveAEEngine::RecordAudioTrackWriteChunkLocked(const KodiPackedAccessUnit& packet, int bytesWritten)
+{
+  if (bytesWritten <= 0 || packet.bytes.empty())
+    return;
+  const size_t startOffset = packet.writeOffset;
+  const size_t endOffset =
+      std::min(packet.bytes.size(), startOffset + static_cast<size_t>(bytesWritten));
+  if (endOffset <= startOffset)
+    return;
+  if (pendingAudioTrackWriteCapture_.empty())
+    pendingAudioTrackWriteCapturePtsUs_ = packet.ptsUs;
+  pendingAudioTrackWriteCapture_.insert(pendingAudioTrackWriteCapture_.end(),
+                                        packet.bytes.begin() + static_cast<ptrdiff_t>(startOffset),
+                                        packet.bytes.begin() + static_cast<ptrdiff_t>(endOffset));
+}
+
+void KodiActiveAEEngine::FinalizeAudioTrackWriteBurstLocked(const KodiPackedAccessUnit& packet)
+{
+  if (pendingAudioTrackWriteCapture_.empty())
+    return;
+  CapturedValidationBurst burst;
+  burst.bytes = std::move(pendingAudioTrackWriteCapture_);
+  burst.ptsUs = pendingAudioTrackWriteCapturePtsUs_ != NO_PTS ? pendingAudioTrackWriteCapturePtsUs_
+                                                              : packet.ptsUs;
+  capturedAudioTrackWriteBursts_.push_back(std::move(burst));
+  pendingAudioTrackWriteCapture_.clear();
+  pendingAudioTrackWriteCapturePtsUs_ = NO_PTS;
+}
+
+void KodiActiveAEEngine::ClearCapturedValidationBurstsLocked()
+{
+  capturedPackedBursts_.clear();
+  capturedAudioTrackWriteBursts_.clear();
+  pendingAudioTrackWriteCapture_.clear();
+  pendingAudioTrackWriteCapturePtsUs_ = NO_PTS;
 }
 
 int64_t KodiActiveAEEngine::ComputePositionFromHardwareLocked()

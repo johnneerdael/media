@@ -29,13 +29,17 @@
 namespace androidx_media3
 {
 
-class KodiAudioTrackOutput
+class KodiTrueHdAudioTrackOutput
 {
 public:
   bool Configure(unsigned int sampleRate,
                  unsigned int channelCount,
                  int encoding,
                  bool passthrough);
+  bool ConfigureTrueHd(unsigned int sampleRate,
+                       unsigned int channelCount,
+                       int encoding,
+                       bool passthrough);
   bool Play();
   void Pause();
   void Flush();
@@ -56,6 +60,10 @@ public:
 
 private:
   static int ChannelMaskForCount(unsigned int channelCount);
+  bool ConfigureInternal(unsigned int sampleRate,
+                         unsigned int channelCount,
+                         int encoding,
+                         bool passthrough);
 
   std::unique_ptr<CJNIAudioTrack> track_;
   std::vector<char> writeBuffer_;
@@ -70,6 +78,7 @@ private:
   unsigned int channelCount_{0};
   unsigned int frameSizeBytes_{0};
   int encoding_{CJNIAudioFormat::ENCODING_PCM_16BIT};
+  bool passthroughIec_{false};
 };
 
 }  // namespace androidx_media3

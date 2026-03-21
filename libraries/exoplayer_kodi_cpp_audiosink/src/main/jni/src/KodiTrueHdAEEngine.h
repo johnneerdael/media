@@ -17,26 +17,27 @@
 
 #pragma once
 
-#include "KodiAudioTrackOutput.h"
-#include "KodiIecPipeline.h"
+#include "KodiTrueHdAudioTrackOutput.h"
+#include "KodiTrueHdIecPipeline.h"
 #include "cores/AudioEngine/Engines/ActiveAE/ActiveAESettings.h"
 #include "threads/CriticalSection.h"
 
 #include <atomic>
 #include <array>
 #include <cstdint>
-#include <deque>
 #include <limits>
+#include <optional>
+#include <string>
 #include <vector>
 
 namespace androidx_media3
 {
 
-class KodiActiveAEEngine
+class KodiTrueHdAEEngine
 {
 public:
-  KodiActiveAEEngine() = default;
-  ~KodiActiveAEEngine();
+  KodiTrueHdAEEngine() = default;
+  ~KodiTrueHdAEEngine();
 
   bool Configure(const ActiveAE::CActiveAEMediaSettings& config);
   int Write(const uint8_t* data, int size, int64_t presentation_time_us, int encoded_access_unit_count);
@@ -51,7 +52,9 @@ public:
   int64_t GetCurrentPositionUs();
   bool HasPendingData();
   bool IsEnded();
+  bool IsPassthroughStartupReady();
   int64_t GetBufferSizeUs() const;
+  int64_t GetBufferSizeBytes() const;
   int GetOutputSampleRate() const;
   int GetOutputChannelCount() const;
   int GetOutputEncoding() const;
@@ -59,10 +62,16 @@ public:
   int GetOutputUnderrunCount() const;
   int GetOutputRestartCount() const;
   int GetDirectPlaybackSupportState() const;
+  bool IsOutputStarted() const;
+  void ProbePassthroughStartupBuffer(const uint8_t* data,
+                                     int size,
+                                     int64_t presentation_time_us,
+                                     int encoded_access_unit_count);
   int ConsumeLastWriteOutputBytes();
   int ConsumeLastWriteErrorCode();
   bool ConsumeNextCapturedPackedBurst(std::vector<uint8_t>& bytes, int64_t& ptsUs);
   bool ConsumeNextCapturedAudioTrackWriteBurst(std::vector<uint8_t>& bytes, int64_t& ptsUs);
+  std::string ConsumeLastWriteDiagnosticDetail();
   bool IsReleasePending();
   void Reset();
 
@@ -108,7 +117,18 @@ private:
   struct PendingPcmChunk
   {
     std::vector<uint8_t> bytes;
+    size_t writeOffset{0};
+    int inputBytesConsumed{0};
     int64_t ptsUs{NO_PTS};
+  };
+
+  struct PendingPassthroughInput
+  {
+    std::vector<uint8_t> bytes;
+    size_t feedOffset{0};
+    int acknowledgedBytes{0};
+    int64_t ptsUs{NO_PTS};
+    int encodedAccessUnitCount{1};
   };
 
   struct MediaPositionParameters
@@ -117,6 +137,33 @@ private:
     int64_t mediaTimeUs{0};
     int64_t audioOutputPositionUs{0};
     int64_t mediaPositionDriftUs{0};
+  };
+
+  
+  struct PendingPackedRetryState {
+    int packetId_{0};
+    int firstOffsetBytes_{0};
+    int lastOffsetBytes_{0};
+    int count_{0};
+    int lastSuccessfulWriteBytes_{0};
+    int64_t lastSuccessfulWriteTimeUs_{CURRENT_POSITION_NOT_SET};
+    int64_t lastAttemptTimeUs_{CURRENT_POSITION_NOT_SET};
+    int64_t lastProgressTimeUs_{CURRENT_POSITION_NOT_SET};
+    uint64_t lastPlayedFrames_{0};
+    int lastBufferFitFrames_{0};
+
+    void Reset() {
+      packetId_ = 0;
+      firstOffsetBytes_ = 0;
+      lastOffsetBytes_ = 0;
+      count_ = 0;
+      lastSuccessfulWriteBytes_ = 0;
+      lastSuccessfulWriteTimeUs_ = CURRENT_POSITION_NOT_SET;
+      lastAttemptTimeUs_ = CURRENT_POSITION_NOT_SET;
+      lastProgressTimeUs_ = CURRENT_POSITION_NOT_SET;
+      lastPlayedFrames_ = 0;
+      lastBufferFitFrames_ = 0;
+    }
   };
 
   struct CapturedValidationBurst
@@ -129,10 +176,22 @@ private:
                              int size,
                              int64_t ptsUs,
                              int encodedAccessUnitCount);
+  int WritePassthroughLockedBaseline(const uint8_t* data,
+                                     int size,
+                                     int64_t ptsUs,
+                                     int encodedAccessUnitCount);
+  int WriteTrueHdPassthroughLocked(const uint8_t* data,
+                                   int size,
+                                   int64_t ptsUs,
+                                   int encodedAccessUnitCount);
   int WritePcmLocked(const uint8_t* data, int size, int64_t ptsUs);
   void EnsurePassthroughOutputConfiguredLocked(const KodiPackedAccessUnit& packet);
+  void EnsurePassthroughOutputConfiguredLockedBaseline(const KodiPackedAccessUnit& packet);
+  void EnsureTrueHdPassthroughOutputConfiguredLocked(const KodiPackedAccessUnit& packet);
   bool EnsurePcmOutputConfiguredLocked();
   int FlushPackedQueueToHardwareLocked();
+  int FlushPackedQueueToHardwareLockedBaseline();
+  int FlushTrueHdPackedQueueToHardwareLocked();
   int FlushPcmQueueToHardwareLocked();
   bool StartOutputIfPrimedLocked();
 
@@ -142,7 +201,9 @@ private:
   int64_t ApplyMediaPositionParametersLocked(int64_t outputPositionUs);
   int64_t ApplySkippingLocked(int64_t mediaPositionUs) const;
   int64_t GetWrittenAudioOutputPositionUsLocked() const;
+  uint64_t GetSubmittedOutputFramesLocked() const;
   uint64_t GetSafePlayedFramesLocked();
+  uint64_t GetSafePlayedFramesLockedBaseline();
   void UpdateTimestampStateLocked(TimestampState state, int64_t systemTimeUs);
   void SetStartupPhaseLocked(StartupPhase phase);
   const char* StartupPhaseToString(StartupPhase phase) const;
@@ -160,6 +221,11 @@ private:
   void InvalidateCurrentOutputLocked();
   void MarkReleasePendingLocked();
   bool IsReleasePendingLocked(int64_t nowUs) const;
+  void CompactPendingPassthroughInputLocked();
+  bool HasPendingPassthroughInputLocked() const;
+  bool HasReachedSteadyStatePendingPackedHandoffLocked();
+  bool ShouldRetryStartupPendingPackedRemainderLocked(int64_t nowUs, int remainingBytes, uint64_t playedFrames, int bufferFitFrames, int* playbackHeadDeltaFrames, int* bufferFitDeltaFrames, const char** retryReason);
+  bool ShouldRetrySteadyStatePendingPackedRemainderLocked(int64_t nowUs, int remainingBytes, uint64_t playedFrames, int bufferFitFrames, int* playbackHeadDeltaFrames, int* bufferFitDeltaFrames, const char** retryReason);
   void RecordPackedBurstLocked(const KodiPackedAccessUnit& packet);
   void RecordAudioTrackWriteChunkLocked(const KodiPackedAccessUnit& packet, int bytesWritten);
   void FinalizeAudioTrackWriteBurstLocked(const KodiPackedAccessUnit& packet);
@@ -174,13 +240,13 @@ private:
   bool passthrough_{false};
   bool ended_{false};
 
-  KodiIecPipeline iecPipeline_;
-  KodiAudioTrackOutput output_;
-  std::deque<KodiPackedAccessUnit> packedQueue_;
-  std::deque<PendingPcmChunk> pcmQueue_;
+  KodiTrueHdIecPipeline iecPipeline_;
+  KodiTrueHdAudioTrackOutput output_;
+  std::optional<PendingPassthroughInput> pendingPassthroughInput_;
+  std::optional<KodiPackedAccessUnit> startupPendingPackedOutput_;
+  std::optional<KodiPackedAccessUnit> steadyStatePendingPackedOutput_;
+  std::optional<PendingPcmChunk> pendingPcmOutput_;
   int64_t queuedDurationUs_{0};
-  int64_t firstQueuedPtsUs_{NO_PTS};
-  int pendingPassthroughAckBytes_{0};
 
   uint64_t totalWrittenFrames_{0};
   bool anchorValid_{false};
@@ -197,6 +263,10 @@ private:
   int directPlaybackSupportState_{-1};
   int lastWriteOutputBytes_{0};
   int lastWriteErrorCode_{0};
+  std::string lastWriteDiagnosticDetail_;
+  int nextPackedPacketId_{1};
+  PendingPackedRetryState startupRetryState_;
+  PendingPackedRetryState steadyStateRetryState_;
   int64_t releasePendingUntilUs_{CURRENT_POSITION_NOT_SET};
   std::deque<CapturedValidationBurst> capturedPackedBursts_;
   std::deque<CapturedValidationBurst> capturedAudioTrackWriteBursts_;
