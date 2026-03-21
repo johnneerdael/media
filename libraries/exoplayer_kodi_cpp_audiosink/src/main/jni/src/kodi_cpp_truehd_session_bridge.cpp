@@ -209,6 +209,17 @@ Java_androidx_media3_exoplayer_audio_kodi_KodiTrueHdNativeAudioSink_nConsumeLast
   return static_cast<jint>(AsSession(native_handle)->ConsumeLastWriteErrorCode());
 }
 
+extern "C" JNIEXPORT jstring JNICALL
+Java_androidx_media3_exoplayer_audio_kodi_KodiTrueHdNativeAudioSink_nConsumeLastWriteDiagnosticDetail(
+    JNIEnv* env, jclass clazz, jlong native_handle)
+{
+  (void)clazz;
+  const std::string detail = AsSession(native_handle)->ConsumeLastWriteDiagnosticDetail();
+  if (detail.empty())
+    return nullptr;
+  return env->NewStringUTF(detail.c_str());
+}
+
 extern "C" JNIEXPORT jboolean JNICALL
 Java_androidx_media3_exoplayer_audio_kodi_KodiTrueHdNativeAudioSink_nIsReleasePending(
     JNIEnv* env, jclass clazz, jlong native_handle)
@@ -381,12 +392,39 @@ Java_androidx_media3_exoplayer_audio_kodi_KodiTrueHdNativeAudioSink_nGetOutputAu
 }
 
 extern "C" JNIEXPORT jint JNICALL
+Java_androidx_media3_exoplayer_audio_kodi_KodiTrueHdNativeAudioSink_nGetOutputUnderrunCount(
+    JNIEnv* env, jclass clazz, jlong native_handle)
+{
+  (void)env;
+  (void)clazz;
+  return static_cast<jint>(AsSession(native_handle)->GetOutputUnderrunCount());
+}
+
+extern "C" JNIEXPORT jint JNICALL
+Java_androidx_media3_exoplayer_audio_kodi_KodiTrueHdNativeAudioSink_nGetOutputRestartCount(
+    JNIEnv* env, jclass clazz, jlong native_handle)
+{
+  (void)env;
+  (void)clazz;
+  return static_cast<jint>(AsSession(native_handle)->GetOutputRestartCount());
+}
+
+extern "C" JNIEXPORT jint JNICALL
 Java_androidx_media3_exoplayer_audio_kodi_KodiTrueHdNativeAudioSink_nGetDirectPlaybackSupportState(
     JNIEnv* env, jclass clazz, jlong native_handle)
 {
   (void)env;
   (void)clazz;
   return static_cast<jint>(AsSession(native_handle)->GetDirectPlaybackSupportState());
+}
+
+extern "C" JNIEXPORT jboolean JNICALL
+Java_androidx_media3_exoplayer_audio_kodi_KodiTrueHdNativeAudioSink_nIsOutputStarted(
+    JNIEnv* env, jclass clazz, jlong native_handle)
+{
+  (void)env;
+  (void)clazz;
+  return AsSession(native_handle)->IsOutputStarted() ? JNI_TRUE : JNI_FALSE;
 }
 
 extern "C" JNIEXPORT void JNICALL

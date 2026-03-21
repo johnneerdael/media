@@ -34,6 +34,7 @@ struct KodiPackedAccessUnit
   std::vector<uint8_t> bytes;
   size_t writeOffset{0};
   int inputBytesConsumed{0};
+  int packetId{0};
   int64_t ptsUs{std::numeric_limits<int64_t>::min()};
   int64_t durationUs{0};
   unsigned int outputRate{48000};

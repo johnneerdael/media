@@ -16,6 +16,7 @@
  */
 package androidx.media3.exoplayer.audio.kodi.validation;
 
+import android.os.SystemClock;
 import androidx.annotation.Nullable;
 import java.util.ArrayList;
 import java.util.Collections;
@@ -26,9 +27,11 @@ public final class TransportValidationRuntime {
 
   @Nullable private static SessionConfig sessionConfig;
   @Nullable private static TransportValidationRuntimeRouteSnapshot routeSnapshot;
+  private static final List<TransportValidationRuntimeRouteSample> routeSnapshots = new ArrayList<>();
   private static final List<TransportValidationRuntimeBurst> packerInputBursts = new ArrayList<>();
   private static final List<TransportValidationRuntimeBurst> packedBursts = new ArrayList<>();
   private static final List<TransportValidationRuntimeBurst> audioTrackWriteBursts = new ArrayList<>();
+  private static final List<TransportValidationRuntimeEvent> runtimeEvents = new ArrayList<>();
   private static int nextPackerInputIndex = 0;
   private static int nextPackedBurstIndex = 0;
   private static int nextAudioTrackWriteBurstIndex = 0;
@@ -40,9 +43,11 @@ public final class TransportValidationRuntime {
       sessionConfig =
           new SessionConfig(sampleId, codecFamily, Math.max(1, maxBurstsPerBoundary));
       routeSnapshot = null;
+      routeSnapshots.clear();
       packerInputBursts.clear();
       packedBursts.clear();
       audioTrackWriteBursts.clear();
+      runtimeEvents.clear();
       nextPackerInputIndex = 0;
       nextPackedBurstIndex = 0;
       nextAudioTrackWriteBurstIndex = 0;
@@ -53,9 +58,11 @@ public final class TransportValidationRuntime {
     synchronized (LOCK) {
       sessionConfig = null;
       routeSnapshot = null;
+      routeSnapshots.clear();
       packerInputBursts.clear();
       packedBursts.clear();
       audioTrackWriteBursts.clear();
+      runtimeEvents.clear();
       nextPackerInputIndex = 0;
       nextPackedBurstIndex = 0;
       nextAudioTrackWriteBurstIndex = 0;
@@ -82,6 +89,11 @@ public final class TransportValidationRuntime {
       routeSnapshot =
           new TransportValidationRuntimeRouteSnapshot(
               deviceName, encoding, sampleRate, channelMask, directPlaybackSupported, audioTrackState);
+      if (routeSnapshots.isEmpty()
+          || !areEquivalent(routeSnapshots.get(routeSnapshots.size() - 1).getSnapshot(), routeSnapshot)) {
+        routeSnapshots.add(
+            new TransportValidationRuntimeRouteSample(SystemClock.elapsedRealtime(), routeSnapshot));
+      }
     }
   }
 
@@ -97,6 +109,17 @@ public final class TransportValidationRuntime {
     recordBurst(TransportValidationRuntimeBoundary.AUDIOTRACK_WRITE, sourcePtsUs, bytes);
   }
 
+  public static void recordRuntimeEvent(String type, long value, @Nullable String detail) {
+    synchronized (LOCK) {
+      if (sessionConfig == null) {
+        return;
+      }
+      runtimeEvents.add(
+          new TransportValidationRuntimeEvent(
+              SystemClock.elapsedRealtime(), type, value, detail));
+    }
+  }
+
   @Nullable
   public static TransportValidationRuntimeSnapshot snapshot() {
     synchronized (LOCK) {
@@ -109,8 +132,24 @@ public final class TransportValidationRuntime {
           immutableCopy(packerInputBursts),
           immutableCopy(packedBursts),
           immutableCopy(audioTrackWriteBursts),
-          routeSnapshot);
+          routeSnapshot,
+          immutableCopy(routeSnapshots),
+          immutableCopy(runtimeEvents));
     }
+  }
+
+  private static boolean areEquivalent(
+      TransportValidationRuntimeRouteSnapshot first, TransportValidationRuntimeRouteSnapshot second) {
+    return areEqual(first.getDeviceName(), second.getDeviceName())
+        && areEqual(first.getEncoding(), second.getEncoding())
+        && first.getSampleRate() == second.getSampleRate()
+        && areEqual(first.getChannelMask(), second.getChannelMask())
+        && areEqual(first.getDirectPlaybackSupported(), second.getDirectPlaybackSupported())
+        && areEqual(first.getAudioTrackState(), second.getAudioTrackState());
+  }
+
+  private static boolean areEqual(@Nullable Object first, @Nullable Object second) {
+    return first == second || (first != null && first.equals(second));
   }
 
   private static void recordBurst(
@@ -155,8 +194,7 @@ public final class TransportValidationRuntime {
     }
   }
 
-  private static List<TransportValidationRuntimeBurst> immutableCopy(
-      List<TransportValidationRuntimeBurst> source) {
+  private static <T> List<T> immutableCopy(List<T> source) {
     return Collections.unmodifiableList(new ArrayList<>(source));
   }
 

@@ -34,6 +34,8 @@ import androidx.media3.exoplayer.audio.ForwardingAudioSink;
 import androidx.media3.exoplayer.audio.RendererClockAwareAudioSink;
 import androidx.media3.exoplayer.audio.kodi.validation.TransportValidationNativeBurst;
 import androidx.media3.exoplayer.audio.kodi.validation.TransportValidationRuntime;
+import androidx.media3.exoplayer.audio.kodi.validation.TransportValidationRuntimeEventType;
+import androidx.media3.exoplayer.audio.kodi.validation.TransportValidationRuntimeRouteSnapshot;
 import java.nio.ByteBuffer;
 
 @UnstableApi
@@ -100,6 +102,7 @@ public final class KodiTrueHdNativeAudioSink extends ForwardingAudioSink
   private boolean playCommandReceived;
   private boolean nativePlayIssued;
   private boolean trueHdStartupProducedOutput;
+  private boolean trueHdStartupCompleted;
   private boolean handledEndOfStream;
   private static final String TAG = "KodiTrueHdSink";
   private static final long RETRY_DURATION_MS = 200;
@@ -123,6 +126,16 @@ public final class KodiTrueHdNativeAudioSink extends ForwardingAudioSink
   private int pendingEac3BurstWindowAcknowledgedBytes;
   private int pendingEac3BurstWindowAccessUnits;
   private long pendingEac3BurstWindowPtsUs;
+  private int lastReportedOutputUnderrunCount;
+  private int lastReportedOutputRestartCount;
+  private long trueHdMeaningfulWriteCount;
+  @Nullable private String lastTrueHdNativeRemainderOwnership;
+  private long lastTrueHdPendingRemainderId;
+  private boolean lastTrueHdHandoffEligible;
+  private boolean lastTrueHdHandoffTriggered;
+  @Nullable private String lastTrueHdSelectedPath;
+  @Nullable private TransportValidationRuntimeRouteSnapshot lastObservedRouteSnapshot;
+  @Nullable private TransportValidationRuntimeRouteSnapshot stableTrueHdRouteSnapshot;
 
   public KodiTrueHdNativeAudioSink(AudioSink sink) {
     super(sink);
@@ -134,11 +147,14 @@ public final class KodiTrueHdNativeAudioSink extends ForwardingAudioSink
     rendererClockUs = C.TIME_UNSET;
     playCommandReceived = false;
     nativePlayIssued = false;
+    trueHdStartupCompleted = false;
     handledEndOfStream = false;
     clearPendingWriteError();
     pendingReleaseUntilMs = C.TIME_UNSET;
     clearPendingPassthroughStartupWindow();
     clearPendingEac3BurstWindow();
+    clearTransportValidationRuntimeOutputState();
+    clearTrueHdStartupState();
   }
 
   @Override
@@ -201,12 +217,14 @@ public final class KodiTrueHdNativeAudioSink extends ForwardingAudioSink
     configuredFormat = inputFormat;
     handledEndOfStream = false;
     nativePlayIssued = false;
+    clearTrueHdStartupState();
     clearPendingPassthroughStartupWindow();
     clearPendingEac3BurstWindow();
     if (!shouldUseNativeKodiPath(inputFormat)) {
       closeSession(true);
       clearPendingWriteError();
       pendingReleaseUntilMs = C.TIME_UNSET;
+      clearTransportValidationRuntimeOutputState();
       super.configure(inputFormat, specifiedBufferSize, outputChannels);
       return;
     }
@@ -232,6 +250,7 @@ public final class KodiTrueHdNativeAudioSink extends ForwardingAudioSink
     updateTransportValidationRoute();
     clearPendingWriteError();
     pendingReleaseUntilMs = C.TIME_UNSET;
+    clearTransportValidationRuntimeOutputState();
   }
 
   @Override
@@ -241,6 +260,13 @@ public final class KodiTrueHdNativeAudioSink extends ForwardingAudioSink
       if (!buffer.hasRemaining()) {
         return true;
       }
+      boolean handoffTriggered = maybeExitTrueHdStartupOwnership("handleBuffer");
+      boolean handoffEligible = lastTrueHdHandoffEligible;
+      if (!shouldRemainOnTrueHdStartupPath(handoffEligible)) {
+        recordTrueHdPathDecision("steady_state_path", handoffEligible, handoffTriggered);
+        return handleTrueHdSteadyStateBuffer(buffer, presentationTimeUs, encodedAccessUnitCount);
+      }
+      recordTrueHdPathDecision("startup_path", handoffEligible, handoffTriggered);
       return handleTrueHdStartupBuffer(buffer, presentationTimeUs, encodedAccessUnitCount);
     }
 
@@ -331,6 +357,7 @@ public final class KodiTrueHdNativeAudioSink extends ForwardingAudioSink
             encodedAccessUnitCount);
     nConsumeLastWriteOutputBytes(nativeHandle);
     drainCapturedValidationBursts();
+    maybeRecordTransportValidationRuntimeEvents();
     int nativeWriteErrorCode = nConsumeLastWriteErrorCode(nativeHandle);
     if (AudioCapabilities.isFireOsIecVerboseLoggingEnabled()
         && bytesConsumed > 0
@@ -344,14 +371,17 @@ public final class KodiTrueHdNativeAudioSink extends ForwardingAudioSink
     }
     if (nativeWriteErrorCode < 0 && bytesConsumed <= 0) {
       maybeHandlePendingWriteError(nativeWriteErrorCode);
+      recordTransportValidationWriteEvent(originalRemaining, bytesConsumed);
       return false;
     }
     if (bytesConsumed <= 0) {
+      recordTransportValidationWriteEvent(originalRemaining, bytesConsumed);
       return false;
     }
     clearPendingWriteError();
     handledEndOfStream = false;
     maybeRecordPackerInput(writeBuffer, presentationTimeUs, bytesConsumed);
+    recordTransportValidationWriteEvent(originalRemaining, bytesConsumed);
     buffer.position(buffer.position() + Math.min(bytesConsumed, originalRemaining));
     return bytesConsumed >= originalRemaining;
   }
@@ -437,7 +467,10 @@ public final class KodiTrueHdNativeAudioSink extends ForwardingAudioSink
     if (!shouldUseNativeKodiPath(configuredFormat)) {
       return super.getCurrentPositionUs(sourceEnded);
     }
-    return nativeHandle == 0L ? CURRENT_POSITION_NOT_SET : nGetCurrentPositionUs(nativeHandle);
+    maybeRecordTransportValidationRuntimeEvents();
+    long currentPositionUs = nativeHandle == 0L ? CURRENT_POSITION_NOT_SET : nGetCurrentPositionUs(nativeHandle);
+    maybeRecordTransportValidationPlaybackHeadPosition(currentPositionUs);
+    return currentPositionUs;
   }
 
   @Override
@@ -475,6 +508,7 @@ public final class KodiTrueHdNativeAudioSink extends ForwardingAudioSink
     if (!shouldUseNativeKodiPath(configuredFormat)) {
       return super.isEnded();
     }
+    maybeRecordTransportValidationRuntimeEvents();
     return nativeHandle == 0L
         || (!hasPendingPassthroughStartupWindow()
             && !hasPendingEac3BurstWindow()
@@ -494,6 +528,7 @@ public final class KodiTrueHdNativeAudioSink extends ForwardingAudioSink
     if (!shouldUseNativeKodiPath(configuredFormat)) {
       return super.hasPendingData();
     }
+    maybeRecordTransportValidationRuntimeEvents();
     boolean nativeHasPendingData = nativeHandle != 0L && nHasPendingData(nativeHandle);
     if (nativeHasPendingData) {
       return true;
@@ -517,6 +552,7 @@ public final class KodiTrueHdNativeAudioSink extends ForwardingAudioSink
     if (!shouldUseNativeKodiPath(configuredFormat)) {
       return super.getAudioTrackBufferSizeUs();
     }
+    maybeRecordTransportValidationRuntimeEvents();
     return nativeHandle == 0L ? 0L : nGetBufferSizeUs(nativeHandle);
   }
 
@@ -533,6 +569,7 @@ public final class KodiTrueHdNativeAudioSink extends ForwardingAudioSink
     nativePlayIssued = false;
     handledEndOfStream = false;
     clearPendingWriteError();
+    clearTrueHdStartupState();
     clearPendingPassthroughStartupWindow();
     clearPendingEac3BurstWindow();
     if (!shouldUseNativeKodiPath(configuredFormat)) {
@@ -554,8 +591,10 @@ public final class KodiTrueHdNativeAudioSink extends ForwardingAudioSink
     nativePlayIssued = false;
     handledEndOfStream = false;
     clearPendingWriteError();
+    clearTrueHdStartupState();
     clearPendingPassthroughStartupWindow();
     clearPendingEac3BurstWindow();
+    clearTransportValidationRuntimeOutputState();
     closeSession(true);
     configuredFormat = null;
     super.reset();
@@ -567,8 +606,10 @@ public final class KodiTrueHdNativeAudioSink extends ForwardingAudioSink
     nativePlayIssued = false;
     handledEndOfStream = false;
     clearPendingWriteError();
+    clearTrueHdStartupState();
     clearPendingPassthroughStartupWindow();
     clearPendingEac3BurstWindow();
+    clearTransportValidationRuntimeOutputState();
     closeSession(false);
     configuredFormat = null;
     super.release();
@@ -727,17 +768,27 @@ public final class KodiTrueHdNativeAudioSink extends ForwardingAudioSink
           if (!flushPendingTrueHdStartupWindowOnce()) {
             return false;
           }
-          return !isTrueHdStartupRefillRequired();
         }
       }
       return true;
     }
 
-    return writeBufferDirect(buffer, presentationTimeUs, encodedAccessUnitCount);
+    maybeProbePassthroughStartupBuffer(buffer, presentationTimeUs, encodedAccessUnitCount);
+    appendToPendingPassthroughStartupWindow(buffer, presentationTimeUs, encodedAccessUnitCount);
+    handledEndOfStream = false;
+    if (playCommandReceived) {
+      maybeIssueNativePlayForTrueHdStartup();
+      if (nativePlayIssued) {
+        if (!flushPendingTrueHdStartupWindowOnce()) {
+          return false;
+        }
+      }
+    }
+    return true;
   }
 
   private boolean playTrueHdStartupIfNeeded() {
-    if (!shouldUseTrueHdStartupWindow(configuredFormat)) {
+    if (!shouldUseTrueHdStartupWindow(configuredFormat) || trueHdStartupCompleted) {
       return false;
     }
     maybeIssueNativePlayForTrueHdStartup();
@@ -748,11 +799,13 @@ public final class KodiTrueHdNativeAudioSink extends ForwardingAudioSink
   }
 
   private boolean pauseTrueHdPlaybackIfNeeded() {
-    return shouldSuppressTrueHdPlaybackTeardown();
+    return false;
   }
 
   private boolean playToEndOfTrueHdStartupIfNeeded() {
-    if (!shouldUseTrueHdStartupWindow(configuredFormat) || nativePlayIssued) {
+    if (!shouldUseTrueHdStartupWindow(configuredFormat)
+        || nativePlayIssued
+        || trueHdStartupCompleted) {
       return false;
     }
     maybeIssueNativePlayForTrueHdStartup();
@@ -764,10 +817,14 @@ public final class KodiTrueHdNativeAudioSink extends ForwardingAudioSink
   }
 
   private boolean flushTrueHdPlaybackIfNeeded() {
-    return shouldSuppressTrueHdPlaybackTeardown();
+    return false;
   }
 
   private boolean hasPendingDataForTrueHd() {
+    boolean nativeHasPendingData = nativeHandle != 0L && nHasPendingData(nativeHandle);
+    if (trueHdStartupCompleted) {
+      return nativeHasPendingData || hasPendingPassthroughStartupWindow() || hasPendingEac3BurstWindow();
+    }
     if (!nativePlayIssued) {
       if (playCommandReceived && hasPendingPassthroughStartupWindow()) {
         return true;
@@ -796,7 +853,9 @@ public final class KodiTrueHdNativeAudioSink extends ForwardingAudioSink
             presentationTimeUs,
             encodedAccessUnitCount);
     nConsumeLastWriteOutputBytes(nativeHandle);
+    drainCapturedValidationBursts();
     int nativeWriteErrorCode = nConsumeLastWriteErrorCode(nativeHandle);
+    updateTransportValidationRoute();
     if (AudioCapabilities.isFireOsIecVerboseLoggingEnabled()
         && bytesConsumed > 0
         && !playCommandReceived) {
@@ -809,15 +868,33 @@ public final class KodiTrueHdNativeAudioSink extends ForwardingAudioSink
     }
     if (nativeWriteErrorCode < 0 && bytesConsumed <= 0) {
       maybeHandlePendingWriteError(nativeWriteErrorCode);
+      recordTransportValidationWriteEvent(originalRemaining, bytesConsumed);
       return false;
     }
     if (bytesConsumed <= 0) {
+      recordTransportValidationWriteEvent(originalRemaining, bytesConsumed);
       return false;
     }
     clearPendingWriteError();
     handledEndOfStream = false;
+    maybeRecordPackerInput(writeBuffer, presentationTimeUs, bytesConsumed);
+    recordTransportValidationWriteEvent(originalRemaining, bytesConsumed);
     buffer.position(buffer.position() + Math.min(bytesConsumed, originalRemaining));
     return bytesConsumed >= originalRemaining;
+  }
+
+  private boolean handleTrueHdSteadyStateBuffer(
+      ByteBuffer buffer, long presentationTimeUs, int encodedAccessUnitCount) throws WriteException {
+    if (hasPendingPassthroughStartupWindow()) {
+      int flushedBytes = writePendingPassthroughStartupWindow();
+      if (flushedBytes < 0) {
+        return false;
+      }
+      if (hasPendingPassthroughStartupWindow()) {
+        return false;
+      }
+    }
+    return writeBufferDirect(buffer, presentationTimeUs, encodedAccessUnitCount);
   }
 
   private boolean isTrueHdStartupRefillRequired() {
@@ -838,17 +915,6 @@ public final class KodiTrueHdNativeAudioSink extends ForwardingAudioSink
         && pendingUnacknowledgedBytes < TRUEHD_STARTUP_REFILL_MAX_PENDING_BYTES;
   }
 
-  private boolean isActiveTrueHdPlaybackSession() {
-    return shouldUseTrueHdStartupWindow(configuredFormat)
-        && nativeHandle != 0L
-        && !handledEndOfStream
-        && (playCommandReceived || nativePlayIssued);
-  }
-
-  private boolean shouldSuppressTrueHdPlaybackTeardown() {
-    return isActiveTrueHdPlaybackSession();
-  }
-
   private void clearPendingPassthroughStartupWindow() {
     pendingPassthroughStartupData = null;
     pendingPassthroughStartupSize = 0;
@@ -857,7 +923,17 @@ public final class KodiTrueHdNativeAudioSink extends ForwardingAudioSink
     pendingPassthroughStartupFirstPtsUs = C.TIME_UNSET;
     pendingPassthroughStartupLastPtsUs = C.TIME_UNSET;
     pendingPassthroughStartupLastDurationUs = 0L;
+  }
+
+  private void clearTrueHdStartupState() {
     trueHdStartupProducedOutput = false;
+    trueHdStartupCompleted = false;
+    trueHdMeaningfulWriteCount = 0L;
+    lastTrueHdNativeRemainderOwnership = null;
+    lastTrueHdPendingRemainderId = -1L;
+    lastTrueHdHandoffEligible = false;
+    lastTrueHdHandoffTriggered = false;
+    lastTrueHdSelectedPath = null;
   }
 
   private void appendToPendingPassthroughStartupWindow(
@@ -982,15 +1058,399 @@ public final class KodiTrueHdNativeAudioSink extends ForwardingAudioSink
     int audioTrackState = nativeHandle != 0L ? nGetOutputAudioTrackState(nativeHandle) : 0;
     int directPlaybackSupportState =
         nativeHandle != 0L ? nGetDirectPlaybackSupportState(nativeHandle) : -1;
+    TransportValidationRuntimeRouteSnapshot candidateSnapshot =
+        new TransportValidationRuntimeRouteSnapshot(
+            resolvePreferredDeviceName(preferredDevice),
+            encodingLabel(outputEncoding, configuredFormat != null ? configuredFormat.sampleMimeType : null),
+            outputSampleRate,
+            channelMaskLabel(outputChannelCount),
+            directPlaybackSupportState > 0
+                ? Boolean.TRUE
+                : directPlaybackSupportState == 0 ? Boolean.FALSE : null,
+            audioTrackState > 0 ? audioTrackState : null);
+    recordRouteSnapshotRuntimeEvent(candidateSnapshot);
+    maybeRecordRouteReopenCandidate(candidateSnapshot);
     TransportValidationRuntime.updateRouteSnapshot(
-        resolvePreferredDeviceName(preferredDevice),
-        encodingLabel(outputEncoding, configuredFormat != null ? configuredFormat.sampleMimeType : null),
-        outputSampleRate,
-        channelMaskLabel(outputChannelCount),
-        directPlaybackSupportState > 0
-            ? Boolean.TRUE
-            : directPlaybackSupportState == 0 ? Boolean.FALSE : null,
-        audioTrackState > 0 ? audioTrackState : null);
+        candidateSnapshot.getDeviceName(),
+        candidateSnapshot.getEncoding(),
+        candidateSnapshot.getSampleRate(),
+        candidateSnapshot.getChannelMask(),
+        candidateSnapshot.getDirectPlaybackSupported(),
+        candidateSnapshot.getAudioTrackState());
+    lastObservedRouteSnapshot = candidateSnapshot;
+    if (isStableTrueHdRouteSnapshot(candidateSnapshot) && isTrueHdStableRouteAcquired()) {
+      stableTrueHdRouteSnapshot = candidateSnapshot;
+    }
+    maybeRecordTransportValidationRuntimeEvents();
+  }
+
+  private void recordRouteSnapshotRuntimeEvent(
+      TransportValidationRuntimeRouteSnapshot snapshot) {
+    boolean stableStartAlreadyReached = isTrueHdStableRouteAcquired();
+    boolean outputStillConfigured = isOutputStillConfigured(snapshot);
+    boolean outputStillStarted = nativeHandle != 0L && nIsOutputStarted(nativeHandle);
+    TransportValidationRuntime.recordRuntimeEvent(
+        TransportValidationRuntimeEventType.ROUTE_SNAPSHOT,
+        1L,
+        "routeTuple="
+            + routeTupleLabel(snapshot)
+            + " stableStartAlreadyReached="
+            + stableStartAlreadyReached
+            + " outputStillConfigured="
+            + outputStillConfigured
+            + " outputStillStarted="
+            + outputStillStarted);
+  }
+
+  private void maybeRecordRouteReopenCandidate(
+      TransportValidationRuntimeRouteSnapshot candidateSnapshot) {
+    if (!shouldUseTrueHdStartupWindow(configuredFormat)) {
+      return;
+    }
+
+    boolean stableStartAlreadyReached = isTrueHdStableRouteAcquired();
+    if (isStableTrueHdRouteSnapshot(candidateSnapshot) && stableStartAlreadyReached) {
+      stableTrueHdRouteSnapshot = candidateSnapshot;
+      return;
+    }
+    if (!stableStartAlreadyReached || stableTrueHdRouteSnapshot == null) {
+      return;
+    }
+
+    boolean outputStillConfigured = isOutputStillConfigured(candidateSnapshot);
+    boolean outputStillStarted = nativeHandle != 0L && nIsOutputStarted(nativeHandle);
+    boolean externalRouteChangeDetected =
+        detectExternalRouteChange(stableTrueHdRouteSnapshot, candidateSnapshot);
+    String reason = determineRouteCandidateReason(stableTrueHdRouteSnapshot, candidateSnapshot);
+
+    TransportValidationRuntime.recordRuntimeEvent(
+        TransportValidationRuntimeEventType.ROUTE_REOPEN_CANDIDATE,
+        1L,
+        "reason="
+            + reason
+            + " oldRouteTuple="
+            + routeTupleLabel(stableTrueHdRouteSnapshot)
+            + " newRouteTuple="
+            + routeTupleLabel(candidateSnapshot)
+            + " stableStartAlreadyReached="
+            + stableStartAlreadyReached
+            + " externalRouteChangeDetected="
+            + externalRouteChangeDetected
+            + " outputStillConfigured="
+            + outputStillConfigured
+            + " outputStillStarted="
+            + outputStillStarted);
+  }
+
+  private boolean isTrueHdStableRouteAcquired() {
+    return trueHdStartupCompleted
+        && (trueHdStartupProducedOutput || trueHdMeaningfulWriteCount > 0)
+        && "steady_state_path".equals(lastTrueHdSelectedPath);
+  }
+
+  private static boolean isOutputStillConfigured(
+      TransportValidationRuntimeRouteSnapshot snapshot) {
+    return snapshot.getAudioTrackState() != null
+        && snapshot.getAudioTrackState() > 0
+        && snapshot.getEncoding() != null
+        && snapshot.getSampleRate() > 0;
+  }
+
+  private static boolean isStableTrueHdRouteSnapshot(
+      TransportValidationRuntimeRouteSnapshot snapshot) {
+    return "IEC61937".equals(snapshot.getEncoding())
+        && snapshot.getSampleRate() == 192000
+        && "7.1".equals(snapshot.getChannelMask())
+        && Boolean.TRUE.equals(snapshot.getDirectPlaybackSupported())
+        && snapshot.getAudioTrackState() != null
+        && snapshot.getAudioTrackState() > 0;
+  }
+
+  private static boolean detectExternalRouteChange(
+      TransportValidationRuntimeRouteSnapshot oldSnapshot,
+      TransportValidationRuntimeRouteSnapshot newSnapshot) {
+    String oldDeviceName = oldSnapshot.getDeviceName();
+    String newDeviceName = newSnapshot.getDeviceName();
+    return oldDeviceName != null
+        && !oldDeviceName.isEmpty()
+        && newDeviceName != null
+        && !newDeviceName.isEmpty()
+        && !oldDeviceName.equals(newDeviceName);
+  }
+
+  private static String determineRouteCandidateReason(
+      TransportValidationRuntimeRouteSnapshot oldSnapshot,
+      TransportValidationRuntimeRouteSnapshot newSnapshot) {
+    if (!routeTupleLabel(oldSnapshot).equals(routeTupleLabel(newSnapshot))) {
+      return "route_tuple_changed";
+    }
+    Integer oldAudioTrackState = oldSnapshot.getAudioTrackState();
+    Integer newAudioTrackState = newSnapshot.getAudioTrackState();
+    if (oldAudioTrackState != null && newAudioTrackState != null && !oldAudioTrackState.equals(newAudioTrackState)) {
+      return "audio_track_state_changed";
+    }
+    if (oldSnapshot.getDirectPlaybackSupported() != null
+        && newSnapshot.getDirectPlaybackSupported() != null
+        && !oldSnapshot.getDirectPlaybackSupported().equals(newSnapshot.getDirectPlaybackSupported())) {
+      return "direct_playback_changed";
+    }
+    return "route_repatch_candidate";
+  }
+
+  private static String routeTupleLabel(TransportValidationRuntimeRouteSnapshot snapshot) {
+    return (snapshot.getEncoding() != null ? snapshot.getEncoding() : "unknown")
+        + "|"
+        + snapshot.getSampleRate()
+        + "|"
+        + (snapshot.getChannelMask() != null ? snapshot.getChannelMask() : "unknown");
+  }
+
+  private void maybeRecordTransportValidationRuntimeEvents() {
+    if (nativeHandle == 0L) {
+      return;
+    }
+    int outputUnderrunCount = nGetOutputUnderrunCount(nativeHandle);
+    if (outputUnderrunCount >= 0) {
+      if (lastReportedOutputUnderrunCount >= 0
+          && outputUnderrunCount > lastReportedOutputUnderrunCount) {
+        TransportValidationRuntime.recordRuntimeEvent(
+            TransportValidationRuntimeEventType.AUDIO_UNDERRUN,
+            outputUnderrunCount - lastReportedOutputUnderrunCount,
+            "source=sink");
+      }
+      lastReportedOutputUnderrunCount = outputUnderrunCount;
+    }
+    int outputRestartCount = nGetOutputRestartCount(nativeHandle);
+    if (outputRestartCount >= 0) {
+      if (lastReportedOutputRestartCount >= 0
+          && outputRestartCount > lastReportedOutputRestartCount) {
+        TransportValidationRuntime.recordRuntimeEvent(
+            TransportValidationRuntimeEventType.AUDIOTRACK_RESTART,
+            outputRestartCount - lastReportedOutputRestartCount,
+            "source=sink");
+      }
+      lastReportedOutputRestartCount = outputRestartCount;
+    }
+  }
+
+  private void maybeRecordTransportValidationPlaybackHeadPosition(long currentPositionUs) {
+    if (nativeHandle == 0L || currentPositionUs == CURRENT_POSITION_NOT_SET) {
+      return;
+    }
+    TransportValidationRuntime.recordRuntimeEvent(
+        TransportValidationRuntimeEventType.PLAYBACK_HEAD_POSITION, currentPositionUs, "unit=us");
+  }
+
+  private void recordTransportValidationWriteEvent(int requestedBytes, int bytesConsumed) {
+    if (!TransportValidationRuntime.isEnabled() || requestedBytes <= 0) {
+      return;
+    }
+    String nativeDetail = nativeHandle != 0L ? nConsumeLastWriteDiagnosticDetail(nativeHandle) : null;
+    updateTrueHdWriteDiagnostics(nativeDetail, bytesConsumed);
+    String detail =
+        nativeDetail != null && !nativeDetail.isEmpty()
+            ? nativeDetail
+            : "requestedBytes=" + requestedBytes;
+    detail = appendTrueHdStartupHandoffDetail(detail);
+    if (detail.contains("pendingRemainderId=")
+        || detail.contains("retryEligibleReason=")
+        || detail.contains("retryReason=")
+        || detail.contains("ownership=")
+        || detail.contains("handoffEligible=")
+        || detail.contains("selectedPath=")) {
+      Log.i(TAG, "TrueHD write diagnostic " + detail);
+    }
+    String retryReason = extractDiagnosticField(detail, "retryEligibleReason");
+    boolean deferredRetry =
+        bytesConsumed <= 0 && ("not_eligible".equals(retryReason) || "steady_state_zero_retry_backoff".equals(retryReason));
+    if (bytesConsumed <= 0) {
+      TransportValidationRuntime.recordRuntimeEvent(
+          deferredRetry
+              ? TransportValidationRuntimeEventType.AUDIO_WRITE_DEFERRED
+              : TransportValidationRuntimeEventType.AUDIO_WRITE_ZERO,
+          requestedBytes,
+          detail);
+      return;
+    }
+    if (bytesConsumed < requestedBytes) {
+      String partialDetail = detail;
+      if (!partialDetail.contains("remainingBytes=")) {
+        partialDetail = partialDetail + " remainingBytes=" + (requestedBytes - bytesConsumed);
+      }
+      TransportValidationRuntime.recordRuntimeEvent(
+          TransportValidationRuntimeEventType.AUDIO_WRITE_PARTIAL,
+          bytesConsumed,
+          partialDetail);
+      return;
+    }
+    TransportValidationRuntime.recordRuntimeEvent(
+        TransportValidationRuntimeEventType.AUDIO_WRITE_SUCCESS, bytesConsumed, detail);
+  }
+
+  private void updateTrueHdWriteDiagnostics(@Nullable String nativeDetail, int bytesConsumed) {
+    if (!shouldUseTrueHdStartupWindow(configuredFormat)) {
+      return;
+    }
+    if (bytesConsumed > 0) {
+      trueHdMeaningfulWriteCount++;
+    }
+    if (nativeDetail == null || nativeDetail.isEmpty()) {
+      return;
+    }
+    String ownership = extractDiagnosticField(nativeDetail, "ownership");
+    if (ownership != null && !ownership.isEmpty()) {
+      lastTrueHdNativeRemainderOwnership = ownership;
+    }
+    Long pendingRemainderId = extractDiagnosticLongField(nativeDetail, "pendingRemainderId");
+    if (pendingRemainderId != null) {
+      lastTrueHdPendingRemainderId = pendingRemainderId;
+    }
+  }
+
+  private String appendTrueHdStartupHandoffDetail(String detail) {
+    if (!shouldUseTrueHdStartupWindow(configuredFormat)) {
+      return detail;
+    }
+    boolean nativeStartupReady = nativeHandle != 0L && nIsPassthroughStartupReady(nativeHandle);
+    boolean nativeOutputStarted = trueHdStartupProducedOutput || trueHdMeaningfulWriteCount > 0;
+    StringBuilder detailBuilder = new StringBuilder(detail);
+    appendDetailField(detailBuilder, "startupActive", Boolean.toString(isTrueHdStartupActive()));
+    appendDetailField(detailBuilder, "startupCompleted", Boolean.toString(trueHdStartupCompleted));
+    appendDetailField(detailBuilder, "nativeOutputStarted", Boolean.toString(nativeOutputStarted));
+    appendDetailField(detailBuilder, "nativeStartupReady", Boolean.toString(nativeStartupReady));
+    appendDetailField(
+        detailBuilder,
+        "nativeRemainderOwnership",
+        lastTrueHdNativeRemainderOwnership != null ? lastTrueHdNativeRemainderOwnership : "unknown");
+    appendDetailField(detailBuilder, "meaningfulWriteCount", Long.toString(trueHdMeaningfulWriteCount));
+    appendDetailField(detailBuilder, "handoffEligible", Boolean.toString(lastTrueHdHandoffEligible));
+    appendDetailField(detailBuilder, "handoffTriggered", Boolean.toString(lastTrueHdHandoffTriggered));
+    appendDetailField(
+        detailBuilder, "selectedPath", lastTrueHdSelectedPath != null ? lastTrueHdSelectedPath : "unknown");
+    return detailBuilder.toString();
+  }
+
+  private static void appendDetailField(StringBuilder builder, String key, String value) {
+    if (value == null || value.isEmpty()) {
+      return;
+    }
+    builder.append(' ').append(key).append('=').append(value);
+  }
+
+  private boolean isTrueHdStartupActive() {
+    return shouldUseTrueHdStartupWindow(configuredFormat) && !trueHdStartupCompleted;
+  }
+
+  private boolean shouldRemainOnTrueHdStartupPath(boolean handoffEligible) {
+    return shouldUseTrueHdStartupWindow(configuredFormat)
+        && !trueHdStartupCompleted
+        && (!handoffEligible
+            || hasPendingPassthroughStartupWindow()
+            || isTrueHdStartupRefillRequired()
+            || shouldAllowBoundedTrueHdStartupRefill());
+  }
+
+  private boolean isTrueHdStartupHandoffEligible() {
+    if (!shouldUseTrueHdStartupWindow(configuredFormat)
+        || trueHdStartupCompleted
+        || nativeHandle == 0L
+        || !nativePlayIssued) {
+      return false;
+    }
+    boolean nativeStartupReady = nIsPassthroughStartupReady(nativeHandle);
+    boolean nativeOutputStarted = trueHdStartupProducedOutput || trueHdMeaningfulWriteCount > 0;
+    boolean steadyStateOwnership = "steady_state".equals(lastTrueHdNativeRemainderOwnership);
+    return nativeStartupReady && nativeOutputStarted && steadyStateOwnership && trueHdMeaningfulWriteCount > 0;
+  }
+
+  private boolean maybeExitTrueHdStartupOwnership(String reason) {
+    boolean handoffEligible = isTrueHdStartupHandoffEligible();
+    boolean handoffTriggered = false;
+    if (handoffEligible
+        && !trueHdStartupCompleted
+        && !shouldRemainOnTrueHdStartupPath(handoffEligible)) {
+      trueHdStartupCompleted = true;
+      handoffTriggered = true;
+      Log.i(
+          TAG,
+          "TrueHdStartupOwnershipExited"
+              + " reason="
+              + reason
+              + " nativeStartupReady="
+              + (nativeHandle != 0L && nIsPassthroughStartupReady(nativeHandle))
+              + " nativeRemainderOwnership="
+              + (lastTrueHdNativeRemainderOwnership != null
+                  ? lastTrueHdNativeRemainderOwnership
+                  : "unknown")
+              + " meaningfulWriteCount="
+              + trueHdMeaningfulWriteCount
+              + " pendingRemainderId="
+              + lastTrueHdPendingRemainderId);
+    }
+    lastTrueHdHandoffEligible = handoffEligible;
+    lastTrueHdHandoffTriggered = handoffTriggered;
+    return handoffTriggered;
+  }
+
+  private void recordTrueHdPathDecision(
+      String selectedPath, boolean handoffEligible, boolean handoffTriggered) {
+    lastTrueHdSelectedPath = selectedPath;
+    lastTrueHdHandoffEligible = handoffEligible;
+    lastTrueHdHandoffTriggered = handoffTriggered;
+    Log.i(
+        TAG,
+        "TrueHD handoff decision"
+            + " startupActive="
+            + isTrueHdStartupActive()
+            + " startupCompleted="
+            + trueHdStartupCompleted
+            + " nativeOutputStarted="
+            + (trueHdStartupProducedOutput || trueHdMeaningfulWriteCount > 0)
+            + " nativeStartupReady="
+            + (nativeHandle != 0L && nIsPassthroughStartupReady(nativeHandle))
+            + " nativeRemainderOwnership="
+            + (lastTrueHdNativeRemainderOwnership != null
+                ? lastTrueHdNativeRemainderOwnership
+                : "unknown")
+            + " meaningfulWriteCount="
+            + trueHdMeaningfulWriteCount
+            + " handoffEligible="
+            + handoffEligible
+            + " handoffTriggered="
+            + handoffTriggered
+            + " selectedPath="
+            + selectedPath);
+  }
+
+  @Nullable
+  private static String extractDiagnosticField(String detail, String key) {
+    String prefix = key + "=";
+    for (String token : detail.split(" ")) {
+      if (token.startsWith(prefix) && token.length() > prefix.length()) {
+        return token.substring(prefix.length());
+      }
+    }
+    return null;
+  }
+
+  @Nullable
+  private static Long extractDiagnosticLongField(String detail, String key) {
+    String value = extractDiagnosticField(detail, key);
+    if (value == null) {
+      return null;
+    }
+    try {
+      return Long.parseLong(value);
+    } catch (NumberFormatException e) {
+      return null;
+    }
+  }
+
+  private void clearTransportValidationRuntimeOutputState() {
+    lastReportedOutputUnderrunCount = -1;
+    lastReportedOutputRestartCount = -1;
+    lastObservedRouteSnapshot = null;
+    stableTrueHdRouteSnapshot = null;
   }
 
   private static String channelMaskLabel(int channelCount) {
@@ -1060,7 +1520,10 @@ public final class KodiTrueHdNativeAudioSink extends ForwardingAudioSink
     if (nativePlayIssued || nativeHandle == 0L || configuredFormat == null || !playCommandReceived) {
       return;
     }
-    if (!hasPendingPassthroughStartupWindow() || !isTrueHdStartupWindowFull()) {
+    boolean nativeHasPendingData = nHasPendingData(nativeHandle);
+    boolean startupWindowReady =
+        hasPendingPassthroughStartupWindow() && isTrueHdStartupWindowFull();
+    if (!nativeHasPendingData && !startupWindowReady) {
       return;
     }
     nPlay(nativeHandle);
@@ -1068,6 +1531,8 @@ public final class KodiTrueHdNativeAudioSink extends ForwardingAudioSink
     Log.i(
         TAG,
         "Issued native play for TrueHD startup"
+            + " nativePending="
+            + nativeHasPendingData
             + " pendingSize="
             + pendingPassthroughStartupSize
             + " accessUnits="
@@ -1130,9 +1595,8 @@ public final class KodiTrueHdNativeAudioSink extends ForwardingAudioSink
       return -1;
     }
 
-    ByteBuffer writeBuffer =
-        ByteBuffer.allocateDirect(
-            pendingEac3BurstWindowSize - pendingEac3BurstWindowAcknowledgedBytes);
+    int requestedBytes = pendingEac3BurstWindowSize - pendingEac3BurstWindowAcknowledgedBytes;
+    ByteBuffer writeBuffer = ByteBuffer.allocateDirect(requestedBytes);
     writeBuffer.put(
         pendingEac3BurstWindowData,
         pendingEac3BurstWindowAcknowledgedBytes,
@@ -1153,13 +1617,16 @@ public final class KodiTrueHdNativeAudioSink extends ForwardingAudioSink
     updateTransportValidationRoute();
     if (nativeWriteErrorCode < 0 && bytesConsumed <= 0) {
       maybeHandlePendingWriteError(nativeWriteErrorCode);
+      recordTransportValidationWriteEvent(requestedBytes, bytesConsumed);
       return -1;
     }
     if (bytesConsumed <= 0) {
+      recordTransportValidationWriteEvent(requestedBytes, bytesConsumed);
       return -1;
     }
 
     clearPendingWriteError();
+    recordTransportValidationWriteEvent(requestedBytes, bytesConsumed);
     pendingEac3BurstWindowAcknowledgedBytes += bytesConsumed;
     if (pendingEac3BurstWindowAcknowledgedBytes >= pendingEac3BurstWindowSize) {
       clearPendingEac3BurstWindow();
@@ -1175,9 +1642,8 @@ public final class KodiTrueHdNativeAudioSink extends ForwardingAudioSink
       return -1;
     }
 
-    ByteBuffer writeBuffer =
-        ByteBuffer.allocateDirect(
-            pendingPassthroughStartupSize - pendingPassthroughStartupAcknowledgedBytes);
+    int requestedBytes = pendingPassthroughStartupSize - pendingPassthroughStartupAcknowledgedBytes;
+    ByteBuffer writeBuffer = ByteBuffer.allocateDirect(requestedBytes);
     writeBuffer.put(
         pendingPassthroughStartupData,
         pendingPassthroughStartupAcknowledgedBytes,
@@ -1196,11 +1662,12 @@ public final class KodiTrueHdNativeAudioSink extends ForwardingAudioSink
             pendingPassthroughStartupAccessUnits);
     int outputBytesWritten = nConsumeLastWriteOutputBytes(nativeHandle);
     drainCapturedValidationBursts();
+    maybeRecordTransportValidationRuntimeEvents();
     int nativeWriteErrorCode = nConsumeLastWriteErrorCode(nativeHandle);
     updateTransportValidationRoute();
     Log.i(
         TAG,
-        "TrueHD startup write"
+        (isTrueHdStartupActive() ? "TrueHD startup write" : "TrueHD steady-state pending write")
             + " bytesConsumed="
             + bytesConsumed
             + " outputBytesWritten="
@@ -1215,13 +1682,16 @@ public final class KodiTrueHdNativeAudioSink extends ForwardingAudioSink
             + pendingPassthroughStartupAccessUnits);
     if (nativeWriteErrorCode < 0 && bytesConsumed <= 0) {
       maybeHandlePendingWriteError(nativeWriteErrorCode);
+      recordTransportValidationWriteEvent(requestedBytes, bytesConsumed);
       return -1;
     }
     if (bytesConsumed <= 0) {
+      recordTransportValidationWriteEvent(requestedBytes, bytesConsumed);
       return -1;
     }
 
     clearPendingWriteError();
+    recordTransportValidationWriteEvent(requestedBytes, bytesConsumed);
     if (bytesConsumed > 0 || outputBytesWritten > 0) {
       trueHdStartupProducedOutput = true;
     }
@@ -1392,6 +1862,9 @@ public final class KodiTrueHdNativeAudioSink extends ForwardingAudioSink
 
   private static native int nConsumeLastWriteErrorCode(long nativeHandle);
 
+  @Nullable
+  private static native String nConsumeLastWriteDiagnosticDetail(long nativeHandle);
+
   private static native boolean nIsReleasePending(long nativeHandle);
 
   private static native void nPlay(long nativeHandle);
@@ -1428,7 +1901,13 @@ public final class KodiTrueHdNativeAudioSink extends ForwardingAudioSink
 
   private static native int nGetOutputAudioTrackState(long nativeHandle);
 
+  private static native int nGetOutputUnderrunCount(long nativeHandle);
+
+  private static native int nGetOutputRestartCount(long nativeHandle);
+
   private static native int nGetDirectPlaybackSupportState(long nativeHandle);
+
+  private static native boolean nIsOutputStarted(long nativeHandle);
 
   private static native void nRelease(long nativeHandle);
 }

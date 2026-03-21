@@ -94,6 +94,11 @@ bool KodiAudioTrackOutput::Configure(unsigned int sampleRate,
   frameSizeBytes_ = safeChannels * (safeEncoding == CJNIAudioFormat::ENCODING_PCM_FLOAT ? 4 : 2);
   lastPlaybackHead32_ = 0;
   playbackWrapCount_ = 0;
+  restartFrameOffset_ = 0;
+  lastTimestampFramePosition_ = 0;
+  lastObservedUnderrunCount_ = track_->getUnderrunCount();
+  accumulatedUnderrunCount_ = 0;
+  restartCount_ = 0;
   return true;
 }
 
@@ -121,6 +126,9 @@ void KodiAudioTrackOutput::Flush()
   track_->flush();
   lastPlaybackHead32_ = 0;
   playbackWrapCount_ = 0;
+  restartFrameOffset_ = 0;
+  lastTimestampFramePosition_ = 0;
+  lastObservedUnderrunCount_ = track_->getUnderrunCount();
 }
 
 void KodiAudioTrackOutput::Release()
@@ -136,6 +144,11 @@ void KodiAudioTrackOutput::Release()
   encoding_ = CJNIAudioFormat::ENCODING_PCM_16BIT;
   lastPlaybackHead32_ = 0;
   playbackWrapCount_ = 0;
+  restartFrameOffset_ = 0;
+  lastTimestampFramePosition_ = 0;
+  lastObservedUnderrunCount_ = -1;
+  accumulatedUnderrunCount_ = 0;
+  restartCount_ = 0;
   writeBuffer_.clear();
 }
 
@@ -163,10 +176,15 @@ uint64_t KodiAudioTrackOutput::GetPlaybackFrames64()
     // typically AudioTrack reset/recreation artifacts on direct/offload outputs.
     if (backwardDelta > 0x40000000u)
       ++playbackWrapCount_;
+    else
+    {
+      restartFrameOffset_ += lastPlaybackHead32_;
+      ++restartCount_;
+    }
   }
   lastPlaybackHead32_ = head32;
 
-  return (playbackWrapCount_ << 32) | head32;
+  return restartFrameOffset_ + ((playbackWrapCount_ << 32) | head32);
 }
 
 bool KodiAudioTrackOutput::GetTimestamp(uint64_t* framePosition, int64_t* systemTimeUs)
@@ -178,7 +196,12 @@ bool KodiAudioTrackOutput::GetTimestamp(uint64_t* framePosition, int64_t* system
   if (!track_->getTimestamp(ts))
     return false;
 
-  *framePosition = ts.get_framePosition();
+  const uint64_t adjustedFramePosition = restartFrameOffset_ + ts.get_framePosition();
+  if (adjustedFramePosition < lastTimestampFramePosition_)
+    *framePosition = lastTimestampFramePosition_;
+  else
+    *framePosition = adjustedFramePosition;
+  lastTimestampFramePosition_ = *framePosition;
   *systemTimeUs = ts.get_nanoTime() / 1000;
   return true;
 }
@@ -188,6 +211,24 @@ int KodiAudioTrackOutput::GetBufferSizeInFrames() const
   if (!track_)
     return 0;
   return track_->getBufferSizeInFrames();
+}
+
+int KodiAudioTrackOutput::GetUnderrunCount() const
+{
+  if (!track_)
+    return accumulatedUnderrunCount_;
+  const int currentUnderrunCount = track_->getUnderrunCount();
+  if (currentUnderrunCount < 0)
+    return accumulatedUnderrunCount_;
+  if (lastObservedUnderrunCount_ < 0)
+  {
+    lastObservedUnderrunCount_ = currentUnderrunCount;
+    return accumulatedUnderrunCount_;
+  }
+  if (currentUnderrunCount > lastObservedUnderrunCount_)
+    accumulatedUnderrunCount_ += currentUnderrunCount - lastObservedUnderrunCount_;
+  lastObservedUnderrunCount_ = currentUnderrunCount;
+  return accumulatedUnderrunCount_;
 }
 
 bool KodiAudioTrackOutput::IsPlaying() const

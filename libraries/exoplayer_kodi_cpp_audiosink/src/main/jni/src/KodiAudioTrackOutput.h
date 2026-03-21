@@ -44,6 +44,8 @@ public:
   uint64_t GetPlaybackFrames64();
   bool GetTimestamp(uint64_t* framePosition, int64_t* systemTimeUs);
   int GetBufferSizeInFrames() const;
+  int GetUnderrunCount() const;
+  int GetRestartCount() const { return restartCount_; }
   bool IsPlaying() const;
   bool IsConfigured() const { return track_ != nullptr; }
   unsigned int SampleRate() const { return sampleRate_; }
@@ -59,6 +61,11 @@ private:
   std::vector<char> writeBuffer_;
   uint32_t lastPlaybackHead32_{0};
   uint64_t playbackWrapCount_{0};
+  uint64_t restartFrameOffset_{0};
+  uint64_t lastTimestampFramePosition_{0};
+  mutable int lastObservedUnderrunCount_{-1};
+  mutable int accumulatedUnderrunCount_{0};
+  int restartCount_{0};
   unsigned int sampleRate_{0};
   unsigned int channelCount_{0};
   unsigned int frameSizeBytes_{0};

@@ -329,6 +329,24 @@ Java_androidx_media3_exoplayer_audio_kodi_KodiNativeAudioSink_nGetOutputAudioTra
 }
 
 extern "C" JNIEXPORT jint JNICALL
+Java_androidx_media3_exoplayer_audio_kodi_KodiNativeAudioSink_nGetOutputUnderrunCount(
+    JNIEnv* env, jclass clazz, jlong native_handle)
+{
+  (void)env;
+  (void)clazz;
+  return static_cast<jint>(AsSession(native_handle)->GetOutputUnderrunCount());
+}
+
+extern "C" JNIEXPORT jint JNICALL
+Java_androidx_media3_exoplayer_audio_kodi_KodiNativeAudioSink_nGetOutputRestartCount(
+    JNIEnv* env, jclass clazz, jlong native_handle)
+{
+  (void)env;
+  (void)clazz;
+  return static_cast<jint>(AsSession(native_handle)->GetOutputRestartCount());
+}
+
+extern "C" JNIEXPORT jint JNICALL
 Java_androidx_media3_exoplayer_audio_kodi_KodiNativeAudioSink_nGetDirectPlaybackSupportState(
     JNIEnv* env, jclass clazz, jlong native_handle)
 {
