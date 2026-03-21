@@ -56,6 +56,8 @@ public:
   int GetOutputChannelCount() const;
   int GetOutputEncoding() const;
   int GetOutputAudioTrackState() const;
+  int GetOutputUnderrunCount() const;
+  int GetOutputRestartCount() const;
   int GetDirectPlaybackSupportState() const;
   int ConsumeLastWriteOutputBytes();
   int ConsumeLastWriteErrorCode();

@@ -47,6 +47,7 @@ public:
   int getPlaybackHeadPosition() const;
   int getLatency() const;
   int getBufferSizeInFrames() const;
+  int getUnderrunCount() const;
   bool getTimestamp(CJNIAudioTimestamp& timestamp) const;
 
   static int getMinBufferSize(int sampleRateInHz, int channelConfig, int audioFormat);

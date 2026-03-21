@@ -26,6 +26,8 @@ public final class TransportValidationRuntimeSnapshot {
   private final List<TransportValidationRuntimeBurst> packedBursts;
   private final List<TransportValidationRuntimeBurst> audioTrackWriteBursts;
   @Nullable private final TransportValidationRuntimeRouteSnapshot routeSnapshot;
+  private final List<TransportValidationRuntimeRouteSample> routeSnapshots;
+  private final List<TransportValidationRuntimeEvent> runtimeEvents;
 
   public TransportValidationRuntimeSnapshot(
       String sampleId,
@@ -33,13 +35,17 @@ public final class TransportValidationRuntimeSnapshot {
       List<TransportValidationRuntimeBurst> packerInputBursts,
       List<TransportValidationRuntimeBurst> packedBursts,
       List<TransportValidationRuntimeBurst> audioTrackWriteBursts,
-      @Nullable TransportValidationRuntimeRouteSnapshot routeSnapshot) {
+      @Nullable TransportValidationRuntimeRouteSnapshot routeSnapshot,
+      List<TransportValidationRuntimeRouteSample> routeSnapshots,
+      List<TransportValidationRuntimeEvent> runtimeEvents) {
     this.sampleId = sampleId;
     this.codecFamily = codecFamily;
     this.packerInputBursts = packerInputBursts;
     this.packedBursts = packedBursts;
     this.audioTrackWriteBursts = audioTrackWriteBursts;
     this.routeSnapshot = routeSnapshot;
+    this.routeSnapshots = routeSnapshots;
+    this.runtimeEvents = runtimeEvents;
   }
 
   public String getSampleId() {
@@ -65,5 +71,13 @@ public final class TransportValidationRuntimeSnapshot {
   @Nullable
   public TransportValidationRuntimeRouteSnapshot getRouteSnapshot() {
     return routeSnapshot;
+  }
+
+  public List<TransportValidationRuntimeEvent> getRuntimeEvents() {
+    return runtimeEvents;
+  }
+
+  public List<TransportValidationRuntimeRouteSample> getRouteSnapshots() {
+    return routeSnapshots;
   }
 }

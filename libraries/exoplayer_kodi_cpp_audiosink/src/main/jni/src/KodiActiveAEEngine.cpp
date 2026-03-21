@@ -304,6 +304,18 @@ int KodiActiveAEEngine::GetOutputAudioTrackState() const
   return output_.AudioTrackState();
 }
 
+int KodiActiveAEEngine::GetOutputUnderrunCount() const
+{
+  std::unique_lock lock(lock_);
+  return output_.GetUnderrunCount();
+}
+
+int KodiActiveAEEngine::GetOutputRestartCount() const
+{
+  std::unique_lock lock(lock_);
+  return output_.GetRestartCount();
+}
+
 int KodiActiveAEEngine::GetDirectPlaybackSupportState() const
 {
   std::unique_lock lock(lock_);
