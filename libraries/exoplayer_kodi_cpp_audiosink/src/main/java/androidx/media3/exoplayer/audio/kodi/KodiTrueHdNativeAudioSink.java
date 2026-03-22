@@ -261,6 +261,10 @@ public final class KodiTrueHdNativeAudioSink extends ForwardingAudioSink
       if (!buffer.hasRemaining()) {
         return true;
       }
+      if (trueHdStartupCompleted) {
+        recordTrueHdPathDecision("steady_state_path", false, false);
+        return handleTrueHdSteadyStateBuffer(buffer, presentationTimeUs, encodedAccessUnitCount);
+      }
       refreshTrueHdNativeHandoffReady();
       boolean handoffTriggered = syncTrueHdStartupStateFromNative("handleBuffer");
       boolean handoffEligible = lastTrueHdHandoffEligible;
