@@ -130,41 +130,6 @@ KodiTrueHdAEEngine::GetCurrentTrueHdPendingPassthroughInputSlotLocked()
   return &GetPendingPassthroughInputSlotLocked(owner);
 }
 
-int64_t KodiTrueHdAEEngine::ComputeSteadyStateRetryBackoffUsLocked(
-    const KodiPackedAccessUnit& packet,
-    int remainingBytes) const
-{
-  constexpr int64_t kMinRetryBackoffUs = 4000;
-  constexpr int64_t kMaxRetryBackoffUs = 20000;
-
-  int64_t retryBackoffUs = 0;
-  if (packet.durationUs > 0 && !packet.bytes.empty() && remainingBytes > 0)
-  {
-    retryBackoffUs =
-        (packet.durationUs * static_cast<int64_t>(remainingBytes)) /
-        static_cast<int64_t>(packet.bytes.size());
-  }
-  else
-  {
-    const int frameSizeBytes = output_.FrameSizeBytes();
-    const int sampleRate = output_.SampleRate();
-    if (remainingBytes > 0 && frameSizeBytes > 0 && sampleRate > 0)
-    {
-      const double remainingFrames =
-          static_cast<double>(remainingBytes) / static_cast<double>(frameSizeBytes);
-      retryBackoffUs = static_cast<int64_t>(
-          std::llround((remainingFrames * 1000000.0) / static_cast<double>(sampleRate)));
-    }
-  }
-
-  if (retryBackoffUs <= 0)
-    retryBackoffUs = kMinRetryBackoffUs;
-
-  return std::clamp(retryBackoffUs, kMinRetryBackoffUs, kMaxRetryBackoffUs);
-}
-
-
-
 bool KodiTrueHdAEEngine::ShouldRetryStartupPendingPackedRemainderLocked(int64_t nowUs,
                                                                  
                                                                  int remainingBytes,
