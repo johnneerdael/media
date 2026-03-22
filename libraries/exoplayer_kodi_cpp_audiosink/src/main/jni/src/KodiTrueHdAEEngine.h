@@ -177,10 +177,42 @@ private:
     }
   };
 
+  struct PendingSteadyStateControlState
+  {
+    int packetId_{0};
+    int firstOffsetBytes_{0};
+    int lastOffsetBytes_{0};
+    int count_{0};
+    int zeroWriteStreak_{0};
+    int lastSuccessfulWriteBytes_{0};
+    int64_t nextEligibleRetryTimeUs_{CURRENT_POSITION_NOT_SET};
+    int64_t lastSuccessfulWriteTimeUs_{CURRENT_POSITION_NOT_SET};
+    int64_t lastAttemptTimeUs_{CURRENT_POSITION_NOT_SET};
+    int64_t lastProgressTimeUs_{CURRENT_POSITION_NOT_SET};
+    uint64_t lastPlayedFrames_{0};
+    int lastBufferFitFrames_{0};
+
+    void Reset()
+    {
+      packetId_ = 0;
+      firstOffsetBytes_ = 0;
+      lastOffsetBytes_ = 0;
+      count_ = 0;
+      zeroWriteStreak_ = 0;
+      lastSuccessfulWriteBytes_ = 0;
+      nextEligibleRetryTimeUs_ = CURRENT_POSITION_NOT_SET;
+      lastSuccessfulWriteTimeUs_ = CURRENT_POSITION_NOT_SET;
+      lastAttemptTimeUs_ = CURRENT_POSITION_NOT_SET;
+      lastProgressTimeUs_ = CURRENT_POSITION_NOT_SET;
+      lastPlayedFrames_ = 0;
+      lastBufferFitFrames_ = 0;
+    }
+  };
+
   struct PendingSteadyStatePackedOutput
   {
     KodiPackedAccessUnit packet;
-    PendingPackedRetryState retryState;
+    PendingSteadyStateControlState controlState;
   };
 
   struct CapturedValidationBurst

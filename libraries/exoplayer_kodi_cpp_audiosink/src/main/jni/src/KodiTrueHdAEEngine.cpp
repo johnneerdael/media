@@ -1023,7 +1023,7 @@ int KodiTrueHdAEEngine::WriteTrueHdPassthroughLocked(const uint8_t* data,
         {
           PendingSteadyStatePackedOutput steadyStatePendingOutput;
           steadyStatePendingOutput.packet = std::move(packet);
-          steadyStatePendingOutput.retryState.Reset();
+          steadyStatePendingOutput.controlState.Reset();
           steadyStatePendingPackedOutput_ = std::move(steadyStatePendingOutput);
         }
         else
@@ -1406,97 +1406,136 @@ int KodiTrueHdAEEngine::FlushTrueHdPackedQueueToHardwareLocked()
     return 0;
   }
 
-  KodiPackedAccessUnit* pendingPackedOutput = nullptr;
-  PendingPackedRetryState* retryStatePtr = nullptr;
-  bool isSteadyState = false;
-  if (startupPendingPackedOutput_.has_value())
-  {
-    pendingPackedOutput = &*startupPendingPackedOutput_;
-    retryStatePtr = &startupRetryState_;
-  }
-  else if (steadyStatePendingPackedOutput_.has_value())
-  {
-    pendingPackedOutput = &steadyStatePendingPackedOutput_->packet;
-    retryStatePtr = &steadyStatePendingPackedOutput_->retryState;
-    isSteadyState = true;
-  }
-  if (pendingPackedOutput == nullptr || retryStatePtr == nullptr)
-    return 0;
+  auto flushPendingOutput = [&](KodiPackedAccessUnit*& pendingPackedOutput,
+                                auto& retryState,
+                                bool isSteadyState) -> int {
+    auto& pendingPackedRetryPacketId_ = retryState.packetId_;
+    auto& pendingPackedRetryFirstOffsetBytes_ = retryState.firstOffsetBytes_;
+    auto& pendingPackedRetryLastOffsetBytes_ = retryState.lastOffsetBytes_;
+    auto& pendingPackedRetryCount_ = retryState.count_;
+    auto& pendingPackedRetryZeroWriteStreak_ = retryState.zeroWriteStreak_;
+    auto& pendingPackedRetryLastSuccessfulWriteBytes_ = retryState.lastSuccessfulWriteBytes_;
+    auto& pendingPackedRetryNextEligibleRetryTimeUs_ = retryState.nextEligibleRetryTimeUs_;
+    auto& pendingPackedRetryLastSuccessfulWriteTimeUs_ = retryState.lastSuccessfulWriteTimeUs_;
+    auto& pendingPackedRetryLastAttemptTimeUs_ = retryState.lastAttemptTimeUs_;
+    auto& pendingPackedRetryLastProgressTimeUs_ = retryState.lastProgressTimeUs_;
+    auto& pendingPackedRetryLastPlayedFrames_ = retryState.lastPlayedFrames_;
+    auto& pendingPackedRetryLastBufferFitFrames_ = retryState.lastBufferFitFrames_;
 
-  auto& retryState = *retryStatePtr;
+    if (!output_.IsConfigured())
+      EnsureTrueHdPassthroughOutputConfiguredLocked(*pendingPackedOutput);
+    if (!output_.IsConfigured())
+      return 0;
 
-  auto& pendingPackedRetryPacketId_ = retryState.packetId_;
-  auto& pendingPackedRetryFirstOffsetBytes_ = retryState.firstOffsetBytes_;
-  auto& pendingPackedRetryLastOffsetBytes_ = retryState.lastOffsetBytes_;
-  auto& pendingPackedRetryCount_ = retryState.count_;
-  auto& pendingPackedRetryZeroWriteStreak_ = retryState.zeroWriteStreak_;
-  auto& pendingPackedRetryLastSuccessfulWriteBytes_ = retryState.lastSuccessfulWriteBytes_;
-  auto& pendingPackedRetryNextEligibleRetryTimeUs_ = retryState.nextEligibleRetryTimeUs_;
-  auto& pendingPackedRetryLastSuccessfulWriteTimeUs_ = retryState.lastSuccessfulWriteTimeUs_;
-  auto& pendingPackedRetryLastAttemptTimeUs_ = retryState.lastAttemptTimeUs_;
-  auto& pendingPackedRetryLastProgressTimeUs_ = retryState.lastProgressTimeUs_;
-  auto& pendingPackedRetryLastPlayedFrames_ = retryState.lastPlayedFrames_;
-  auto& pendingPackedRetryLastBufferFitFrames_ = retryState.lastBufferFitFrames_;
-
-  if (!output_.IsConfigured())
-    EnsureTrueHdPassthroughOutputConfiguredLocked(*pendingPackedOutput);
-  if (!output_.IsConfigured())
-    return 0;
-
-  int totalWriteCalls = 0;
-  int totalWriteAttempts = 0;
-  int totalBytesWritten = 0;
-  int lastWriteResult = 0;
-  while (pendingPackedOutput != nullptr && totalWriteCalls < MAX_WRITE_CALLS_PER_FLUSH)
-  {
-    lastWriteDiagnosticDetail_.clear();
-    const int remaining =
-        static_cast<int>(pendingPackedOutput->bytes.size() - pendingPackedOutput->writeOffset);
-    if (remaining <= 0)
+    int totalWriteCalls = 0;
+    int totalWriteAttempts = 0;
+    int totalBytesWritten = 0;
+    int lastWriteResult = 0;
+    while (pendingPackedOutput != nullptr && totalWriteCalls < MAX_WRITE_CALLS_PER_FLUSH)
     {
-      if (isSteadyState)
-        steadyStatePendingPackedOutput_.reset();
-      else
-        startupPendingPackedOutput_.reset();
-      pendingPackedOutput = nullptr;
-      retryState.Reset();
-      break;
-    }
-
-    const bool retryingPendingRemainder = pendingPackedOutput->writeOffset > 0;
-    int playbackHeadDeltaFrames = 0;
-    int bufferFitDeltaFrames = 0;
-    const char* retryReason = nullptr;
-
-    if (retryingPendingRemainder)
-    {
-      const int64_t nowUs = std::chrono::duration_cast<std::chrono::microseconds>(
-                                std::chrono::steady_clock::now().time_since_epoch())
-                                .count();
-      const uint64_t playedFrames = GetSafePlayedFramesLocked();
-      const int frameSizeBytes = output_.FrameSizeBytes();
-      const int bufferSizeFrames = output_.GetBufferSizeInFrames();
-      int bufferFitFrames = 0;
-      if (frameSizeBytes > 0 && bufferSizeFrames > 0)
+      lastWriteDiagnosticDetail_.clear();
+      const int remaining =
+          static_cast<int>(pendingPackedOutput->bytes.size() - pendingPackedOutput->writeOffset);
+      if (remaining <= 0)
       {
-        const uint64_t submittedFrames = GetSubmittedOutputFramesLocked();
-        const uint64_t queuedFrames =
-            submittedFrames > playedFrames ? (submittedFrames - playedFrames) : 0;
-        bufferFitFrames =
-            queuedFrames >= static_cast<uint64_t>(bufferSizeFrames)
-                ? 0
-                : static_cast<int>(static_cast<uint64_t>(bufferSizeFrames) - queuedFrames);
+        if (isSteadyState)
+          steadyStatePendingPackedOutput_.reset();
+        else
+          startupPendingPackedOutput_.reset();
+        pendingPackedOutput = nullptr;
+        retryState.Reset();
+        break;
       }
 
-      if (isSteadyState)
+      const bool retryingPendingRemainder = pendingPackedOutput->writeOffset > 0;
+      int playbackHeadDeltaFrames = 0;
+      int bufferFitDeltaFrames = 0;
+      const char* retryReason = nullptr;
+
+      if (retryingPendingRemainder)
       {
-        if (outputStarted_ && !output_.IsPlaying())
+        const int64_t nowUs = std::chrono::duration_cast<std::chrono::microseconds>(
+                                  std::chrono::steady_clock::now().time_since_epoch())
+                                  .count();
+        const uint64_t playedFrames = GetSafePlayedFramesLocked();
+        const int frameSizeBytes = output_.FrameSizeBytes();
+        const int bufferSizeFrames = output_.GetBufferSizeInFrames();
+        int bufferFitFrames = 0;
+        if (frameSizeBytes > 0 && bufferSizeFrames > 0)
         {
-          outputStarted_ = false;
-          StartOutputIfPrimedLocked();
-          if (!output_.IsPlaying())
+          const uint64_t submittedFrames = GetSubmittedOutputFramesLocked();
+          const uint64_t queuedFrames =
+              submittedFrames > playedFrames ? (submittedFrames - playedFrames) : 0;
+          bufferFitFrames =
+              queuedFrames >= static_cast<uint64_t>(bufferSizeFrames)
+                  ? 0
+                  : static_cast<int>(static_cast<uint64_t>(bufferSizeFrames) - queuedFrames);
+        }
+
+        if (isSteadyState)
+        {
+          if (outputStarted_ && !output_.IsPlaying())
           {
-            retryReason = "steady_state_waiting_for_play_state";
+            outputStarted_ = false;
+            StartOutputIfPrimedLocked();
+            if (!output_.IsPlaying())
+            {
+              retryReason = "steady_state_waiting_for_play_state";
+              const int64_t sinceLastSuccessfulWriteMs =
+                  pendingPackedRetryLastSuccessfulWriteTimeUs_ == CURRENT_POSITION_NOT_SET
+                      ? 0
+                      : std::max<int64_t>(
+                            0,
+                            (nowUs - pendingPackedRetryLastSuccessfulWriteTimeUs_) / 1000);
+              lastWriteDiagnosticDetail_ =
+                  "requestedBytes=" + std::to_string(remaining) +
+                  " pendingRemainderId=" + std::to_string(pendingPackedOutput->packetId) +
+                  " packetId=" + std::to_string(pendingPackedOutput->packetId) +
+                  " ownership=steady_state" +
+                  " firstOffsetBytes=" + std::to_string(pendingPackedRetryFirstOffsetBytes_) +
+                  " offsetBytes=" + std::to_string(pendingPackedOutput->writeOffset) +
+                  " bytesRemaining=" + std::to_string(remaining) +
+                  " lastWriteBytes=" +
+                  std::to_string(pendingPackedRetryLastSuccessfulWriteBytes_) +
+                  " pendingRemainderRetryCount=" + std::to_string(pendingPackedRetryCount_) +
+                  " retryCount=" + std::to_string(pendingPackedRetryCount_) +
+                  " pendingRemainderLastProgressUs=" +
+                  std::to_string(pendingPackedRetryLastProgressTimeUs_) +
+                  " sinceLastSuccessfulWriteMs=" +
+                  std::to_string(sinceLastSuccessfulWriteMs) +
+                  " playbackHeadDeltaFrames=" + std::to_string(playbackHeadDeltaFrames) +
+                  " bufferFitDeltaFrames=" + std::to_string(bufferFitDeltaFrames) +
+                  " pendingRemainderRetryEligibleReason=" + std::string(retryReason) +
+                  " retryEligibleReason=" + std::string(retryReason);
+              break;
+            }
+            retryReason = "steady_state_resume_pending";
+          }
+
+          const uint64_t playbackHeadDelta =
+              playedFrames > pendingPackedRetryLastPlayedFrames_
+                  ? (playedFrames - pendingPackedRetryLastPlayedFrames_)
+                  : 0;
+          playbackHeadDeltaFrames = static_cast<int>(std::min<uint64_t>(
+              playbackHeadDelta, static_cast<uint64_t>(std::numeric_limits<int>::max())));
+          bufferFitDeltaFrames =
+              std::max(0, bufferFitFrames - pendingPackedRetryLastBufferFitFrames_);
+
+          if (retryReason == nullptr)
+            retryReason = "steady_state_output_driven";
+        }
+        else if (output_.IsPlaying())
+        {
+          const bool canRetryStartupRemainder = ShouldRetryStartupPendingPackedRemainderLocked(
+              nowUs,
+              remaining,
+              playedFrames,
+              bufferFitFrames,
+              &playbackHeadDeltaFrames,
+              &bufferFitDeltaFrames,
+              &retryReason);
+          if (!canRetryStartupRemainder)
+          {
             const int64_t sinceLastSuccessfulWriteMs =
                 pendingPackedRetryLastSuccessfulWriteTimeUs_ == CURRENT_POSITION_NOT_SET
                     ? 0
@@ -1507,61 +1546,114 @@ int KodiTrueHdAEEngine::FlushTrueHdPackedQueueToHardwareLocked()
                 "requestedBytes=" + std::to_string(remaining) +
                 " pendingRemainderId=" + std::to_string(pendingPackedOutput->packetId) +
                 " packetId=" + std::to_string(pendingPackedOutput->packetId) +
-                " ownership=steady_state" +
+                " ownership=" + std::string(isSteadyState ? "steady_state" : "startup") +
                 " firstOffsetBytes=" + std::to_string(pendingPackedRetryFirstOffsetBytes_) +
                 " offsetBytes=" + std::to_string(pendingPackedOutput->writeOffset) +
                 " bytesRemaining=" + std::to_string(remaining) +
-                " lastWriteBytes=" +
-                std::to_string(pendingPackedRetryLastSuccessfulWriteBytes_) +
+                " lastWriteBytes=" + std::to_string(pendingPackedRetryLastSuccessfulWriteBytes_) +
                 " pendingRemainderRetryCount=" + std::to_string(pendingPackedRetryCount_) +
                 " retryCount=" + std::to_string(pendingPackedRetryCount_) +
                 " pendingRemainderLastProgressUs=" +
                 std::to_string(pendingPackedRetryLastProgressTimeUs_) +
-                " sinceLastSuccessfulWriteMs=" +
-                std::to_string(sinceLastSuccessfulWriteMs) +
+                " sinceLastSuccessfulWriteMs=" + std::to_string(sinceLastSuccessfulWriteMs) +
                 " playbackHeadDeltaFrames=" + std::to_string(playbackHeadDeltaFrames) +
                 " bufferFitDeltaFrames=" + std::to_string(bufferFitDeltaFrames) +
-                " pendingRemainderRetryEligibleReason=" + std::string(retryReason) +
-                " retryEligibleReason=" + std::string(retryReason);
+                " pendingRemainderRetryEligibleReason=" +
+                std::string(retryReason != nullptr ? retryReason : "not_eligible") +
+                " retryEligibleReason=" +
+                std::string(retryReason != nullptr ? retryReason : "not_eligible");
             break;
           }
-          retryReason = "steady_state_resume_pending";
         }
-
-        const uint64_t playbackHeadDelta =
-            playedFrames > pendingPackedRetryLastPlayedFrames_
-                ? (playedFrames - pendingPackedRetryLastPlayedFrames_)
-                : 0;
-        playbackHeadDeltaFrames = static_cast<int>(std::min<uint64_t>(
-            playbackHeadDelta, static_cast<uint64_t>(std::numeric_limits<int>::max())));
-        bufferFitDeltaFrames =
-            std::max(0, bufferFitFrames - pendingPackedRetryLastBufferFitFrames_);
-
-        if (retryReason == nullptr)
-          retryReason = "steady_state_output_driven";
       }
-      else if (output_.IsPlaying())
+
+      ++totalWriteAttempts;
+      const int written = output_.WriteNonBlocking(
+          pendingPackedOutput->bytes.data() + pendingPackedOutput->writeOffset, remaining);
+      lastWriteResult = written;
+      if (retryingPendingRemainder)
       {
-        const bool canRetryStartupRemainder = ShouldRetryStartupPendingPackedRemainderLocked(
-            nowUs,
-            remaining,
-            playedFrames,
-            bufferFitFrames,
-            &playbackHeadDeltaFrames,
-            &bufferFitDeltaFrames,
-            &retryReason);
-        if (!canRetryStartupRemainder)
+        const int64_t nowUs = std::chrono::duration_cast<std::chrono::microseconds>(
+                                  std::chrono::steady_clock::now().time_since_epoch())
+                                  .count();
+        pendingPackedRetryCount_ += 1;
+        pendingPackedRetryPacketId_ = pendingPackedOutput->packetId;
+        if (pendingPackedRetryFirstOffsetBytes_ <= 0)
         {
+          pendingPackedRetryFirstOffsetBytes_ =
+              static_cast<int>(pendingPackedOutput->writeOffset);
+        }
+        pendingPackedRetryLastOffsetBytes_ = static_cast<int>(pendingPackedOutput->writeOffset);
+        pendingPackedRetryLastAttemptTimeUs_ = nowUs;
+        pendingPackedRetryLastPlayedFrames_ = GetSafePlayedFramesLocked();
+        const int frameSizeBytes = output_.FrameSizeBytes();
+        const int bufferSizeFrames = output_.GetBufferSizeInFrames();
+        if (frameSizeBytes > 0 && bufferSizeFrames > 0)
+        {
+          const uint64_t submittedFrames = GetSubmittedOutputFramesLocked();
+          const uint64_t queuedFrames =
+              submittedFrames > pendingPackedRetryLastPlayedFrames_
+                  ? (submittedFrames - pendingPackedRetryLastPlayedFrames_)
+                  : 0;
+          pendingPackedRetryLastBufferFitFrames_ =
+              queuedFrames >= static_cast<uint64_t>(bufferSizeFrames)
+                  ? 0
+                  : static_cast<int>(static_cast<uint64_t>(bufferSizeFrames) - queuedFrames);
+        }
+        const int64_t sinceLastSuccessfulWriteMs =
+            pendingPackedRetryLastSuccessfulWriteTimeUs_ == CURRENT_POSITION_NOT_SET
+                ? 0
+                : std::max<int64_t>(
+                      0,
+                      (nowUs - pendingPackedRetryLastSuccessfulWriteTimeUs_) / 1000);
+        const char* fallbackRetryReason =
+            retryReason != nullptr
+                ? retryReason
+                : (isSteadyState ? "steady_state_output_driven"
+                                 : "startup_retry_reason_unset");
+        lastWriteDiagnosticDetail_ =
+            "requestedBytes=" + std::to_string(remaining) +
+            " pendingRemainderId=" + std::to_string(pendingPackedOutput->packetId) +
+            " packetId=" + std::to_string(pendingPackedOutput->packetId) +
+            " ownership=" + std::string(isSteadyState ? "steady_state" : "startup") +
+            " firstOffsetBytes=" + std::to_string(pendingPackedRetryFirstOffsetBytes_) +
+            " offsetBytes=" + std::to_string(pendingPackedOutput->writeOffset) +
+            " bytesRemaining=" + std::to_string(remaining) +
+            " lastWriteBytes=" + std::to_string(pendingPackedRetryLastSuccessfulWriteBytes_) +
+            " pendingRemainderRetryCount=" + std::to_string(pendingPackedRetryCount_) +
+            " pendingRemainderLastProgressUs=" +
+            std::to_string(pendingPackedRetryLastProgressTimeUs_) +
+            " sinceLastSuccessfulWriteMs=" + std::to_string(sinceLastSuccessfulWriteMs) +
+            " playbackHeadDeltaFrames=" + std::to_string(playbackHeadDeltaFrames) +
+            " bufferFitDeltaFrames=" + std::to_string(bufferFitDeltaFrames) +
+            " retryCount=" + std::to_string(pendingPackedRetryCount_) +
+            " retryReason=" + std::string(fallbackRetryReason) +
+            " pendingRemainderRetryEligibleReason=" +
+            std::string(fallbackRetryReason) +
+            " retryEligibleReason=" + std::string(fallbackRetryReason);
+      }
+      if (written <= 0)
+      {
+        if (written == 0 && retryingPendingRemainder && isSteadyState)
+        {
+          const int64_t nowUs = std::chrono::duration_cast<std::chrono::microseconds>(
+                                    std::chrono::steady_clock::now().time_since_epoch())
+                                    .count();
+          pendingPackedRetryZeroWriteStreak_ += 1;
+          pendingPackedRetryNextEligibleRetryTimeUs_ =
+              nowUs + ComputeSteadyStateRetryBackoffUsLocked(*pendingPackedOutput, remaining);
+          retryReason = "steady_state_packet_duration_backoff";
           const int64_t sinceLastSuccessfulWriteMs =
               pendingPackedRetryLastSuccessfulWriteTimeUs_ == CURRENT_POSITION_NOT_SET
                   ? 0
-                  : std::max<int64_t>(0,
-                                      (nowUs - pendingPackedRetryLastSuccessfulWriteTimeUs_) / 1000);
+                  : std::max<int64_t>(
+                        0,
+                        (nowUs - pendingPackedRetryLastSuccessfulWriteTimeUs_) / 1000);
           lastWriteDiagnosticDetail_ =
               "requestedBytes=" + std::to_string(remaining) +
               " pendingRemainderId=" + std::to_string(pendingPackedOutput->packetId) +
               " packetId=" + std::to_string(pendingPackedOutput->packetId) +
-              " ownership=" + std::string(isSteadyState ? "steady_state" : "startup") +
+              " ownership=steady_state" +
               " firstOffsetBytes=" + std::to_string(pendingPackedRetryFirstOffsetBytes_) +
               " offsetBytes=" + std::to_string(pendingPackedOutput->writeOffset) +
               " bytesRemaining=" + std::to_string(remaining) +
@@ -1573,165 +1665,78 @@ int KodiTrueHdAEEngine::FlushTrueHdPackedQueueToHardwareLocked()
               " sinceLastSuccessfulWriteMs=" + std::to_string(sinceLastSuccessfulWriteMs) +
               " playbackHeadDeltaFrames=" + std::to_string(playbackHeadDeltaFrames) +
               " bufferFitDeltaFrames=" + std::to_string(bufferFitDeltaFrames) +
-              " pendingRemainderRetryEligibleReason=" +
-              std::string(retryReason != nullptr ? retryReason : "not_eligible") +
-              " retryEligibleReason=" +
-              std::string(retryReason != nullptr ? retryReason : "not_eligible");
-          break;
+              " retryReason=steady_state_packet_duration_backoff" +
+              " pendingRemainderRetryEligibleReason=steady_state_packet_duration_backoff" +
+              " retryEligibleReason=steady_state_packet_duration_backoff";
         }
+        if (written < 0)
+        {
+          lastWriteErrorCode_ = written;
+          InvalidateCurrentOutputLocked();
+          output_.Release();
+          MarkReleasePendingLocked();
+          retryState.Reset();
+        }
+        break;
       }
-    }
 
-    ++totalWriteAttempts;
-    const int written = output_.WriteNonBlocking(
-        pendingPackedOutput->bytes.data() + pendingPackedOutput->writeOffset, remaining);
-    lastWriteResult = written;
-    if (retryingPendingRemainder)
-    {
-      const int64_t nowUs = std::chrono::duration_cast<std::chrono::microseconds>(
-                                std::chrono::steady_clock::now().time_since_epoch())
-                                .count();
-      pendingPackedRetryCount_ += 1;
-      pendingPackedRetryPacketId_ = pendingPackedOutput->packetId;
-      if (pendingPackedRetryFirstOffsetBytes_ <= 0)
-      {
-        pendingPackedRetryFirstOffsetBytes_ =
-            static_cast<int>(pendingPackedOutput->writeOffset);
-      }
+      ++totalWriteCalls;
+      totalBytesWritten += written;
+      lastWriteOutputBytes_ += written;
+      RecordAudioTrackWriteChunkLocked(*pendingPackedOutput, written);
+      pendingPackedOutput->writeOffset += static_cast<size_t>(written);
+      pendingPackedRetryLastSuccessfulWriteBytes_ = written;
+      pendingPackedRetryLastSuccessfulWriteTimeUs_ =
+          std::chrono::duration_cast<std::chrono::microseconds>(
+              std::chrono::steady_clock::now().time_since_epoch())
+              .count();
+      pendingPackedRetryLastProgressTimeUs_ = pendingPackedRetryLastSuccessfulWriteTimeUs_;
       pendingPackedRetryLastOffsetBytes_ = static_cast<int>(pendingPackedOutput->writeOffset);
-      pendingPackedRetryLastAttemptTimeUs_ = nowUs;
-      pendingPackedRetryLastPlayedFrames_ = GetSafePlayedFramesLocked();
-      const int frameSizeBytes = output_.FrameSizeBytes();
-      const int bufferSizeFrames = output_.GetBufferSizeInFrames();
-      if (frameSizeBytes > 0 && bufferSizeFrames > 0)
-      {
-        const uint64_t submittedFrames = GetSubmittedOutputFramesLocked();
-        const uint64_t queuedFrames =
-            submittedFrames > pendingPackedRetryLastPlayedFrames_
-                ? (submittedFrames - pendingPackedRetryLastPlayedFrames_)
-                : 0;
-        pendingPackedRetryLastBufferFitFrames_ =
-            queuedFrames >= static_cast<uint64_t>(bufferSizeFrames)
-                ? 0
-                : static_cast<int>(static_cast<uint64_t>(bufferSizeFrames) - queuedFrames);
-      }
-      const int64_t sinceLastSuccessfulWriteMs =
-          pendingPackedRetryLastSuccessfulWriteTimeUs_ == CURRENT_POSITION_NOT_SET
-              ? 0
-              : std::max<int64_t>(0, (nowUs - pendingPackedRetryLastSuccessfulWriteTimeUs_) / 1000);
-      const char* fallbackRetryReason =
-          retryReason != nullptr
-              ? retryReason
-              : (isSteadyState ? "steady_state_output_driven"
-                               : "startup_retry_reason_unset");
-      lastWriteDiagnosticDetail_ =
-          "requestedBytes=" + std::to_string(remaining) +
-          " pendingRemainderId=" + std::to_string(pendingPackedOutput->packetId) +
-          " packetId=" + std::to_string(pendingPackedOutput->packetId) +
-          " ownership=" + std::string(isSteadyState ? "steady_state" : "startup") +
-          " firstOffsetBytes=" + std::to_string(pendingPackedRetryFirstOffsetBytes_) +
-          " offsetBytes=" + std::to_string(pendingPackedOutput->writeOffset) +
-          " bytesRemaining=" + std::to_string(remaining) +
-          " lastWriteBytes=" + std::to_string(pendingPackedRetryLastSuccessfulWriteBytes_) +
-          " pendingRemainderRetryCount=" + std::to_string(pendingPackedRetryCount_) +
-          " pendingRemainderLastProgressUs=" +
-          std::to_string(pendingPackedRetryLastProgressTimeUs_) +
-          " sinceLastSuccessfulWriteMs=" + std::to_string(sinceLastSuccessfulWriteMs) +
-          " playbackHeadDeltaFrames=" + std::to_string(playbackHeadDeltaFrames) +
-          " bufferFitDeltaFrames=" + std::to_string(bufferFitDeltaFrames) +
-          " retryCount=" + std::to_string(pendingPackedRetryCount_) +
-          " retryReason=" + std::string(fallbackRetryReason) +
-          " pendingRemainderRetryEligibleReason=" +
-          std::string(fallbackRetryReason) +
-          " retryEligibleReason=" + std::string(fallbackRetryReason);
-    }
-    if (written <= 0)
-    {
-      if (written == 0 && retryingPendingRemainder && isSteadyState)
-      {
-        const int64_t nowUs = std::chrono::duration_cast<std::chrono::microseconds>(
-                                  std::chrono::steady_clock::now().time_since_epoch())
-                                  .count();
-        pendingPackedRetryZeroWriteStreak_ += 1;
-        pendingPackedRetryNextEligibleRetryTimeUs_ =
-            nowUs + ComputeSteadyStateRetryBackoffUsLocked(*pendingPackedOutput, remaining);
-        retryReason = "steady_state_packet_duration_backoff";
-        const int64_t sinceLastSuccessfulWriteMs =
-            pendingPackedRetryLastSuccessfulWriteTimeUs_ == CURRENT_POSITION_NOT_SET
-                ? 0
-                : std::max<int64_t>(0,
-                                    (nowUs - pendingPackedRetryLastSuccessfulWriteTimeUs_) / 1000);
-        lastWriteDiagnosticDetail_ =
-            "requestedBytes=" + std::to_string(remaining) +
-            " pendingRemainderId=" + std::to_string(pendingPackedOutput->packetId) +
-            " packetId=" + std::to_string(pendingPackedOutput->packetId) +
-            " ownership=steady_state" +
-            " firstOffsetBytes=" + std::to_string(pendingPackedRetryFirstOffsetBytes_) +
-            " offsetBytes=" + std::to_string(pendingPackedOutput->writeOffset) +
-            " bytesRemaining=" + std::to_string(remaining) +
-            " lastWriteBytes=" + std::to_string(pendingPackedRetryLastSuccessfulWriteBytes_) +
-            " pendingRemainderRetryCount=" + std::to_string(pendingPackedRetryCount_) +
-            " retryCount=" + std::to_string(pendingPackedRetryCount_) +
-            " pendingRemainderLastProgressUs=" +
-            std::to_string(pendingPackedRetryLastProgressTimeUs_) +
-            " sinceLastSuccessfulWriteMs=" + std::to_string(sinceLastSuccessfulWriteMs) +
-            " playbackHeadDeltaFrames=" + std::to_string(playbackHeadDeltaFrames) +
-            " bufferFitDeltaFrames=" + std::to_string(bufferFitDeltaFrames) +
-            " retryReason=steady_state_packet_duration_backoff" +
-            " pendingRemainderRetryEligibleReason=steady_state_packet_duration_backoff" +
-            " retryEligibleReason=steady_state_packet_duration_backoff";
-      }
-      if (written < 0)
-      {
-        lastWriteErrorCode_ = written;
-        InvalidateCurrentOutputLocked();
-        output_.Release();
-        MarkReleasePendingLocked();
-        retryState.Reset();
-      }
-      break;
-    }
-
-    ++totalWriteCalls;
-    totalBytesWritten += written;
-    lastWriteOutputBytes_ += written;
-    RecordAudioTrackWriteChunkLocked(*pendingPackedOutput, written);
-    pendingPackedOutput->writeOffset += static_cast<size_t>(written);
-    pendingPackedRetryLastSuccessfulWriteBytes_ = written;
-    pendingPackedRetryLastSuccessfulWriteTimeUs_ =
-        std::chrono::duration_cast<std::chrono::microseconds>(
-            std::chrono::steady_clock::now().time_since_epoch())
-            .count();
-    pendingPackedRetryLastProgressTimeUs_ = pendingPackedRetryLastSuccessfulWriteTimeUs_;
-    pendingPackedRetryLastOffsetBytes_ = static_cast<int>(pendingPackedOutput->writeOffset);
-    if (isSteadyState)
-    {
-      pendingPackedRetryZeroWriteStreak_ = 0;
-      pendingPackedRetryNextEligibleRetryTimeUs_ = CURRENT_POSITION_NOT_SET;
-    }
-
-    if (written < remaining)
-    {
-      break;
-    }
-    if (pendingPackedOutput->writeOffset >= pendingPackedOutput->bytes.size())
-    {
-      const KodiPackedAccessUnit completedPacket = *pendingPackedOutput;
-      OnBytesWrittenLocked(completedPacket.ptsUs,
-                           static_cast<int>(completedPacket.bytes.size()),
-                           output_.SampleRate(),
-                           output_.FrameSizeBytes());
-      FinalizeAudioTrackWriteBurstLocked(completedPacket);
       if (isSteadyState)
-        steadyStatePendingPackedOutput_.reset();
-      else
-        startupPendingPackedOutput_.reset();
-      pendingPackedOutput = nullptr;
-      retryState.Reset();
-      queuedDurationUs_ = QueueDurationUsLocked();
-      return std::max(0, completedPacket.inputBytesConsumed);
+      {
+        pendingPackedRetryZeroWriteStreak_ = 0;
+        pendingPackedRetryNextEligibleRetryTimeUs_ = CURRENT_POSITION_NOT_SET;
+      }
+
+      if (written < remaining)
+      {
+        break;
+      }
+      if (pendingPackedOutput->writeOffset >= pendingPackedOutput->bytes.size())
+      {
+        const KodiPackedAccessUnit completedPacket = *pendingPackedOutput;
+        OnBytesWrittenLocked(completedPacket.ptsUs,
+                             static_cast<int>(completedPacket.bytes.size()),
+                             output_.SampleRate(),
+                             output_.FrameSizeBytes());
+        FinalizeAudioTrackWriteBurstLocked(completedPacket);
+        if (isSteadyState)
+          steadyStatePendingPackedOutput_.reset();
+        else
+          startupPendingPackedOutput_.reset();
+        pendingPackedOutput = nullptr;
+        retryState.Reset();
+        queuedDurationUs_ = QueueDurationUsLocked();
+        return std::max(0, completedPacket.inputBytesConsumed);
+      }
     }
+    queuedDurationUs_ = QueueDurationUsLocked();
+    return 0;
+  };
+
+  if (startupPendingPackedOutput_.has_value())
+  {
+    KodiPackedAccessUnit* pendingPackedOutput = &*startupPendingPackedOutput_;
+    return flushPendingOutput(pendingPackedOutput, startupRetryState_, false);
   }
+
+  if (steadyStatePendingPackedOutput_.has_value())
+  {
+    KodiPackedAccessUnit* pendingPackedOutput = &steadyStatePendingPackedOutput_->packet;
+    return flushPendingOutput(
+        pendingPackedOutput, steadyStatePendingPackedOutput_->controlState, true);
+  }
+
   queuedDurationUs_ = QueueDurationUsLocked();
   return 0;
 }
@@ -2491,7 +2496,7 @@ void KodiTrueHdAEEngine::InvalidateCurrentOutputLocked()
     pendingPcmOutput_->writeOffset = 0;
   startupRetryState_.Reset();
   if (steadyStatePendingPackedOutput_.has_value())
-    steadyStatePendingPackedOutput_->retryState.Reset();
+    steadyStatePendingPackedOutput_->controlState.Reset();
   ResetPositionLocked();
 }
 
