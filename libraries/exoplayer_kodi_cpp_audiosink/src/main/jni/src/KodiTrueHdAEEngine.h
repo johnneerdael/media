@@ -177,6 +177,12 @@ private:
     }
   };
 
+  struct PendingSteadyStatePackedOutput
+  {
+    KodiPackedAccessUnit packet;
+    PendingPackedRetryState retryState;
+  };
+
   struct CapturedValidationBurst
   {
     std::vector<uint8_t> bytes;
@@ -236,11 +242,6 @@ private:
       PendingPassthroughOwner owner);
   const std::optional<PendingPassthroughInput>& GetPendingPassthroughInputSlotLocked(
       PendingPassthroughOwner owner) const;
-  std::optional<KodiPackedAccessUnit>& GetPendingPackedOutputSlotLocked(
-      PendingPassthroughOwner owner);
-  const std::optional<KodiPackedAccessUnit>& GetPendingPackedOutputSlotLocked(
-      PendingPassthroughOwner owner) const;
-  PendingPackedRetryState& GetPendingPackedRetryStateLocked(PendingPassthroughOwner owner);
   PendingPassthroughOwner GetWritableTrueHdPendingPassthroughOwnerLocked();
   PendingPassthroughOwner GetActiveTrueHdPendingPassthroughOwnerLocked();
   PendingPassthroughOwner GetActiveTrueHdPendingPackedOutputOwnerLocked();
@@ -274,7 +275,7 @@ private:
   std::optional<PendingPassthroughInput> startupPendingPassthroughInput_;
   std::optional<PendingPassthroughInput> steadyStatePendingPassthroughInput_;
   std::optional<KodiPackedAccessUnit> startupPendingPackedOutput_;
-  std::optional<KodiPackedAccessUnit> steadyStatePendingPackedOutput_;
+  std::optional<PendingSteadyStatePackedOutput> steadyStatePendingPackedOutput_;
   std::optional<PendingPcmChunk> pendingPcmOutput_;
   int64_t queuedDurationUs_{0};
 
@@ -296,7 +297,6 @@ private:
   std::string lastWriteDiagnosticDetail_;
   int nextPackedPacketId_{1};
   PendingPackedRetryState startupRetryState_;
-  PendingPackedRetryState steadyStateRetryState_;
   int64_t releasePendingUntilUs_{CURRENT_POSITION_NOT_SET};
   std::deque<CapturedValidationBurst> capturedPackedBursts_;
   std::deque<CapturedValidationBurst> capturedAudioTrackWriteBursts_;
