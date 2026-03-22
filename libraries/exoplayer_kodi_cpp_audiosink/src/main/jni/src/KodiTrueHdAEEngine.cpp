@@ -1415,7 +1415,6 @@ int KodiTrueHdAEEngine::FlushTrueHdPackedQueueToHardwareLocked()
     auto& pendingPackedRetryCount_ = retryState.count_;
     auto& pendingPackedRetryZeroWriteStreak_ = retryState.zeroWriteStreak_;
     auto& pendingPackedRetryLastSuccessfulWriteBytes_ = retryState.lastSuccessfulWriteBytes_;
-    auto& pendingPackedRetryNextEligibleRetryTimeUs_ = retryState.nextEligibleRetryTimeUs_;
     auto& pendingPackedRetryLastSuccessfulWriteTimeUs_ = retryState.lastSuccessfulWriteTimeUs_;
     auto& pendingPackedRetryLastAttemptTimeUs_ = retryState.lastAttemptTimeUs_;
     auto& pendingPackedRetryLastProgressTimeUs_ = retryState.lastProgressTimeUs_;
@@ -1640,8 +1639,6 @@ int KodiTrueHdAEEngine::FlushTrueHdPackedQueueToHardwareLocked()
                                     std::chrono::steady_clock::now().time_since_epoch())
                                     .count();
           pendingPackedRetryZeroWriteStreak_ += 1;
-          pendingPackedRetryNextEligibleRetryTimeUs_ =
-              nowUs + ComputeSteadyStateRetryBackoffUsLocked(*pendingPackedOutput, remaining);
           retryReason = "steady_state_packet_duration_backoff";
           const int64_t sinceLastSuccessfulWriteMs =
               pendingPackedRetryLastSuccessfulWriteTimeUs_ == CURRENT_POSITION_NOT_SET
@@ -1695,7 +1692,6 @@ int KodiTrueHdAEEngine::FlushTrueHdPackedQueueToHardwareLocked()
       if (isSteadyState)
       {
         pendingPackedRetryZeroWriteStreak_ = 0;
-        pendingPackedRetryNextEligibleRetryTimeUs_ = CURRENT_POSITION_NOT_SET;
       }
 
       if (written < remaining)
