@@ -1442,38 +1442,6 @@ int KodiTrueHdAEEngine::FlushTrueHdPackedQueueToHardwareLocked()
           {
             outputStarted_ = false;
             StartOutputIfPrimedLocked();
-            if (!output_.IsPlaying())
-            {
-              retryReason = "steady_state_waiting_for_play_state";
-              const int64_t sinceLastSuccessfulWriteMs =
-                  pendingPackedRetryLastSuccessfulWriteTimeUs_ == CURRENT_POSITION_NOT_SET
-                      ? 0
-                      : std::max<int64_t>(
-                            0,
-                            (nowUs - pendingPackedRetryLastSuccessfulWriteTimeUs_) / 1000);
-              lastWriteDiagnosticDetail_ =
-                  "requestedBytes=" + std::to_string(remaining) +
-                  " pendingRemainderId=" + std::to_string(pendingPackedOutput->packetId) +
-                  " packetId=" + std::to_string(pendingPackedOutput->packetId) +
-                  " ownership=steady_state" +
-                  " firstOffsetBytes=" + std::to_string(pendingPackedRetryFirstOffsetBytes_) +
-                  " offsetBytes=" + std::to_string(pendingPackedOutput->writeOffset) +
-                  " bytesRemaining=" + std::to_string(remaining) +
-                  " lastWriteBytes=" +
-                  std::to_string(pendingPackedRetryLastSuccessfulWriteBytes_) +
-                  " pendingRemainderRetryCount=" + std::to_string(pendingPackedRetryCount_) +
-                  " retryCount=" + std::to_string(pendingPackedRetryCount_) +
-                  " pendingRemainderLastProgressUs=" +
-                  std::to_string(pendingPackedRetryLastProgressTimeUs_) +
-                  " sinceLastSuccessfulWriteMs=" +
-                  std::to_string(sinceLastSuccessfulWriteMs) +
-                  " playbackHeadDeltaFrames=" + std::to_string(playbackHeadDeltaFrames) +
-                  " bufferFitDeltaFrames=" + std::to_string(bufferFitDeltaFrames) +
-                  " pendingRemainderRetryEligibleReason=" + std::string(retryReason) +
-                  " retryEligibleReason=" + std::string(retryReason);
-              break;
-            }
-            retryReason = "steady_state_resume_pending";
           }
 
           const uint64_t playbackHeadDelta =
