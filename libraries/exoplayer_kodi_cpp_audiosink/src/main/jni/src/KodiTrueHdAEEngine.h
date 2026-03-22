@@ -236,8 +236,14 @@ private:
       PendingPassthroughOwner owner);
   const std::optional<PendingPassthroughInput>& GetPendingPassthroughInputSlotLocked(
       PendingPassthroughOwner owner) const;
+  std::optional<KodiPackedAccessUnit>& GetPendingPackedOutputSlotLocked(
+      PendingPassthroughOwner owner);
+  const std::optional<KodiPackedAccessUnit>& GetPendingPackedOutputSlotLocked(
+      PendingPassthroughOwner owner) const;
+  PendingPackedRetryState& GetPendingPackedRetryStateLocked(PendingPassthroughOwner owner);
   PendingPassthroughOwner GetWritableTrueHdPendingPassthroughOwnerLocked();
   PendingPassthroughOwner GetActiveTrueHdPendingPassthroughOwnerLocked();
+  PendingPassthroughOwner GetActiveTrueHdPendingPackedOutputOwnerLocked();
   std::optional<PendingPassthroughInput>* GetCurrentTrueHdPendingPassthroughInputSlotLocked();
   void CompactPendingPassthroughInputLocked();
   void CompactPendingPassthroughInputLocked(
