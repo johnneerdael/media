@@ -567,6 +567,19 @@ bool KodiTrueHdAEEngine::IsPassthroughStartupReady()
   return outputPrimed || hardwareAdvanced || queuedFrames >= startupTargetFrames;
 }
 
+bool KodiTrueHdAEEngine::IsTrueHdSteadyStateHandoffReady()
+{
+  std::unique_lock lock(lock_);
+  if (!configured_ || !passthrough_ || !output_.IsConfigured())
+    return false;
+
+  if (requestedFormat_.m_streamInfo.m_type != CAEStreamInfo::STREAM_TYPE_TRUEHD)
+    return false;
+
+  return HasReachedSteadyStatePendingPackedHandoffLocked() &&
+         !startupPendingPackedOutput_.has_value();
+}
+
 int64_t KodiTrueHdAEEngine::GetBufferSizeUs() const
 {
   std::unique_lock lock(lock_);

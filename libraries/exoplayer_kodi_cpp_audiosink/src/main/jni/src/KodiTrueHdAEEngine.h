@@ -53,6 +53,7 @@ public:
   bool HasPendingData();
   bool IsEnded();
   bool IsPassthroughStartupReady();
+  bool IsTrueHdSteadyStateHandoffReady();
   int64_t GetBufferSizeUs() const;
   int64_t GetBufferSizeBytes() const;
   int GetOutputSampleRate() const;
