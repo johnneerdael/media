@@ -4,3 +4,7 @@
 [submodule "fmt"]
 	path = fmt
 	url = https://github.com/fmtlib/fmt
+[submodule "FFmpeg"]
+	path = FFmpeg
+	url = https://github.com/johnneerdael/FFmpeg
+	branch = master

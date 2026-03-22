@@ -258,6 +258,8 @@ public final class FfmpegLibrary {
         return "truehd";
       case MimeTypes.AUDIO_DTS:
       case MimeTypes.AUDIO_DTS_HD:
+      case MimeTypes.AUDIO_DTS_EXPRESS:
+      case MimeTypes.AUDIO_DTS_X:
         return "dca";
       case MimeTypes.AUDIO_VORBIS:
         return "vorbis";
@@ -277,13 +279,24 @@ public final class FfmpegLibrary {
         return "pcm_alaw";
       case MimeTypes.VIDEO_H264:
         return "h264";
+      case MimeTypes.VIDEO_H263:
+        return "h263";
       case MimeTypes.VIDEO_H265:
         return "hevc";
+      case MimeTypes.VIDEO_AV1:
+        return "av1";
       case MimeTypes.VIDEO_DOLBY_VISION:
         // FFmpeg decodes Dolby Vision elementary streams through the HEVC decoder.
         return "hevc";
       case MimeTypes.VIDEO_VC1:
         return "vc1";
+      case MimeTypes.VIDEO_MJPEG:
+        return "mjpeg";
+      case MimeTypes.VIDEO_MP4V:
+      case MimeTypes.VIDEO_DIVX:
+      case MimeTypes.VIDEO_MP42:
+      case MimeTypes.VIDEO_MP43:
+        return "mpeg4";
       case MimeTypes.VIDEO_MPEG:
         return "mpegvideo";
       case MimeTypes.VIDEO_MPEG2:
