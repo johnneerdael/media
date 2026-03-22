@@ -130,6 +130,7 @@ public final class KodiTrueHdNativeAudioSink extends ForwardingAudioSink
   private int lastReportedOutputRestartCount;
   private long trueHdMeaningfulWriteCount;
   @Nullable private String lastTrueHdNativeRemainderOwnership;
+  private boolean lastTrueHdNativeHandoffReady;
   private long lastTrueHdPendingRemainderId;
   private boolean lastTrueHdHandoffEligible;
   private boolean lastTrueHdHandoffTriggered;
@@ -260,6 +261,7 @@ public final class KodiTrueHdNativeAudioSink extends ForwardingAudioSink
       if (!buffer.hasRemaining()) {
         return true;
       }
+      refreshTrueHdNativeHandoffReady();
       boolean handoffTriggered = maybeExitTrueHdStartupOwnership("handleBuffer");
       boolean handoffEligible = lastTrueHdHandoffEligible;
       if (!shouldRemainOnTrueHdStartupPath(handoffEligible)) {
@@ -930,6 +932,7 @@ public final class KodiTrueHdNativeAudioSink extends ForwardingAudioSink
     trueHdStartupCompleted = false;
     trueHdMeaningfulWriteCount = 0L;
     lastTrueHdNativeRemainderOwnership = null;
+    lastTrueHdNativeHandoffReady = false;
     lastTrueHdPendingRemainderId = -1L;
     lastTrueHdHandoffEligible = false;
     lastTrueHdHandoffTriggered = false;
@@ -1319,6 +1322,8 @@ public final class KodiTrueHdNativeAudioSink extends ForwardingAudioSink
     appendDetailField(detailBuilder, "nativeOutputStarted", Boolean.toString(nativeOutputStarted));
     appendDetailField(detailBuilder, "nativeStartupReady", Boolean.toString(nativeStartupReady));
     appendDetailField(
+        detailBuilder, "nativeHandoffReady", Boolean.toString(lastTrueHdNativeHandoffReady));
+    appendDetailField(
         detailBuilder,
         "nativeRemainderOwnership",
         lastTrueHdNativeRemainderOwnership != null ? lastTrueHdNativeRemainderOwnership : "unknown");
@@ -1378,6 +1383,8 @@ public final class KodiTrueHdNativeAudioSink extends ForwardingAudioSink
               + reason
               + " nativeStartupReady="
               + (nativeHandle != 0L && nIsPassthroughStartupReady(nativeHandle))
+              + " nativeHandoffReady="
+              + lastTrueHdNativeHandoffReady
               + " nativeRemainderOwnership="
               + (lastTrueHdNativeRemainderOwnership != null
                   ? lastTrueHdNativeRemainderOwnership
@@ -1408,6 +1415,8 @@ public final class KodiTrueHdNativeAudioSink extends ForwardingAudioSink
             + (trueHdStartupProducedOutput || trueHdMeaningfulWriteCount > 0)
             + " nativeStartupReady="
             + (nativeHandle != 0L && nIsPassthroughStartupReady(nativeHandle))
+            + " nativeHandoffReady="
+            + lastTrueHdNativeHandoffReady
             + " nativeRemainderOwnership="
             + (lastTrueHdNativeRemainderOwnership != null
                 ? lastTrueHdNativeRemainderOwnership
@@ -1420,6 +1429,18 @@ public final class KodiTrueHdNativeAudioSink extends ForwardingAudioSink
             + handoffTriggered
             + " selectedPath="
             + selectedPath);
+  }
+
+  private boolean refreshTrueHdNativeHandoffReady() {
+    if (!shouldUseTrueHdStartupWindow(configuredFormat) || nativeHandle == 0L) {
+      lastTrueHdNativeHandoffReady = false;
+      return false;
+    }
+    if (trueHdStartupCompleted && lastTrueHdNativeHandoffReady) {
+      return true;
+    }
+    lastTrueHdNativeHandoffReady = nIsTrueHdSteadyStateHandoffReady(nativeHandle);
+    return lastTrueHdNativeHandoffReady;
   }
 
   @Nullable
@@ -1890,6 +1911,8 @@ public final class KodiTrueHdNativeAudioSink extends ForwardingAudioSink
   private static native boolean nIsEnded(long nativeHandle);
 
   private static native boolean nIsPassthroughStartupReady(long nativeHandle);
+
+  private static native boolean nIsTrueHdSteadyStateHandoffReady(long nativeHandle);
 
   private static native long nGetBufferSizeUs(long nativeHandle);
 

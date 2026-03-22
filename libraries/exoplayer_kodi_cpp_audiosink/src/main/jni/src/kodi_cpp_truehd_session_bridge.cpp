@@ -337,6 +337,15 @@ Java_androidx_media3_exoplayer_audio_kodi_KodiTrueHdNativeAudioSink_nIsPassthrou
   return AsSession(native_handle)->IsPassthroughStartupReady() ? JNI_TRUE : JNI_FALSE;
 }
 
+extern "C" JNIEXPORT jboolean JNICALL
+Java_androidx_media3_exoplayer_audio_kodi_KodiTrueHdNativeAudioSink_nIsTrueHdSteadyStateHandoffReady(
+    JNIEnv* env, jclass clazz, jlong native_handle)
+{
+  (void)env;
+  (void)clazz;
+  return AsSession(native_handle)->IsTrueHdSteadyStateHandoffReady() ? JNI_TRUE : JNI_FALSE;
+}
+
 extern "C" JNIEXPORT jlong JNICALL
 Java_androidx_media3_exoplayer_audio_kodi_KodiTrueHdNativeAudioSink_nGetBufferSizeUs(
     JNIEnv* env, jclass clazz, jlong native_handle)
