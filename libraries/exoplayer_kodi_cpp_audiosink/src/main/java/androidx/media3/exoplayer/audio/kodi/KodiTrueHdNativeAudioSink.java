@@ -262,7 +262,7 @@ public final class KodiTrueHdNativeAudioSink extends ForwardingAudioSink
         return true;
       }
       refreshTrueHdNativeHandoffReady();
-      boolean handoffTriggered = maybeExitTrueHdStartupOwnership("handleBuffer");
+      boolean handoffTriggered = syncTrueHdStartupStateFromNative("handleBuffer");
       boolean handoffEligible = lastTrueHdHandoffEligible;
       if (!shouldRemainOnTrueHdStartupPath(handoffEligible)) {
         recordTrueHdPathDecision("steady_state_path", handoffEligible, handoffTriggered);
@@ -1355,21 +1355,12 @@ public final class KodiTrueHdNativeAudioSink extends ForwardingAudioSink
             || shouldAllowBoundedTrueHdStartupRefill());
   }
 
-  private boolean isTrueHdStartupHandoffEligible() {
-    if (!shouldUseTrueHdStartupWindow(configuredFormat)
-        || trueHdStartupCompleted
-        || nativeHandle == 0L
-        || !nativePlayIssued) {
-      return false;
-    }
-    boolean nativeStartupReady = nIsPassthroughStartupReady(nativeHandle);
-    boolean nativeOutputStarted = trueHdStartupProducedOutput || trueHdMeaningfulWriteCount > 0;
-    boolean steadyStateOwnership = "steady_state".equals(lastTrueHdNativeRemainderOwnership);
-    return nativeStartupReady && nativeOutputStarted && steadyStateOwnership && trueHdMeaningfulWriteCount > 0;
-  }
-
-  private boolean maybeExitTrueHdStartupOwnership(String reason) {
-    boolean handoffEligible = isTrueHdStartupHandoffEligible();
+  private boolean syncTrueHdStartupStateFromNative(String reason) {
+    boolean handoffEligible =
+        shouldUseTrueHdStartupWindow(configuredFormat)
+            && !trueHdStartupCompleted
+            && nativePlayIssued
+            && lastTrueHdNativeHandoffReady;
     boolean handoffTriggered = false;
     if (handoffEligible
         && !trueHdStartupCompleted
