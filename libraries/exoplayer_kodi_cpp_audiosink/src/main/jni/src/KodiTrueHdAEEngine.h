@@ -132,6 +132,12 @@ private:
     int encodedAccessUnitCount{1};
   };
 
+  enum class PendingPassthroughOwner
+  {
+    STARTUP,
+    STEADY_STATE
+  };
+
   struct MediaPositionParameters
   {
     double playbackSpeed{1.0};
@@ -226,7 +232,18 @@ private:
   void InvalidateCurrentOutputLocked();
   void MarkReleasePendingLocked();
   bool IsReleasePendingLocked(int64_t nowUs) const;
+  std::optional<PendingPassthroughInput>& GetPendingPassthroughInputSlotLocked(
+      PendingPassthroughOwner owner);
+  const std::optional<PendingPassthroughInput>& GetPendingPassthroughInputSlotLocked(
+      PendingPassthroughOwner owner) const;
+  PendingPassthroughOwner GetWritableTrueHdPendingPassthroughOwnerLocked();
+  PendingPassthroughOwner GetActiveTrueHdPendingPassthroughOwnerLocked();
+  std::optional<PendingPassthroughInput>* GetCurrentTrueHdPendingPassthroughInputSlotLocked();
   void CompactPendingPassthroughInputLocked();
+  void CompactPendingPassthroughInputLocked(
+      std::optional<PendingPassthroughInput>& pendingInput);
+  bool HasPendingPassthroughInputLocked(
+      const std::optional<PendingPassthroughInput>& pendingInput) const;
   bool HasPendingPassthroughInputLocked() const;
   bool HasReachedSteadyStatePendingPackedHandoffLocked();
   bool ShouldRetryStartupPendingPackedRemainderLocked(int64_t nowUs, int remainingBytes, uint64_t playedFrames, int bufferFitFrames, int* playbackHeadDeltaFrames, int* bufferFitDeltaFrames, const char** retryReason);
@@ -248,7 +265,8 @@ private:
 
   KodiTrueHdIecPipeline iecPipeline_;
   KodiTrueHdAudioTrackOutput output_;
-  std::optional<PendingPassthroughInput> pendingPassthroughInput_;
+  std::optional<PendingPassthroughInput> startupPendingPassthroughInput_;
+  std::optional<PendingPassthroughInput> steadyStatePendingPassthroughInput_;
   std::optional<KodiPackedAccessUnit> startupPendingPackedOutput_;
   std::optional<KodiPackedAccessUnit> steadyStatePendingPackedOutput_;
   std::optional<PendingPcmChunk> pendingPcmOutput_;
