@@ -91,6 +91,10 @@ final class FfmpegVideoDecoder extends
                 return extraData;
             case MimeTypes.VIDEO_H265:
             case MimeTypes.VIDEO_VC1:
+            case MimeTypes.VIDEO_MP4V:
+            case MimeTypes.VIDEO_DIVX:
+            case MimeTypes.VIDEO_MP42:
+            case MimeTypes.VIDEO_MP43:
                 return initializationData.get(0);
             default:
                 // Most codecs do not require explicit codec specific data.

@@ -24,9 +24,59 @@ HOST_PLATFORM="$3"
 echo "Host platform is ${HOST_PLATFORM}"
 ANDROID_ABI="$4"
 echo "ANDROID_ABI is ${ANDROID_ABI}"
-ENABLED_DECODERS=("${@:5}")
-echo "Enabled decoders are ${ENABLED_DECODERS[@]}"
+ENABLED_DECODERS=()
+if [[ "$#" -gt 4 ]]
+then
+    ENABLED_DECODERS=("${@:5}")
+fi
 ENABLED_PARSERS=()
+REQUIRED_DECODERS=(
+    aac
+    mp3
+    ac3
+    eac3
+    truehd
+    dca
+    vorbis
+    opus
+    amrnb
+    amrwb
+    flac
+    alac
+    pcm_mulaw
+    pcm_alaw
+    h263
+    h264
+    hevc
+    av1
+    vc1
+    mjpeg
+    mpeg4
+    mpegvideo
+    mpeg2video
+    vp8
+    vp9
+)
+
+append_unique_decoder() {
+    local decoder="$1"
+    local existing
+    for existing in "${ENABLED_DECODERS[@]-}"
+    do
+        if [[ "${existing}" == "${decoder}" ]]
+        then
+            return
+        fi
+    done
+    ENABLED_DECODERS+=("${decoder}")
+}
+
+for decoder in "${REQUIRED_DECODERS[@]}"
+do
+    append_unique_decoder "${decoder}"
+done
+
+echo "Enabled decoders are ${ENABLED_DECODERS[@]-}"
 JOBS="$(nproc 2> /dev/null || sysctl -n hw.ncpu 2> /dev/null || echo 4)"
 echo "Using $JOBS jobs for make"
 FFMPEG_ENABLE_LIBPLACEBO="${FFMPEG_ENABLE_LIBPLACEBO:-0}"
@@ -436,11 +486,42 @@ for decoder in "${ENABLED_DECODERS[@]}"
 do
     COMMON_OPTIONS="${COMMON_OPTIONS} --enable-decoder=${decoder}"
     case "${decoder}" in
+        ac3|eac3)
+            ENABLED_PARSERS+=("ac3")
+            ;;
+        av1)
+            ENABLED_PARSERS+=("av1")
+            ;;
         dca)
             ENABLED_PARSERS+=("dca")
             ;;
+        truehd)
+            ENABLED_PARSERS+=("mlp")
+            ;;
+        vc1)
+            ENABLED_PARSERS+=("vc1")
+            ;;
     esac
 done
+
+deduped_parsers=()
+for parser in "${ENABLED_PARSERS[@]-}"
+do
+    already_added=0
+    for existing in "${deduped_parsers[@]-}"
+    do
+        if [[ "${existing}" == "${parser}" ]]
+        then
+            already_added=1
+            break
+        fi
+    done
+    if [[ "${already_added}" -eq 0 ]]
+    then
+        deduped_parsers+=("${parser}")
+    fi
+done
+ENABLED_PARSERS=("${deduped_parsers[@]}")
 
 for parser in "${ENABLED_PARSERS[@]}"
 do
