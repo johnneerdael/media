@@ -254,7 +254,6 @@ private:
   bool HasPendingPassthroughInputLocked() const;
   bool HasReachedSteadyStatePendingPackedHandoffLocked();
   bool ShouldRetryStartupPendingPackedRemainderLocked(int64_t nowUs, int remainingBytes, uint64_t playedFrames, int bufferFitFrames, int* playbackHeadDeltaFrames, int* bufferFitDeltaFrames, const char** retryReason);
-  bool ShouldRetrySteadyStatePendingPackedRemainderLocked(int64_t nowUs, int remainingBytes, uint64_t playedFrames, int bufferFitFrames, int* playbackHeadDeltaFrames, int* bufferFitDeltaFrames, const char** retryReason);
   int64_t ComputeSteadyStateRetryBackoffUsLocked(const KodiPackedAccessUnit& packet, int remainingBytes) const;
   void RecordPackedBurstLocked(const KodiPackedAccessUnit& packet);
   void RecordAudioTrackWriteChunkLocked(const KodiPackedAccessUnit& packet, int bytesWritten);
