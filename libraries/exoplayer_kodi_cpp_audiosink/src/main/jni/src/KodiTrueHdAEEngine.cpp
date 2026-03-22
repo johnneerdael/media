@@ -270,78 +270,6 @@ bool KodiTrueHdAEEngine::ShouldRetryStartupPendingPackedRemainderLocked(int64_t 
 }
 
 
-bool KodiTrueHdAEEngine::ShouldRetrySteadyStatePendingPackedRemainderLocked(int64_t nowUs,
-                                                                 
-                                                                 int remainingBytes,
-                                                                 uint64_t playedFrames,
-                                                                 int bufferFitFrames,
-                                                                 int* playbackHeadDeltaFrames,
-                                                                 int* bufferFitDeltaFrames,
-                                                                 const char** retryReason)
-{
-  if (playbackHeadDeltaFrames != nullptr)
-    *playbackHeadDeltaFrames = 0;
-  if (bufferFitDeltaFrames != nullptr)
-    *bufferFitDeltaFrames = 0;
-  if (retryReason != nullptr)
-    *retryReason = nullptr;
-
-  if (!steadyStatePendingPackedOutput_.has_value() ||
-      steadyStatePendingPackedOutput_->packet.writeOffset == 0)
-    return true;
-
-  const int currentPacketId = steadyStatePendingPackedOutput_->packet.packetId;
-  const int currentOffset =
-      static_cast<int>(steadyStatePendingPackedOutput_->packet.writeOffset);
-  auto& retryState = steadyStatePendingPackedOutput_->retryState;
-  if (retryState.packetId_ != currentPacketId || currentOffset <= 0 ||
-      (retryState.lastOffsetBytes_ > 0 && currentOffset < retryState.lastOffsetBytes_))
-  {
-    retryState.Reset();
-    retryState.packetId_ = currentPacketId;
-    retryState.firstOffsetBytes_ = currentOffset;
-    retryState.lastOffsetBytes_ = currentOffset;
-    retryState.lastPlayedFrames_ = playedFrames;
-    retryState.lastBufferFitFrames_ = bufferFitFrames;
-    if (retryReason != nullptr)
-      *retryReason = "steady_state_output_driven";
-    return true;
-  }
-
-  // Calculate diagnostic values without using them as gating logic
-  if (playbackHeadDeltaFrames != nullptr) {
-    const uint64_t playbackHeadDelta =
-        playedFrames > retryState.lastPlayedFrames_
-            ? (playedFrames - retryState.lastPlayedFrames_)
-            : 0;
-    *playbackHeadDeltaFrames = static_cast<int>(std::min<uint64_t>(
-        playbackHeadDelta, static_cast<uint64_t>(std::numeric_limits<int>::max())));
-  }
-  
-  if (bufferFitDeltaFrames != nullptr) {
-    const int bufferFitDelta = bufferFitFrames - retryState.lastBufferFitFrames_;
-    *bufferFitDeltaFrames = std::max(0, bufferFitDelta);
-  }
-
-  // Purely bounded, output-driven retry logic
-  // First zero-write retries on the next natural flush. Only repeated zero writes
-  // get a short bounded backoff to avoid hammering the same remainder.
-  const bool cooldownActive =
-      retryState.nextEligibleRetryTimeUs_ != CURRENT_POSITION_NOT_SET &&
-      nowUs < retryState.nextEligibleRetryTimeUs_;
-
-  if (cooldownActive)
-  {
-    if (retryReason != nullptr)
-      *retryReason = "steady_state_packet_duration_backoff";
-    return false;
-  }
-
-  if (retryReason != nullptr)
-    *retryReason = "steady_state_output_driven";
-  return true;
-}
-
 void KodiTrueHdAEEngine::CompactPendingPassthroughInputLocked()
 {
   CompactPendingPassthroughInputLocked(startupPendingPassthroughInput_);
@@ -1560,7 +1488,6 @@ int KodiTrueHdAEEngine::FlushTrueHdPackedQueueToHardwareLocked()
                 : static_cast<int>(static_cast<uint64_t>(bufferSizeFrames) - queuedFrames);
       }
 
-      bool shouldRetry = true;
       if (isSteadyState)
       {
         if (outputStarted_ && !output_.IsPlaying())
@@ -1600,21 +1527,22 @@ int KodiTrueHdAEEngine::FlushTrueHdPackedQueueToHardwareLocked()
           }
           retryReason = "steady_state_resume_pending";
         }
-        else if (!ShouldRetrySteadyStatePendingPackedRemainderLocked(
-                     nowUs,
-                     remaining,
-                     playedFrames,
-                     bufferFitFrames,
-                     &playbackHeadDeltaFrames,
-                     &bufferFitDeltaFrames,
-                     &retryReason))
-        {
-          shouldRetry = false;
-        }
+
+        const uint64_t playbackHeadDelta =
+            playedFrames > pendingPackedRetryLastPlayedFrames_
+                ? (playedFrames - pendingPackedRetryLastPlayedFrames_)
+                : 0;
+        playbackHeadDeltaFrames = static_cast<int>(std::min<uint64_t>(
+            playbackHeadDelta, static_cast<uint64_t>(std::numeric_limits<int>::max())));
+        bufferFitDeltaFrames =
+            std::max(0, bufferFitFrames - pendingPackedRetryLastBufferFitFrames_);
+
+        if (retryReason == nullptr)
+          retryReason = "steady_state_output_driven";
       }
       else if (output_.IsPlaying())
       {
-        shouldRetry = ShouldRetryStartupPendingPackedRemainderLocked(
+        const bool canRetryStartupRemainder = ShouldRetryStartupPendingPackedRemainderLocked(
             nowUs,
             remaining,
             playedFrames,
@@ -1622,35 +1550,35 @@ int KodiTrueHdAEEngine::FlushTrueHdPackedQueueToHardwareLocked()
             &playbackHeadDeltaFrames,
             &bufferFitDeltaFrames,
             &retryReason);
-      }
-
-      if (!shouldRetry)
-      {
-        const int64_t sinceLastSuccessfulWriteMs =
-            pendingPackedRetryLastSuccessfulWriteTimeUs_ == CURRENT_POSITION_NOT_SET
-                ? 0
-                : std::max<int64_t>(0,
-                                    (nowUs - pendingPackedRetryLastSuccessfulWriteTimeUs_) / 1000);
-        lastWriteDiagnosticDetail_ =
-            "requestedBytes=" + std::to_string(remaining) +
-            " pendingRemainderId=" + std::to_string(pendingPackedOutput->packetId) +
-            " packetId=" + std::to_string(pendingPackedOutput->packetId) +
-            " ownership=" + std::string(isSteadyState ? "steady_state" : "startup") +
-            " firstOffsetBytes=" + std::to_string(pendingPackedRetryFirstOffsetBytes_) +
-            " offsetBytes=" + std::to_string(pendingPackedOutput->writeOffset) +
-            " bytesRemaining=" + std::to_string(remaining) +
-            " lastWriteBytes=" + std::to_string(pendingPackedRetryLastSuccessfulWriteBytes_) +
-            " pendingRemainderRetryCount=" + std::to_string(pendingPackedRetryCount_) +
-            " retryCount=" + std::to_string(pendingPackedRetryCount_) +
-            " pendingRemainderLastProgressUs=" +
-            std::to_string(pendingPackedRetryLastProgressTimeUs_) +
-            " sinceLastSuccessfulWriteMs=" + std::to_string(sinceLastSuccessfulWriteMs) +
-            " playbackHeadDeltaFrames=" + std::to_string(playbackHeadDeltaFrames) +
-            " bufferFitDeltaFrames=" + std::to_string(bufferFitDeltaFrames) +
-            " pendingRemainderRetryEligibleReason=" +
-            std::string(retryReason != nullptr ? retryReason : "not_eligible") +
-            " retryEligibleReason=" + std::string(retryReason != nullptr ? retryReason : "not_eligible");
-        break;
+        if (!canRetryStartupRemainder)
+        {
+          const int64_t sinceLastSuccessfulWriteMs =
+              pendingPackedRetryLastSuccessfulWriteTimeUs_ == CURRENT_POSITION_NOT_SET
+                  ? 0
+                  : std::max<int64_t>(0,
+                                      (nowUs - pendingPackedRetryLastSuccessfulWriteTimeUs_) / 1000);
+          lastWriteDiagnosticDetail_ =
+              "requestedBytes=" + std::to_string(remaining) +
+              " pendingRemainderId=" + std::to_string(pendingPackedOutput->packetId) +
+              " packetId=" + std::to_string(pendingPackedOutput->packetId) +
+              " ownership=" + std::string(isSteadyState ? "steady_state" : "startup") +
+              " firstOffsetBytes=" + std::to_string(pendingPackedRetryFirstOffsetBytes_) +
+              " offsetBytes=" + std::to_string(pendingPackedOutput->writeOffset) +
+              " bytesRemaining=" + std::to_string(remaining) +
+              " lastWriteBytes=" + std::to_string(pendingPackedRetryLastSuccessfulWriteBytes_) +
+              " pendingRemainderRetryCount=" + std::to_string(pendingPackedRetryCount_) +
+              " retryCount=" + std::to_string(pendingPackedRetryCount_) +
+              " pendingRemainderLastProgressUs=" +
+              std::to_string(pendingPackedRetryLastProgressTimeUs_) +
+              " sinceLastSuccessfulWriteMs=" + std::to_string(sinceLastSuccessfulWriteMs) +
+              " playbackHeadDeltaFrames=" + std::to_string(playbackHeadDeltaFrames) +
+              " bufferFitDeltaFrames=" + std::to_string(bufferFitDeltaFrames) +
+              " pendingRemainderRetryEligibleReason=" +
+              std::string(retryReason != nullptr ? retryReason : "not_eligible") +
+              " retryEligibleReason=" +
+              std::string(retryReason != nullptr ? retryReason : "not_eligible");
+          break;
+        }
       }
     }
 
