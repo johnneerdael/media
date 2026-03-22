@@ -185,7 +185,6 @@ private:
     int count_{0};
     int zeroWriteStreak_{0};
     int lastSuccessfulWriteBytes_{0};
-    int64_t nextEligibleRetryTimeUs_{CURRENT_POSITION_NOT_SET};
     int64_t lastSuccessfulWriteTimeUs_{CURRENT_POSITION_NOT_SET};
     int64_t lastAttemptTimeUs_{CURRENT_POSITION_NOT_SET};
     int64_t lastProgressTimeUs_{CURRENT_POSITION_NOT_SET};
@@ -200,7 +199,6 @@ private:
       count_ = 0;
       zeroWriteStreak_ = 0;
       lastSuccessfulWriteBytes_ = 0;
-      nextEligibleRetryTimeUs_ = CURRENT_POSITION_NOT_SET;
       lastSuccessfulWriteTimeUs_ = CURRENT_POSITION_NOT_SET;
       lastAttemptTimeUs_ = CURRENT_POSITION_NOT_SET;
       lastProgressTimeUs_ = CURRENT_POSITION_NOT_SET;
