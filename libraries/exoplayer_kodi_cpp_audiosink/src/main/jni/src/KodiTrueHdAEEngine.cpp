@@ -83,27 +83,6 @@ KodiTrueHdAEEngine::GetPendingPassthroughInputSlotLocked(PendingPassthroughOwner
                                                    : steadyStatePendingPassthroughInput_;
 }
 
-std::optional<KodiPackedAccessUnit>&
-KodiTrueHdAEEngine::GetPendingPackedOutputSlotLocked(PendingPassthroughOwner owner)
-{
-  return owner == PendingPassthroughOwner::STARTUP ? startupPendingPackedOutput_
-                                                   : steadyStatePendingPackedOutput_;
-}
-
-const std::optional<KodiPackedAccessUnit>&
-KodiTrueHdAEEngine::GetPendingPackedOutputSlotLocked(PendingPassthroughOwner owner) const
-{
-  return owner == PendingPassthroughOwner::STARTUP ? startupPendingPackedOutput_
-                                                   : steadyStatePendingPackedOutput_;
-}
-
-KodiTrueHdAEEngine::PendingPackedRetryState&
-KodiTrueHdAEEngine::GetPendingPackedRetryStateLocked(PendingPassthroughOwner owner)
-{
-  return owner == PendingPassthroughOwner::STARTUP ? startupRetryState_
-                                                   : steadyStateRetryState_;
-}
-
 KodiTrueHdAEEngine::PendingPassthroughOwner
 KodiTrueHdAEEngine::GetWritableTrueHdPendingPassthroughOwnerLocked()
 {
@@ -307,20 +286,23 @@ bool KodiTrueHdAEEngine::ShouldRetrySteadyStatePendingPackedRemainderLocked(int6
   if (retryReason != nullptr)
     *retryReason = nullptr;
 
-  if (!steadyStatePendingPackedOutput_.has_value() || steadyStatePendingPackedOutput_->writeOffset == 0)
+  if (!steadyStatePendingPackedOutput_.has_value() ||
+      steadyStatePendingPackedOutput_->packet.writeOffset == 0)
     return true;
 
-  const int currentPacketId = steadyStatePendingPackedOutput_->packetId;
-  const int currentOffset = static_cast<int>(steadyStatePendingPackedOutput_->writeOffset);
-  if (steadyStateRetryState_.packetId_ != currentPacketId || currentOffset <= 0 ||
-      (steadyStateRetryState_.lastOffsetBytes_ > 0 && currentOffset < steadyStateRetryState_.lastOffsetBytes_))
+  const int currentPacketId = steadyStatePendingPackedOutput_->packet.packetId;
+  const int currentOffset =
+      static_cast<int>(steadyStatePendingPackedOutput_->packet.writeOffset);
+  auto& retryState = steadyStatePendingPackedOutput_->retryState;
+  if (retryState.packetId_ != currentPacketId || currentOffset <= 0 ||
+      (retryState.lastOffsetBytes_ > 0 && currentOffset < retryState.lastOffsetBytes_))
   {
-    steadyStateRetryState_.Reset();
-    steadyStateRetryState_.packetId_ = currentPacketId;
-    steadyStateRetryState_.firstOffsetBytes_ = currentOffset;
-    steadyStateRetryState_.lastOffsetBytes_ = currentOffset;
-    steadyStateRetryState_.lastPlayedFrames_ = playedFrames;
-    steadyStateRetryState_.lastBufferFitFrames_ = bufferFitFrames;
+    retryState.Reset();
+    retryState.packetId_ = currentPacketId;
+    retryState.firstOffsetBytes_ = currentOffset;
+    retryState.lastOffsetBytes_ = currentOffset;
+    retryState.lastPlayedFrames_ = playedFrames;
+    retryState.lastBufferFitFrames_ = bufferFitFrames;
     if (retryReason != nullptr)
       *retryReason = "steady_state_output_driven";
     return true;
@@ -329,15 +311,15 @@ bool KodiTrueHdAEEngine::ShouldRetrySteadyStatePendingPackedRemainderLocked(int6
   // Calculate diagnostic values without using them as gating logic
   if (playbackHeadDeltaFrames != nullptr) {
     const uint64_t playbackHeadDelta =
-        playedFrames > steadyStateRetryState_.lastPlayedFrames_
-            ? (playedFrames - steadyStateRetryState_.lastPlayedFrames_)
+        playedFrames > retryState.lastPlayedFrames_
+            ? (playedFrames - retryState.lastPlayedFrames_)
             : 0;
     *playbackHeadDeltaFrames = static_cast<int>(std::min<uint64_t>(
         playbackHeadDelta, static_cast<uint64_t>(std::numeric_limits<int>::max())));
   }
   
   if (bufferFitDeltaFrames != nullptr) {
-    const int bufferFitDelta = bufferFitFrames - steadyStateRetryState_.lastBufferFitFrames_;
+    const int bufferFitDelta = bufferFitFrames - retryState.lastBufferFitFrames_;
     *bufferFitDeltaFrames = std::max(0, bufferFitDelta);
   }
 
@@ -345,8 +327,8 @@ bool KodiTrueHdAEEngine::ShouldRetrySteadyStatePendingPackedRemainderLocked(int6
   // First zero-write retries on the next natural flush. Only repeated zero writes
   // get a short bounded backoff to avoid hammering the same remainder.
   const bool cooldownActive =
-      steadyStateRetryState_.nextEligibleRetryTimeUs_ != CURRENT_POSITION_NOT_SET &&
-      nowUs < steadyStateRetryState_.nextEligibleRetryTimeUs_;
+      retryState.nextEligibleRetryTimeUs_ != CURRENT_POSITION_NOT_SET &&
+      nowUs < retryState.nextEligibleRetryTimeUs_;
 
   if (cooldownActive)
   {
@@ -429,7 +411,6 @@ bool KodiTrueHdAEEngine::Configure(const ActiveAE::CActiveAEMediaSettings& confi
   startupPendingPackedOutput_.reset();
   steadyStatePendingPackedOutput_.reset();
   startupRetryState_.Reset();
-  steadyStateRetryState_.Reset();
   pendingPcmOutput_.reset();
   queuedDurationUs_ = 0;
   totalWrittenFrames_ = 0;
@@ -533,7 +514,6 @@ void KodiTrueHdAEEngine::Flush()
   startupPendingPackedOutput_.reset();
   steadyStatePendingPackedOutput_.reset();
   startupRetryState_.Reset();
-  steadyStateRetryState_.Reset();
   pendingPcmOutput_.reset();
   queuedDurationUs_ = 0;
   hasPendingData_ = false;
@@ -852,7 +832,6 @@ void KodiTrueHdAEEngine::Reset()
   startupPendingPackedOutput_.reset();
   steadyStatePendingPackedOutput_.reset();
   startupRetryState_.Reset();
-  steadyStateRetryState_.Reset();
   pendingPcmOutput_.reset();
   queuedDurationUs_ = 0;
   ClearCapturedValidationBurstsLocked();
@@ -958,7 +937,7 @@ int KodiTrueHdAEEngine::WritePassthroughLockedBaseline(const uint8_t* data,
     if (startupPendingPackedOutput_.has_value()) {
         EnsurePassthroughOutputConfiguredLocked(*startupPendingPackedOutput_);
     } else if (steadyStatePendingPackedOutput_.has_value()) {
-        EnsurePassthroughOutputConfiguredLocked(*steadyStatePendingPackedOutput_);
+        EnsurePassthroughOutputConfiguredLocked(steadyStatePendingPackedOutput_->packet);
     }
   }
   acknowledgedThisCall = FlushPackedQueueToHardwareLocked();
@@ -1114,8 +1093,10 @@ int KodiTrueHdAEEngine::WriteTrueHdPassthroughLocked(const uint8_t* data,
         RecordPackedBurstLocked(packet);
         if (GetActiveTrueHdPendingPassthroughOwnerLocked() == PendingPassthroughOwner::STEADY_STATE)
         {
-          steadyStatePendingPackedOutput_ = std::move(packet);
-          steadyStateRetryState_.Reset();
+          PendingSteadyStatePackedOutput steadyStatePendingOutput;
+          steadyStatePendingOutput.packet = std::move(packet);
+          steadyStatePendingOutput.retryState.Reset();
+          steadyStatePendingPackedOutput_ = std::move(steadyStatePendingOutput);
         }
         else
         {
@@ -1150,7 +1131,7 @@ int KodiTrueHdAEEngine::WriteTrueHdPassthroughLocked(const uint8_t* data,
       }
       else if (steadyStatePendingPackedOutput_.has_value())
       {
-        EnsurePassthroughOutputConfiguredLocked(*steadyStatePendingPackedOutput_);
+        EnsurePassthroughOutputConfiguredLocked(steadyStatePendingPackedOutput_->packet);
       }
     }
     acknowledgedThisCall = FlushPackedQueueToHardwareLocked();
@@ -1371,7 +1352,8 @@ int KodiTrueHdAEEngine::FlushPackedQueueToHardwareLocked()
 
   if (startupPendingPackedOutput_.has_value() && startupPendingPackedOutput_->streamInfo.m_type == CAEStreamInfo::STREAM_TYPE_TRUEHD)
     return FlushTrueHdPackedQueueToHardwareLocked();
-  if (steadyStatePendingPackedOutput_.has_value() && steadyStatePendingPackedOutput_->streamInfo.m_type == CAEStreamInfo::STREAM_TYPE_TRUEHD)
+  if (steadyStatePendingPackedOutput_.has_value() &&
+      steadyStatePendingPackedOutput_->packet.streamInfo.m_type == CAEStreamInfo::STREAM_TYPE_TRUEHD)
     return FlushTrueHdPackedQueueToHardwareLocked();
 
   return FlushPackedQueueToHardwareLockedBaseline();
@@ -1496,10 +1478,24 @@ int KodiTrueHdAEEngine::FlushTrueHdPackedQueueToHardwareLocked()
     return 0;
   }
 
-  const auto owner = GetActiveTrueHdPendingPackedOutputOwnerLocked();
-  auto& pendingPackedOutput_ = GetPendingPackedOutputSlotLocked(owner);
-  auto& retryState = GetPendingPackedRetryStateLocked(owner);
-  const bool isSteadyState = owner == PendingPassthroughOwner::STEADY_STATE;
+  KodiPackedAccessUnit* pendingPackedOutput = nullptr;
+  PendingPackedRetryState* retryStatePtr = nullptr;
+  bool isSteadyState = false;
+  if (startupPendingPackedOutput_.has_value())
+  {
+    pendingPackedOutput = &*startupPendingPackedOutput_;
+    retryStatePtr = &startupRetryState_;
+  }
+  else if (steadyStatePendingPackedOutput_.has_value())
+  {
+    pendingPackedOutput = &steadyStatePendingPackedOutput_->packet;
+    retryStatePtr = &steadyStatePendingPackedOutput_->retryState;
+    isSteadyState = true;
+  }
+  if (pendingPackedOutput == nullptr || retryStatePtr == nullptr)
+    return 0;
+
+  auto& retryState = *retryStatePtr;
 
   auto& pendingPackedRetryPacketId_ = retryState.packetId_;
   auto& pendingPackedRetryFirstOffsetBytes_ = retryState.firstOffsetBytes_;
@@ -1515,7 +1511,7 @@ int KodiTrueHdAEEngine::FlushTrueHdPackedQueueToHardwareLocked()
   auto& pendingPackedRetryLastBufferFitFrames_ = retryState.lastBufferFitFrames_;
 
   if (!output_.IsConfigured())
-    EnsureTrueHdPassthroughOutputConfiguredLocked(*pendingPackedOutput_);
+    EnsureTrueHdPassthroughOutputConfiguredLocked(*pendingPackedOutput);
   if (!output_.IsConfigured())
     return 0;
 
@@ -1523,19 +1519,23 @@ int KodiTrueHdAEEngine::FlushTrueHdPackedQueueToHardwareLocked()
   int totalWriteAttempts = 0;
   int totalBytesWritten = 0;
   int lastWriteResult = 0;
-  while (pendingPackedOutput_.has_value() && totalWriteCalls < MAX_WRITE_CALLS_PER_FLUSH)
+  while (pendingPackedOutput != nullptr && totalWriteCalls < MAX_WRITE_CALLS_PER_FLUSH)
   {
     lastWriteDiagnosticDetail_.clear();
     const int remaining =
-        static_cast<int>(pendingPackedOutput_->bytes.size() - pendingPackedOutput_->writeOffset);
+        static_cast<int>(pendingPackedOutput->bytes.size() - pendingPackedOutput->writeOffset);
     if (remaining <= 0)
     {
-      pendingPackedOutput_.reset();
+      if (isSteadyState)
+        steadyStatePendingPackedOutput_.reset();
+      else
+        startupPendingPackedOutput_.reset();
+      pendingPackedOutput = nullptr;
       retryState.Reset();
       break;
     }
 
-    const bool retryingPendingRemainder = pendingPackedOutput_->writeOffset > 0;
+    const bool retryingPendingRemainder = pendingPackedOutput->writeOffset > 0;
     int playbackHeadDeltaFrames = 0;
     int bufferFitDeltaFrames = 0;
     const char* retryReason = nullptr;
@@ -1578,11 +1578,11 @@ int KodiTrueHdAEEngine::FlushTrueHdPackedQueueToHardwareLocked()
                           (nowUs - pendingPackedRetryLastSuccessfulWriteTimeUs_) / 1000);
             lastWriteDiagnosticDetail_ =
                 "requestedBytes=" + std::to_string(remaining) +
-                " pendingRemainderId=" + std::to_string(pendingPackedOutput_->packetId) +
-                " packetId=" + std::to_string(pendingPackedOutput_->packetId) +
+                " pendingRemainderId=" + std::to_string(pendingPackedOutput->packetId) +
+                " packetId=" + std::to_string(pendingPackedOutput->packetId) +
                 " ownership=steady_state" +
                 " firstOffsetBytes=" + std::to_string(pendingPackedRetryFirstOffsetBytes_) +
-                " offsetBytes=" + std::to_string(pendingPackedOutput_->writeOffset) +
+                " offsetBytes=" + std::to_string(pendingPackedOutput->writeOffset) +
                 " bytesRemaining=" + std::to_string(remaining) +
                 " lastWriteBytes=" +
                 std::to_string(pendingPackedRetryLastSuccessfulWriteBytes_) +
@@ -1633,11 +1633,11 @@ int KodiTrueHdAEEngine::FlushTrueHdPackedQueueToHardwareLocked()
                                     (nowUs - pendingPackedRetryLastSuccessfulWriteTimeUs_) / 1000);
         lastWriteDiagnosticDetail_ =
             "requestedBytes=" + std::to_string(remaining) +
-            " pendingRemainderId=" + std::to_string(pendingPackedOutput_->packetId) +
-            " packetId=" + std::to_string(pendingPackedOutput_->packetId) +
+            " pendingRemainderId=" + std::to_string(pendingPackedOutput->packetId) +
+            " packetId=" + std::to_string(pendingPackedOutput->packetId) +
             " ownership=" + std::string(isSteadyState ? "steady_state" : "startup") +
             " firstOffsetBytes=" + std::to_string(pendingPackedRetryFirstOffsetBytes_) +
-            " offsetBytes=" + std::to_string(pendingPackedOutput_->writeOffset) +
+            " offsetBytes=" + std::to_string(pendingPackedOutput->writeOffset) +
             " bytesRemaining=" + std::to_string(remaining) +
             " lastWriteBytes=" + std::to_string(pendingPackedRetryLastSuccessfulWriteBytes_) +
             " pendingRemainderRetryCount=" + std::to_string(pendingPackedRetryCount_) +
@@ -1656,7 +1656,7 @@ int KodiTrueHdAEEngine::FlushTrueHdPackedQueueToHardwareLocked()
 
     ++totalWriteAttempts;
     const int written = output_.WriteNonBlocking(
-        pendingPackedOutput_->bytes.data() + pendingPackedOutput_->writeOffset, remaining);
+        pendingPackedOutput->bytes.data() + pendingPackedOutput->writeOffset, remaining);
     lastWriteResult = written;
     if (retryingPendingRemainder)
     {
@@ -1664,13 +1664,13 @@ int KodiTrueHdAEEngine::FlushTrueHdPackedQueueToHardwareLocked()
                                 std::chrono::steady_clock::now().time_since_epoch())
                                 .count();
       pendingPackedRetryCount_ += 1;
-      pendingPackedRetryPacketId_ = pendingPackedOutput_->packetId;
+      pendingPackedRetryPacketId_ = pendingPackedOutput->packetId;
       if (pendingPackedRetryFirstOffsetBytes_ <= 0)
       {
         pendingPackedRetryFirstOffsetBytes_ =
-            static_cast<int>(pendingPackedOutput_->writeOffset);
+            static_cast<int>(pendingPackedOutput->writeOffset);
       }
-      pendingPackedRetryLastOffsetBytes_ = static_cast<int>(pendingPackedOutput_->writeOffset);
+      pendingPackedRetryLastOffsetBytes_ = static_cast<int>(pendingPackedOutput->writeOffset);
       pendingPackedRetryLastAttemptTimeUs_ = nowUs;
       pendingPackedRetryLastPlayedFrames_ = GetSafePlayedFramesLocked();
       const int frameSizeBytes = output_.FrameSizeBytes();
@@ -1698,11 +1698,11 @@ int KodiTrueHdAEEngine::FlushTrueHdPackedQueueToHardwareLocked()
                                : "startup_retry_reason_unset");
       lastWriteDiagnosticDetail_ =
           "requestedBytes=" + std::to_string(remaining) +
-          " pendingRemainderId=" + std::to_string(pendingPackedOutput_->packetId) +
-          " packetId=" + std::to_string(pendingPackedOutput_->packetId) +
+          " pendingRemainderId=" + std::to_string(pendingPackedOutput->packetId) +
+          " packetId=" + std::to_string(pendingPackedOutput->packetId) +
           " ownership=" + std::string(isSteadyState ? "steady_state" : "startup") +
           " firstOffsetBytes=" + std::to_string(pendingPackedRetryFirstOffsetBytes_) +
-          " offsetBytes=" + std::to_string(pendingPackedOutput_->writeOffset) +
+          " offsetBytes=" + std::to_string(pendingPackedOutput->writeOffset) +
           " bytesRemaining=" + std::to_string(remaining) +
           " lastWriteBytes=" + std::to_string(pendingPackedRetryLastSuccessfulWriteBytes_) +
           " pendingRemainderRetryCount=" + std::to_string(pendingPackedRetryCount_) +
@@ -1726,7 +1726,7 @@ int KodiTrueHdAEEngine::FlushTrueHdPackedQueueToHardwareLocked()
                                   .count();
         pendingPackedRetryZeroWriteStreak_ += 1;
         pendingPackedRetryNextEligibleRetryTimeUs_ =
-            nowUs + ComputeSteadyStateRetryBackoffUsLocked(*pendingPackedOutput_, remaining);
+            nowUs + ComputeSteadyStateRetryBackoffUsLocked(*pendingPackedOutput, remaining);
         retryReason = "steady_state_packet_duration_backoff";
         const int64_t sinceLastSuccessfulWriteMs =
             pendingPackedRetryLastSuccessfulWriteTimeUs_ == CURRENT_POSITION_NOT_SET
@@ -1735,11 +1735,11 @@ int KodiTrueHdAEEngine::FlushTrueHdPackedQueueToHardwareLocked()
                                     (nowUs - pendingPackedRetryLastSuccessfulWriteTimeUs_) / 1000);
         lastWriteDiagnosticDetail_ =
             "requestedBytes=" + std::to_string(remaining) +
-            " pendingRemainderId=" + std::to_string(pendingPackedOutput_->packetId) +
-            " packetId=" + std::to_string(pendingPackedOutput_->packetId) +
+            " pendingRemainderId=" + std::to_string(pendingPackedOutput->packetId) +
+            " packetId=" + std::to_string(pendingPackedOutput->packetId) +
             " ownership=steady_state" +
             " firstOffsetBytes=" + std::to_string(pendingPackedRetryFirstOffsetBytes_) +
-            " offsetBytes=" + std::to_string(pendingPackedOutput_->writeOffset) +
+            " offsetBytes=" + std::to_string(pendingPackedOutput->writeOffset) +
             " bytesRemaining=" + std::to_string(remaining) +
             " lastWriteBytes=" + std::to_string(pendingPackedRetryLastSuccessfulWriteBytes_) +
             " pendingRemainderRetryCount=" + std::to_string(pendingPackedRetryCount_) +
@@ -1767,15 +1767,15 @@ int KodiTrueHdAEEngine::FlushTrueHdPackedQueueToHardwareLocked()
     ++totalWriteCalls;
     totalBytesWritten += written;
     lastWriteOutputBytes_ += written;
-    RecordAudioTrackWriteChunkLocked(*pendingPackedOutput_, written);
-    pendingPackedOutput_->writeOffset += static_cast<size_t>(written);
+    RecordAudioTrackWriteChunkLocked(*pendingPackedOutput, written);
+    pendingPackedOutput->writeOffset += static_cast<size_t>(written);
     pendingPackedRetryLastSuccessfulWriteBytes_ = written;
     pendingPackedRetryLastSuccessfulWriteTimeUs_ =
         std::chrono::duration_cast<std::chrono::microseconds>(
             std::chrono::steady_clock::now().time_since_epoch())
             .count();
     pendingPackedRetryLastProgressTimeUs_ = pendingPackedRetryLastSuccessfulWriteTimeUs_;
-    pendingPackedRetryLastOffsetBytes_ = static_cast<int>(pendingPackedOutput_->writeOffset);
+    pendingPackedRetryLastOffsetBytes_ = static_cast<int>(pendingPackedOutput->writeOffset);
     if (isSteadyState)
     {
       pendingPackedRetryZeroWriteStreak_ = 0;
@@ -1786,15 +1786,19 @@ int KodiTrueHdAEEngine::FlushTrueHdPackedQueueToHardwareLocked()
     {
       break;
     }
-    if (pendingPackedOutput_->writeOffset >= pendingPackedOutput_->bytes.size())
+    if (pendingPackedOutput->writeOffset >= pendingPackedOutput->bytes.size())
     {
-      const KodiPackedAccessUnit completedPacket = *pendingPackedOutput_;
+      const KodiPackedAccessUnit completedPacket = *pendingPackedOutput;
       OnBytesWrittenLocked(completedPacket.ptsUs,
                            static_cast<int>(completedPacket.bytes.size()),
                            output_.SampleRate(),
                            output_.FrameSizeBytes());
       FinalizeAudioTrackWriteBurstLocked(completedPacket);
-      pendingPackedOutput_.reset();
+      if (isSteadyState)
+        steadyStatePendingPackedOutput_.reset();
+      else
+        startupPendingPackedOutput_.reset();
+      pendingPackedOutput = nullptr;
       retryState.Reset();
       queuedDurationUs_ = QueueDurationUsLocked();
       return std::max(0, completedPacket.inputBytesConsumed);
@@ -2222,7 +2226,7 @@ int64_t KodiTrueHdAEEngine::QueueDurationUsLocked() const
   }
   if (steadyStatePendingPackedOutput_.has_value())
   {
-    const auto& packet = *steadyStatePendingPackedOutput_;
+    const auto& packet = steadyStatePendingPackedOutput_->packet;
     const size_t totalBytes = packet.bytes.size();
     const size_t writtenBytes = std::min(packet.writeOffset, totalBytes);
     const size_t remainingBytes = totalBytes - writtenBytes;
@@ -2256,7 +2260,7 @@ uint64_t KodiTrueHdAEEngine::QueueBytesLocked() const
   }
   if (steadyStatePendingPackedOutput_.has_value())
   {
-    const auto& packet = *steadyStatePendingPackedOutput_;
+    const auto& packet = steadyStatePendingPackedOutput_->packet;
     const size_t totalBytes = packet.bytes.size();
     const size_t writtenBytes = std::min(packet.writeOffset, totalBytes);
     total += static_cast<uint64_t>(totalBytes - writtenBytes);
@@ -2281,7 +2285,7 @@ uint64_t KodiTrueHdAEEngine::GetSubmittedOutputFramesLocked() const
   }
   if (steadyStatePendingPackedOutput_.has_value()) {
       submittedFrames += static_cast<uint64_t>(
-          std::min(steadyStatePendingPackedOutput_->writeOffset, steadyStatePendingPackedOutput_->bytes.size()) /
+          std::min(steadyStatePendingPackedOutput_->packet.writeOffset, steadyStatePendingPackedOutput_->packet.bytes.size()) /
           static_cast<size_t>(output_.FrameSizeBytes()));
   }
   return submittedFrames;
@@ -2554,11 +2558,12 @@ void KodiTrueHdAEEngine::InvalidateCurrentOutputLocked()
   if (startupPendingPackedOutput_.has_value())
     startupPendingPackedOutput_->writeOffset = 0;
   if (steadyStatePendingPackedOutput_.has_value())
-    steadyStatePendingPackedOutput_->writeOffset = 0;
+    steadyStatePendingPackedOutput_->packet.writeOffset = 0;
   if (pendingPcmOutput_.has_value())
     pendingPcmOutput_->writeOffset = 0;
   startupRetryState_.Reset();
-  steadyStateRetryState_.Reset();
+  if (steadyStatePendingPackedOutput_.has_value())
+    steadyStatePendingPackedOutput_->retryState.Reset();
   ResetPositionLocked();
 }
 
