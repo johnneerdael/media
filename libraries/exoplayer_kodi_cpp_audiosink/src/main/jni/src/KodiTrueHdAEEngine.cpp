@@ -69,6 +69,56 @@ bool KodiTrueHdAEEngine::HasReachedSteadyStatePendingPackedHandoffLocked()
   return playedSincePlay > 0 || framesSincePlay >= handoffFrames;
 }
 
+std::optional<KodiTrueHdAEEngine::PendingPassthroughInput>&
+KodiTrueHdAEEngine::GetPendingPassthroughInputSlotLocked(PendingPassthroughOwner owner)
+{
+  return owner == PendingPassthroughOwner::STARTUP ? startupPendingPassthroughInput_
+                                                   : steadyStatePendingPassthroughInput_;
+}
+
+const std::optional<KodiTrueHdAEEngine::PendingPassthroughInput>&
+KodiTrueHdAEEngine::GetPendingPassthroughInputSlotLocked(PendingPassthroughOwner owner) const
+{
+  return owner == PendingPassthroughOwner::STARTUP ? startupPendingPassthroughInput_
+                                                   : steadyStatePendingPassthroughInput_;
+}
+
+KodiTrueHdAEEngine::PendingPassthroughOwner
+KodiTrueHdAEEngine::GetWritableTrueHdPendingPassthroughOwnerLocked()
+{
+  if (startupPendingPassthroughInput_.has_value())
+    return PendingPassthroughOwner::STARTUP;
+  if (steadyStatePendingPassthroughInput_.has_value())
+    return PendingPassthroughOwner::STEADY_STATE;
+
+  const bool steadyStateReady = HasReachedSteadyStatePendingPackedHandoffLocked() &&
+                                !startupPendingPackedOutput_.has_value();
+  return steadyStateReady ? PendingPassthroughOwner::STEADY_STATE
+                          : PendingPassthroughOwner::STARTUP;
+}
+
+KodiTrueHdAEEngine::PendingPassthroughOwner
+KodiTrueHdAEEngine::GetActiveTrueHdPendingPassthroughOwnerLocked()
+{
+  if (startupPendingPassthroughInput_.has_value())
+    return PendingPassthroughOwner::STARTUP;
+  if (steadyStatePendingPassthroughInput_.has_value())
+    return PendingPassthroughOwner::STEADY_STATE;
+  return GetWritableTrueHdPendingPassthroughOwnerLocked();
+}
+
+std::optional<KodiTrueHdAEEngine::PendingPassthroughInput>*
+KodiTrueHdAEEngine::GetCurrentTrueHdPendingPassthroughInputSlotLocked()
+{
+  if (startupPendingPackedOutput_.has_value())
+    return &startupPendingPassthroughInput_;
+  if (steadyStatePendingPackedOutput_.has_value())
+    return &steadyStatePendingPassthroughInput_;
+
+  auto owner = GetActiveTrueHdPendingPassthroughOwnerLocked();
+  return &GetPendingPassthroughInputSlotLocked(owner);
+}
+
 int64_t KodiTrueHdAEEngine::ComputeSteadyStateRetryBackoffUsLocked(
     const KodiPackedAccessUnit& packet,
     int remainingBytes) const
@@ -280,10 +330,17 @@ bool KodiTrueHdAEEngine::ShouldRetrySteadyStatePendingPackedRemainderLocked(int6
 
 void KodiTrueHdAEEngine::CompactPendingPassthroughInputLocked()
 {
-  if (!pendingPassthroughInput_.has_value())
+  CompactPendingPassthroughInputLocked(startupPendingPassthroughInput_);
+  CompactPendingPassthroughInputLocked(steadyStatePendingPassthroughInput_);
+}
+
+void KodiTrueHdAEEngine::CompactPendingPassthroughInputLocked(
+    std::optional<PendingPassthroughInput>& pendingInput)
+{
+  if (!pendingInput.has_value())
     return;
 
-  auto& input = *pendingPassthroughInput_;
+  auto& input = *pendingInput;
   if (input.acknowledgedBytes <= 0)
     return;
 
@@ -298,15 +355,22 @@ void KodiTrueHdAEEngine::CompactPendingPassthroughInputLocked()
   input.ptsUs = NO_PTS;
 
   if (input.bytes.empty())
-    pendingPassthroughInput_.reset();
+    pendingInput.reset();
 }
 
 bool KodiTrueHdAEEngine::HasPendingPassthroughInputLocked() const
 {
-  if (!pendingPassthroughInput_.has_value())
+  return HasPendingPassthroughInputLocked(startupPendingPassthroughInput_) ||
+         HasPendingPassthroughInputLocked(steadyStatePendingPassthroughInput_);
+}
+
+bool KodiTrueHdAEEngine::HasPendingPassthroughInputLocked(
+    const std::optional<PendingPassthroughInput>& pendingInput) const
+{
+  if (!pendingInput.has_value())
     return false;
 
-  const auto& input = *pendingPassthroughInput_;
+  const auto& input = *pendingInput;
   const size_t totalBytes = input.bytes.size();
   const size_t acknowledgedBytes =
       std::min<size_t>(static_cast<size_t>(std::max(0, input.acknowledgedBytes)), totalBytes);
@@ -328,7 +392,8 @@ bool KodiTrueHdAEEngine::Configure(const ActiveAE::CActiveAEMediaSettings& confi
   hasPendingData_ = false;
   directPlaybackSupportState_ = -1;
 
-  pendingPassthroughInput_.reset();
+  startupPendingPassthroughInput_.reset();
+  steadyStatePendingPassthroughInput_.reset();
   startupPendingPackedOutput_.reset();
   steadyStatePendingPackedOutput_.reset();
   startupRetryState_.Reset();
@@ -405,7 +470,7 @@ void KodiTrueHdAEEngine::Play()
             "pendingInput={} pendingPacked={} pendingPcm={} totalWrittenFrames={} safePlayedFrames={}",
             prePlayAcceptGapUs,
             prePlayWriteGapUs,
-            pendingPassthroughInput_.has_value() ? 1 : 0,
+            HasPendingPassthroughInputLocked() ? 1 : 0,
             (startupPendingPackedOutput_.has_value() || steadyStatePendingPackedOutput_.has_value()) ? 1 : 0,
             pendingPcmOutput_.has_value() ? 1 : 0,
             totalWrittenFrames_,
@@ -431,7 +496,8 @@ void KodiTrueHdAEEngine::Flush()
   std::unique_lock lock(lock_);
   playRequested_ = false;
   outputStarted_ = false;
-  pendingPassthroughInput_.reset();
+  startupPendingPassthroughInput_.reset();
+  steadyStatePendingPassthroughInput_.reset();
   startupPendingPackedOutput_.reset();
   steadyStatePendingPackedOutput_.reset();
   startupRetryState_.Reset();
@@ -470,7 +536,7 @@ void KodiTrueHdAEEngine::HandleDiscontinuity()
               "KodiTrueHdAEEngine::HandleDiscontinuity phase={} pendingInput={} pendingPacked={} "
               "pendingPcm={} totalWrittenFrames={} safePlayedFrames={}",
               StartupPhaseToString(startupPhase_),
-              pendingPassthroughInput_.has_value() ? 1 : 0,
+              HasPendingPassthroughInputLocked() ? 1 : 0,
               (startupPendingPackedOutput_.has_value() || steadyStatePendingPackedOutput_.has_value()) ? 1 : 0,
               pendingPcmOutput_.has_value() ? 1 : 0,
               totalWrittenFrames_,
@@ -528,7 +594,7 @@ bool KodiTrueHdAEEngine::HasPendingData()
   if (!configured_)
     return false;
 
-  if (pendingPassthroughInput_.has_value() || (startupPendingPackedOutput_.has_value() || steadyStatePendingPackedOutput_.has_value()) ||
+  if (HasPendingPassthroughInputLocked() || (startupPendingPackedOutput_.has_value() || steadyStatePendingPackedOutput_.has_value()) ||
       pendingPcmOutput_.has_value() || iecPipeline_.HasParserBacklog())
     return true;
 
@@ -749,7 +815,8 @@ void KodiTrueHdAEEngine::Reset()
   lastWriteOutputBytes_ = 0;
   lastWriteErrorCode_ = 0;
   lastWriteDiagnosticDetail_.clear();
-  pendingPassthroughInput_.reset();
+  startupPendingPassthroughInput_.reset();
+  steadyStatePendingPassthroughInput_.reset();
   startupPendingPackedOutput_.reset();
   steadyStatePendingPackedOutput_.reset();
   startupRetryState_.Reset();
@@ -782,6 +849,7 @@ int KodiTrueHdAEEngine::WritePassthroughLockedBaseline(const uint8_t* data,
                                                        int64_t ptsUs,
                                                        int encodedAccessUnitCount)
 {
+  auto& pendingInput = startupPendingPassthroughInput_;
 
   (void)encodedAccessUnitCount;
   if (data == nullptr || size <= 0)
@@ -792,25 +860,24 @@ int KodiTrueHdAEEngine::WritePassthroughLockedBaseline(const uint8_t* data,
   if ((startupPendingPackedOutput_.has_value() || steadyStatePendingPackedOutput_.has_value()))
   {
     acknowledgedThisCall = FlushPackedQueueToHardwareLocked();
-    if (acknowledgedThisCall > 0 && pendingPassthroughInput_.has_value())
+    if (acknowledgedThisCall > 0 && pendingInput.has_value())
     {
-      pendingPassthroughInput_->acknowledgedBytes += acknowledgedThisCall;
+      pendingInput->acknowledgedBytes += acknowledgedThisCall;
       iecPipeline_.AcknowledgeConsumedInputBytes(acknowledgedThisCall);
-      if (pendingPassthroughInput_->acknowledgedBytes >=
-          static_cast<int>(pendingPassthroughInput_->bytes.size()))
+      if (pendingInput->acknowledgedBytes >= static_cast<int>(pendingInput->bytes.size()))
       {
-        pendingPassthroughInput_.reset();
+        pendingInput.reset();
       }
       return acknowledgedThisCall;
     }
-    if ((startupPendingPackedOutput_.has_value() || steadyStatePendingPackedOutput_.has_value()) || pendingPassthroughInput_.has_value())
+    if ((startupPendingPackedOutput_.has_value() || steadyStatePendingPackedOutput_.has_value()) || pendingInput.has_value())
       return 0;
   }
 
   if (startMediaTimeUsNeedsSync_ && !TryResolvePendingDiscontinuityLocked())
     return 0;
 
-  if (!pendingPassthroughInput_.has_value())
+  if (!pendingInput.has_value())
   {
     PendingPassthroughInput input;
     input.bytes.assign(data, data + size);
@@ -818,12 +885,12 @@ int KodiTrueHdAEEngine::WritePassthroughLockedBaseline(const uint8_t* data,
     input.acknowledgedBytes = 0;
     input.ptsUs = ptsUs;
     input.encodedAccessUnitCount = std::max(1, encodedAccessUnitCount);
-    pendingPassthroughInput_ = std::move(input);
+    pendingInput = std::move(input);
   }
 
-  if (!(startupPendingPackedOutput_.has_value() || steadyStatePendingPackedOutput_.has_value()) && pendingPassthroughInput_.has_value())
+  if (!(startupPendingPackedOutput_.has_value() || steadyStatePendingPackedOutput_.has_value()) && pendingInput.has_value())
   {
-    auto& input = *pendingPassthroughInput_;
+    auto& input = *pendingInput;
     KodiPackedAccessUnit packet;
     bool emittedPacket = false;
     const int remaining =
@@ -841,16 +908,16 @@ int KodiTrueHdAEEngine::WritePassthroughLockedBaseline(const uint8_t* data,
     }
   }
 
-  if (pendingPassthroughInput_.has_value() && !(startupPendingPackedOutput_.has_value() || steadyStatePendingPackedOutput_.has_value()) &&
-      pendingPassthroughInput_->feedOffset >= pendingPassthroughInput_->bytes.size())
+  if (pendingInput.has_value() && !(startupPendingPackedOutput_.has_value() || steadyStatePendingPackedOutput_.has_value()) &&
+      pendingInput->feedOffset >= pendingInput->bytes.size())
   {
-    const int absorbedBytes = static_cast<int>(pendingPassthroughInput_->feedOffset) -
-                              pendingPassthroughInput_->acknowledgedBytes;
+    const int absorbedBytes =
+        static_cast<int>(pendingInput->feedOffset) - pendingInput->acknowledgedBytes;
     if (absorbedBytes > 0)
     {
-      pendingPassthroughInput_->acknowledgedBytes += absorbedBytes;
+      pendingInput->acknowledgedBytes += absorbedBytes;
       iecPipeline_.AcknowledgeConsumedInputBytes(absorbedBytes);
-      pendingPassthroughInput_.reset();
+      pendingInput.reset();
       return absorbedBytes;
     }
   }
@@ -865,14 +932,13 @@ int KodiTrueHdAEEngine::WritePassthroughLockedBaseline(const uint8_t* data,
   acknowledgedThisCall = FlushPackedQueueToHardwareLocked();
   StartOutputIfPrimedLocked();
 
-  if (acknowledgedThisCall > 0 && pendingPassthroughInput_.has_value())
+  if (acknowledgedThisCall > 0 && pendingInput.has_value())
   {
-    pendingPassthroughInput_->acknowledgedBytes += acknowledgedThisCall;
+    pendingInput->acknowledgedBytes += acknowledgedThisCall;
     iecPipeline_.AcknowledgeConsumedInputBytes(acknowledgedThisCall);
-    if (pendingPassthroughInput_->acknowledgedBytes >=
-        static_cast<int>(pendingPassthroughInput_->bytes.size()))
+    if (pendingInput->acknowledgedBytes >= static_cast<int>(pendingInput->bytes.size()))
     {
-      pendingPassthroughInput_.reset();
+      pendingInput.reset();
     }
     return acknowledgedThisCall;
   }
@@ -882,7 +948,7 @@ int KodiTrueHdAEEngine::WritePassthroughLockedBaseline(const uint8_t* data,
     CLog::Log(LOGINFO,
               "KodiTrueHdAEEngine::WritePassthroughLocked paused backpressure pendingInput={} "
               "pendingPacked={} queuedDurationUs={} queuedBytes={}",
-              pendingPassthroughInput_.has_value() ? 1 : 0,
+              pendingInput.has_value() ? 1 : 0,
               (startupPendingPackedOutput_.has_value() || steadyStatePendingPackedOutput_.has_value()) ? 1 : 0,
               QueueDurationUsLocked(),
               QueueBytesLocked());
@@ -910,12 +976,16 @@ int KodiTrueHdAEEngine::WriteTrueHdPassthroughLocked(const uint8_t* data,
     if ((startupPendingPackedOutput_.has_value() || steadyStatePendingPackedOutput_.has_value()))
     {
       acknowledgedThisCall = FlushPackedQueueToHardwareLocked();
-      if (acknowledgedThisCall > 0 && pendingPassthroughInput_.has_value())
+      if (acknowledgedThisCall > 0)
       {
-        pendingPassthroughInput_->acknowledgedBytes += acknowledgedThisCall;
-        iecPipeline_.AcknowledgeConsumedInputBytes(acknowledgedThisCall);
-        CompactPendingPassthroughInputLocked();
-        totalAcknowledgedThisCall += acknowledgedThisCall;
+        auto* pendingInputSlot = GetCurrentTrueHdPendingPassthroughInputSlotLocked();
+        if (pendingInputSlot != nullptr && pendingInputSlot->has_value())
+        {
+          pendingInputSlot->value().acknowledgedBytes += acknowledgedThisCall;
+          iecPipeline_.AcknowledgeConsumedInputBytes(acknowledgedThisCall);
+          CompactPendingPassthroughInputLocked(*pendingInputSlot);
+          totalAcknowledgedThisCall += acknowledgedThisCall;
+        }
       }
       if ((startupPendingPackedOutput_.has_value() || steadyStatePendingPackedOutput_.has_value()))
         return totalAcknowledgedThisCall;
@@ -931,7 +1001,7 @@ int KodiTrueHdAEEngine::WriteTrueHdPassthroughLocked(const uint8_t* data,
                   "safePlayedFrames={}",
                   StartupPhaseToString(startupPhase_),
                   totalAcknowledgedThisCall,
-                  pendingPassthroughInput_.has_value() ? 1 : 0,
+                  HasPendingPassthroughInputLocked() ? 1 : 0,
                   (startupPendingPackedOutput_.has_value() || steadyStatePendingPackedOutput_.has_value()) ? 1 : 0,
                   totalWrittenFrames_,
                   GetSafePlayedFramesLocked());
@@ -939,7 +1009,8 @@ int KodiTrueHdAEEngine::WriteTrueHdPassthroughLocked(const uint8_t* data,
       return totalAcknowledgedThisCall;
     }
 
-    if (!pendingPassthroughInput_.has_value())
+    auto* pendingInputSlot = GetCurrentTrueHdPendingPassthroughInputSlotLocked();
+    if (pendingInputSlot == nullptr || !pendingInputSlot->has_value())
     {
       PendingPassthroughInput input;
       input.bytes.assign(data, data + size);
@@ -947,16 +1018,19 @@ int KodiTrueHdAEEngine::WriteTrueHdPassthroughLocked(const uint8_t* data,
       input.acknowledgedBytes = 0;
       input.ptsUs = ptsUs;
       input.encodedAccessUnitCount = std::max(1, encodedAccessUnitCount);
-      pendingPassthroughInput_ = std::move(input);
+      auto owner = GetWritableTrueHdPendingPassthroughOwnerLocked();
+      auto& pendingInput = GetPendingPassthroughInputSlotLocked(owner);
+      pendingInput = std::move(input);
+      pendingInputSlot = &pendingInput;
     }
     else
     {
-      CompactPendingPassthroughInputLocked();
-      if (!pendingPassthroughInput_.has_value())
+      CompactPendingPassthroughInputLocked(*pendingInputSlot);
+      if (!pendingInputSlot->has_value())
       {
         continue;
       }
-      auto& input = *pendingPassthroughInput_;
+      auto& input = pendingInputSlot->value();
       const int currentBufferedBytes = static_cast<int>(input.bytes.size());
       if (size > currentBufferedBytes && config_.iecVerboseLogging)
       {
@@ -970,9 +1044,10 @@ int KodiTrueHdAEEngine::WriteTrueHdPassthroughLocked(const uint8_t* data,
       }
     }
 
-    if (!(startupPendingPackedOutput_.has_value() || steadyStatePendingPackedOutput_.has_value()) && pendingPassthroughInput_.has_value())
+    if (!(startupPendingPackedOutput_.has_value() || steadyStatePendingPackedOutput_.has_value()) &&
+        pendingInputSlot != nullptr && pendingInputSlot->has_value())
     {
-      auto& input = *pendingPassthroughInput_;
+      auto& input = pendingInputSlot->value();
       KodiPackedAccessUnit packet;
       bool emittedPacket = false;
       const int remaining =
@@ -1005,48 +1080,62 @@ int KodiTrueHdAEEngine::WriteTrueHdPassthroughLocked(const uint8_t* data,
       {
         packet.packetId = nextPackedPacketId_++;
         RecordPackedBurstLocked(packet);
-        if (HasReachedSteadyStatePendingPackedHandoffLocked() && !startupPendingPackedOutput_.has_value()) {
-            steadyStatePendingPackedOutput_ = std::move(packet);
-            steadyStateRetryState_.Reset();
-        } else {
-            startupPendingPackedOutput_ = std::move(packet);
-            startupRetryState_.Reset();
+        if (GetActiveTrueHdPendingPassthroughOwnerLocked() == PendingPassthroughOwner::STEADY_STATE)
+        {
+          steadyStatePendingPackedOutput_ = std::move(packet);
+          steadyStateRetryState_.Reset();
+        }
+        else
+        {
+          startupPendingPackedOutput_ = std::move(packet);
+          startupRetryState_.Reset();
         }
       }
     }
 
-    if (pendingPassthroughInput_.has_value() && !(startupPendingPackedOutput_.has_value() || steadyStatePendingPackedOutput_.has_value()) &&
-        pendingPassthroughInput_->feedOffset >= pendingPassthroughInput_->bytes.size())
+    if (pendingInputSlot != nullptr && pendingInputSlot->has_value() &&
+        !(startupPendingPackedOutput_.has_value() || steadyStatePendingPackedOutput_.has_value()) &&
+        pendingInputSlot->value().feedOffset >= pendingInputSlot->value().bytes.size())
     {
-      const int absorbedBytes = static_cast<int>(pendingPassthroughInput_->feedOffset) -
-                                pendingPassthroughInput_->acknowledgedBytes;
+      auto& input = pendingInputSlot->value();
+      const int absorbedBytes = static_cast<int>(input.feedOffset) - input.acknowledgedBytes;
       if (absorbedBytes > 0)
       {
-        pendingPassthroughInput_->acknowledgedBytes += absorbedBytes;
+        input.acknowledgedBytes += absorbedBytes;
         iecPipeline_.AcknowledgeConsumedInputBytes(absorbedBytes);
-        CompactPendingPassthroughInputLocked();
+        CompactPendingPassthroughInputLocked(*pendingInputSlot);
         totalAcknowledgedThisCall += absorbedBytes;
         return totalAcknowledgedThisCall;
       }
     }
 
-    if ((startupPendingPackedOutput_.has_value() || steadyStatePendingPackedOutput_.has_value()) && !output_.IsConfigured())
-      if (startupPendingPackedOutput_.has_value()) {
+    if ((startupPendingPackedOutput_.has_value() || steadyStatePendingPackedOutput_.has_value()) &&
+        !output_.IsConfigured())
+    {
+      if (startupPendingPackedOutput_.has_value())
+      {
         EnsurePassthroughOutputConfiguredLocked(*startupPendingPackedOutput_);
-      } else if (steadyStatePendingPackedOutput_.has_value()) {
+      }
+      else if (steadyStatePendingPackedOutput_.has_value())
+      {
         EnsurePassthroughOutputConfiguredLocked(*steadyStatePendingPackedOutput_);
       }
+    }
     acknowledgedThisCall = FlushPackedQueueToHardwareLocked();
     StartOutputIfPrimedLocked();
 
-    if (acknowledgedThisCall > 0 && pendingPassthroughInput_.has_value())
+    if (acknowledgedThisCall > 0)
     {
-      pendingPassthroughInput_->acknowledgedBytes += acknowledgedThisCall;
-      iecPipeline_.AcknowledgeConsumedInputBytes(acknowledgedThisCall);
-      CompactPendingPassthroughInputLocked();
-      totalAcknowledgedThisCall += acknowledgedThisCall;
-      ++burstIterations;
-      continue;
+      pendingInputSlot = GetCurrentTrueHdPendingPassthroughInputSlotLocked();
+      if (pendingInputSlot != nullptr && pendingInputSlot->has_value())
+      {
+        pendingInputSlot->value().acknowledgedBytes += acknowledgedThisCall;
+        iecPipeline_.AcknowledgeConsumedInputBytes(acknowledgedThisCall);
+        CompactPendingPassthroughInputLocked(*pendingInputSlot);
+        totalAcknowledgedThisCall += acknowledgedThisCall;
+        ++burstIterations;
+        continue;
+      }
     }
 
     break;
@@ -1060,7 +1149,7 @@ int KodiTrueHdAEEngine::WriteTrueHdPassthroughLocked(const uint8_t* data,
     CLog::Log(LOGINFO,
               "KodiTrueHdAEEngine::WritePassthroughLocked paused backpressure pendingInput={} "
               "pendingPacked={} queuedDurationUs={} queuedBytes={}",
-              pendingPassthroughInput_.has_value() ? 1 : 0,
+              HasPendingPassthroughInputLocked() ? 1 : 0,
               (startupPendingPackedOutput_.has_value() || steadyStatePendingPackedOutput_.has_value()) ? 1 : 0,
               QueueDurationUsLocked(),
               QueueBytesLocked());
@@ -2319,7 +2408,7 @@ void KodiTrueHdAEEngine::SetStartupPhaseLocked(StartupPhase phase)
               "KodiTrueHdAEEngine::Startup phase={} pendingInput={} pendingPacked={} pendingPcm={} totalWrittenFrames={} "
               "submittedFrames={} safePlayedFrames={}",
               StartupPhaseToString(phase),
-              pendingPassthroughInput_.has_value() ? 1 : 0,
+              HasPendingPassthroughInputLocked() ? 1 : 0,
               (startupPendingPackedOutput_.has_value() || steadyStatePendingPackedOutput_.has_value()) ? 1 : 0,
               pendingPcmOutput_.has_value() ? 1 : 0,
               totalWrittenFrames_,
