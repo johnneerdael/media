@@ -35,6 +35,7 @@ REQUIRED_DECODERS=(
     mp3
     ac3
     eac3
+    ac4
     truehd
     dca
     vorbis

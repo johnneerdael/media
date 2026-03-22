@@ -254,6 +254,8 @@ public final class FfmpegLibrary {
       case MimeTypes.AUDIO_E_AC3:
       case MimeTypes.AUDIO_E_AC3_JOC:
         return "eac3";
+      case MimeTypes.AUDIO_AC4:
+        return "ac4";
       case MimeTypes.AUDIO_TRUEHD:
         return "truehd";
       case MimeTypes.AUDIO_DTS:

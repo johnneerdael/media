@@ -25,6 +25,7 @@ public final class FfmpegLibraryCodecNameTest {
   @Test
   public void getCodecName_mapsHighValueSoftwareFallbackFormats() {
     assertThat(FfmpegLibrary.getCodecName(MimeTypes.AUDIO_DTS_HD)).isEqualTo("dca");
+    assertThat(FfmpegLibrary.getCodecName(MimeTypes.AUDIO_AC4)).isEqualTo("ac4");
     assertThat(FfmpegLibrary.getCodecName(MimeTypes.AUDIO_TRUEHD)).isEqualTo("truehd");
     assertThat(FfmpegLibrary.getCodecName(MimeTypes.VIDEO_VC1)).isEqualTo("vc1");
     assertThat(FfmpegLibrary.getCodecName(MimeTypes.VIDEO_AV1)).isEqualTo("av1");
