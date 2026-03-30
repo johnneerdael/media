@@ -15,9 +15,12 @@
  */
 package androidx.media3.decoder.av1;
 
+import static com.google.common.truth.Truth.assertThat;
+
 import androidx.media3.common.C;
 import androidx.media3.test.utils.DefaultRenderersFactoryAsserts;
 import androidx.test.ext.junit.runners.AndroidJUnit4;
+import java.lang.reflect.Field;
 import org.junit.Test;
 import org.junit.runner.RunWith;
 
@@ -29,5 +32,24 @@ public final class DefaultRenderersFactoryTest {
   public void createRenderers_instantiatesDav1dRenderer() {
     DefaultRenderersFactoryAsserts.assertExtensionRendererCreated(
         Libdav1dVideoRenderer.class, C.TRACK_TYPE_VIDEO);
+  }
+
+  @Test
+  public void defaultConstructor_usesPlaybackFriendlyDav1dTuning() throws Exception {
+    Libdav1dVideoRenderer renderer =
+        new Libdav1dVideoRenderer(
+            /* allowedJoiningTimeMs= */ 0,
+            /* eventHandler= */ null,
+            /* eventListener= */ null,
+            /* maxDroppedFramesToNotify= */ 0);
+
+    Field threadsField = Libdav1dVideoRenderer.class.getDeclaredField("threads");
+    threadsField.setAccessible(true);
+    Field maxFrameDelayField = Libdav1dVideoRenderer.class.getDeclaredField("maxFrameDelay");
+    maxFrameDelayField.setAccessible(true);
+
+    assertThat((int) threadsField.get(renderer))
+        .isEqualTo(Libdav1dVideoRenderer.THREAD_COUNT_EXPERIMENTAL);
+    assertThat((int) maxFrameDelayField.get(renderer)).isEqualTo(1);
   }
 }
