@@ -46,19 +46,31 @@ fi
 rm -rf "${AV1_MODULE_PATH}/jni/nativelib"
 echo "Cleaned old pre-built libraries."
 
-# Map Android ABIs to their NDK toolchain prefix.
-declare -A NDK_TARGET_MAP
-NDK_TARGET_MAP["arm64-v8a"]="aarch64-linux-android21"
-NDK_TARGET_MAP["armeabi-v7a"]="armv7a-linux-androideabi21"
-NDK_TARGET_MAP["x86_64"]="x86_64-linux-android21"
-NDK_TARGET_MAP["x86"]="i686-linux-android21"
+get_ndk_target() {
+    case "$1" in
+        arm64-v8a) echo "aarch64-linux-android21" ;;
+        armeabi-v7a) echo "armv7a-linux-androideabi21" ;;
+        x86_64) echo "x86_64-linux-android21" ;;
+        x86) echo "i686-linux-android21" ;;
+        *)
+            echo "Unsupported Android ABI: $1" >&2
+            return 1
+            ;;
+    esac
+}
 
-# Map meson cross-file names to Android ABIs.
-declare -A ABI_MAP
-ABI_MAP["arm64-v8a"]="aarch64-android"
-ABI_MAP["armeabi-v7a"]="arm-android"
-ABI_MAP["x86_64"]="x86_64-android"
-ABI_MAP["x86"]="x86-android"
+get_cross_file_name() {
+    case "$1" in
+        arm64-v8a) echo "aarch64-android.meson" ;;
+        armeabi-v7a) echo "arm-android.meson" ;;
+        x86_64) echo "x86_64-android.meson" ;;
+        x86) echo "x86-android.meson" ;;
+        *)
+            echo "Unsupported Android ABI: $1" >&2
+            return 1
+            ;;
+    esac
+}
 
 # Change into the dav1d source directory to run the build commands.
 cd "${DAV1D_SOURCE_PATH}"
@@ -69,9 +81,9 @@ trap 'rm -rf "${BUILD_ROOT}"' EXIT
 echo "Created temporary build root: ${BUILD_ROOT}"
 
 
-for android_abi in "${!ABI_MAP[@]}"; do
-    ndk_target=${NDK_TARGET_MAP[$android_abi]}
-    original_cross_file="${ABI_MAP[$android_abi]}.meson"
+for android_abi in arm64-v8a armeabi-v7a x86_64 x86; do
+    ndk_target=$(get_ndk_target "${android_abi}")
+    original_cross_file=$(get_cross_file_name "${android_abi}")
 
     echo "Building dav1d for ${android_abi}..."
     # Create a dedicated build directory for this ABI.

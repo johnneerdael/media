@@ -47,7 +47,7 @@ public class Libdav1dVideoRenderer extends DecoderVideoRenderer {
   private static final String TAG = "Libdav1dVideoRenderer";
   private static final int DEFAULT_NUM_OF_INPUT_BUFFERS = 4;
   private static final int DEFAULT_NUM_OF_OUTPUT_BUFFERS = 4;
-  private static final int DEFAULT_MAX_FRAME_DELAY = 2;
+  private static final int DEFAULT_MAX_FRAME_DELAY = 1;
 
   /**
    * Default input buffer size in bytes, based on 720p resolution video compressed by a factor of
@@ -94,7 +94,7 @@ public class Libdav1dVideoRenderer extends DecoderVideoRenderer {
         eventHandler,
         eventListener,
         maxDroppedFramesToNotify,
-        THREAD_COUNT_DECODER_DEFAULT,
+        THREAD_COUNT_EXPERIMENTAL,
         DEFAULT_MAX_FRAME_DELAY,
         DEFAULT_NUM_OF_INPUT_BUFFERS,
         DEFAULT_NUM_OF_OUTPUT_BUFFERS,

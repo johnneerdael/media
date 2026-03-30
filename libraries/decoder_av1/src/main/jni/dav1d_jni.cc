@@ -53,6 +53,7 @@
 #include <vector>
 
 #include "cpu_info.h"  // NOLINT
+#include "high_bit_depth_downconversion.h"
 
 #define LOG_TAG "dav1d_jni"
 #define LOGE(...) \
@@ -286,16 +287,54 @@ void CopyFrameToDataBuffer(const Dav1dPicture* dav1d_picture, jbyte* data) {
     if (plane_index == kPlaneV) {
       stride_index = kPlaneU;
     }
-    uint64_t planeHeight = (plane_index == kPlaneY)
-                               ? dav1d_picture->p.h
-                               : ((dav1d_picture->p.h + 1) / 2);
-    uint64_t length = dav1d_picture->stride[stride_index] * planeHeight;
-    memcpy(data, dav1d_picture->data[plane_index], length);
-    data += length;
+    const int bytes_per_sample = dav1d_picture->p.bpc > 8 ? 2 : 1;
+    const uint64_t plane_height = (plane_index == kPlaneY)
+                                      ? dav1d_picture->p.h
+                                      : ((dav1d_picture->p.h + 1) / 2);
+    const int output_stride_bytes =
+        dav1d_picture->stride[stride_index] / bytes_per_sample;
+    const uint64_t output_length = output_stride_bytes * plane_height;
+    if (dav1d_picture->p.bpc == 8) {
+      memcpy(data, dav1d_picture->data[plane_index], output_length);
+    } else {
+      dav1d_jni::DownconvertHighBitDepthPlaneTo8Bit(
+          reinterpret_cast<const uint8_t*>(dav1d_picture->data[plane_index]),
+          dav1d_picture->stride[stride_index],
+          reinterpret_cast<uint8_t*>(data), output_stride_bytes,
+          output_stride_bytes, plane_height, dav1d_picture->p.bpc);
+    }
+    data += output_length;
   }
 }
 
 constexpr int AlignTo16(int value) { return (value + 15) & (~15); }
+
+int GetPlaneWidth(const Dav1dPicture* dav1d_picture, int plane_index) {
+  if (plane_index == kPlaneY || dav1d_picture->p.layout == DAV1D_PIXEL_LAYOUT_I444) {
+    return dav1d_picture->p.w;
+  }
+  if (dav1d_picture->p.layout == DAV1D_PIXEL_LAYOUT_I400) {
+    return 0;
+  }
+  return (dav1d_picture->p.w + 1) / 2;
+}
+
+int GetPlaneHeight(const Dav1dPicture* dav1d_picture, int plane_index) {
+  if (plane_index == kPlaneY || dav1d_picture->p.layout == DAV1D_PIXEL_LAYOUT_I422 ||
+      dav1d_picture->p.layout == DAV1D_PIXEL_LAYOUT_I444) {
+    return dav1d_picture->p.h;
+  }
+  if (dav1d_picture->p.layout == DAV1D_PIXEL_LAYOUT_I400) {
+    return 0;
+  }
+  return (dav1d_picture->p.h + 1) / 2;
+}
+
+int GetPlaneStride(const Dav1dPicture* dav1d_picture, int plane_index) {
+  const int stride_index = plane_index == kPlaneV ? kPlaneU : plane_index;
+  const int bytes_per_sample = dav1d_picture->p.bpc > 8 ? 2 : 1;
+  return dav1d_picture->stride[stride_index] / bytes_per_sample;
+}
 
 void CopyPlane(const uint8_t* source, int source_stride, uint8_t* destination,
                int destination_stride, int width, int height) {
@@ -303,6 +342,22 @@ void CopyPlane(const uint8_t* source, int source_stride, uint8_t* destination,
     std::memcpy(destination, source, width);
     source += source_stride;
     destination += destination_stride;
+  }
+}
+
+void CopyPlaneTo8Bit(const uint8_t* source, int source_stride_bytes,
+                     uint8_t* destination, int destination_stride_bytes,
+                     int width, int height, int bit_depth) {
+  if (width <= 0 || height <= 0) {
+    return;
+  }
+  if (bit_depth == 8) {
+    CopyPlane(source, source_stride_bytes, destination, destination_stride_bytes,
+              width, height);
+  } else {
+    dav1d_jni::DownconvertHighBitDepthPlaneTo8Bit(
+        source, source_stride_bytes, destination, destination_stride_bytes,
+        width, height, bit_depth);
   }
 }
 
@@ -718,13 +773,13 @@ DECODER_FUNC(jint, dav1dGetFrame, jlong jContext, jobject jOutputBuffer) {
     context->jni_status_code = kJniStatusBufferInitError;
     return kStatusError;
   }
-  if (dav1d_picture->p.bpc != 8) {
-    context->jni_status_code = kJniStatusHighBitDepthNotSupportedWithYuv;
-    return kStatusError;
-  }
   if (returned_user_data->output_mode == kOutputModeYuv) {
     jboolean init_result;
-    if (context->use_custom_allocator) {
+    const int output_y_stride = GetPlaneStride(dav1d_picture.get(), kPlaneY);
+    const int output_uv_stride = GetPlaneStride(dav1d_picture.get(), kPlaneU);
+    const bool use_direct_output_buffer =
+        context->use_custom_allocator && dav1d_picture->p.bpc == 8;
+    if (use_direct_output_buffer) {
       PictureAllocatorData* allocator_data =
           reinterpret_cast<PictureAllocatorData*>(
               dav1d_picture->allocator_data);
@@ -736,12 +791,10 @@ DECODER_FUNC(jint, dav1dGetFrame, jlong jContext, jobject jOutputBuffer) {
           dav1d_picture->stride[kPlaneY], dav1d_picture->stride[kPlaneU],
           GetColorSpace(dav1d_picture->seq_hdr->pri),
           allocator_data->aligned_height);
-      CleanUpAllocatorData(jContext, env);
     } else {
       init_result = env->CallBooleanMethod(
           jOutputBuffer, context->init_for_yuv_frame_method, dav1d_picture->p.w,
-          dav1d_picture->p.h, dav1d_picture->stride[kPlaneY],
-          dav1d_picture->stride[kPlaneU],
+          dav1d_picture->p.h, output_y_stride, output_uv_stride,
           GetColorSpace(dav1d_picture->seq_hdr->pri));
     }
     if (!init_result) {
@@ -753,7 +806,10 @@ DECODER_FUNC(jint, dav1dGetFrame, jlong jContext, jobject jOutputBuffer) {
       context->jni_status_code = kJniStatusBufferResizeError;
       return kStatusError;
     }
-    if (!context->use_custom_allocator) {
+    if (context->use_custom_allocator) {
+      CleanUpAllocatorData(jContext, env);
+    }
+    if (!use_direct_output_buffer) {
       const jobject data_object =
           env->GetObjectField(jOutputBuffer, context->data_field);
       jbyte* const data =
@@ -814,10 +870,11 @@ DECODER_FUNC(jint, dav1dRenderFrame, jlong jContext, jobject jSurface,
     return kStatusError;
   }
   // Y plane
-  CopyPlane(reinterpret_cast<const uint8_t*>(dav1d_picture->data[kPlaneY]),
-            dav1d_picture->stride[kPlaneY],
-            reinterpret_cast<uint8_t*>(native_window_buffer.bits),
-            native_window_buffer.stride, width, height);
+  CopyPlaneTo8Bit(reinterpret_cast<const uint8_t*>(dav1d_picture->data[kPlaneY]),
+                  dav1d_picture->stride[kPlaneY],
+                  reinterpret_cast<uint8_t*>(native_window_buffer.bits),
+                  native_window_buffer.stride, GetPlaneWidth(dav1d_picture, kPlaneY),
+                  GetPlaneHeight(dav1d_picture, kPlaneY), dav1d_picture->p.bpc);
 
   const int y_plane_size =
       native_window_buffer.stride * native_window_buffer.height;
@@ -832,20 +889,23 @@ DECODER_FUNC(jint, dav1dRenderFrame, jlong jContext, jobject jSurface,
   // V plane
   // Since the format for ANativeWindow is YV12, V plane is being processed
   // before U plane.
-  CopyPlane(
+  CopyPlaneTo8Bit(
       reinterpret_cast<const uint8_t*>(dav1d_picture->data[kPlaneV]),
       dav1d_picture->stride[kPlaneU],
       reinterpret_cast<uint8_t*>(native_window_buffer.bits) + y_plane_size,
-      native_window_buffer_uv_stride, width / 2, uv_plane_height);
+      native_window_buffer_uv_stride, GetPlaneWidth(dav1d_picture, kPlaneV),
+      GetPlaneHeight(dav1d_picture, kPlaneV), dav1d_picture->p.bpc);
 
   const int v_plane_size = uv_plane_height * native_window_buffer_uv_stride;
 
   // U plane
-  CopyPlane(reinterpret_cast<const uint8_t*>(dav1d_picture->data[kPlaneU]),
-            dav1d_picture->stride[kPlaneU],
-            reinterpret_cast<uint8_t*>(native_window_buffer.bits) +
-                y_plane_size + v_plane_size,
-            native_window_buffer_uv_stride, width / 2, uv_plane_height);
+  CopyPlaneTo8Bit(
+      reinterpret_cast<const uint8_t*>(dav1d_picture->data[kPlaneU]),
+      dav1d_picture->stride[kPlaneU],
+      reinterpret_cast<uint8_t*>(native_window_buffer.bits) +
+          y_plane_size + v_plane_size,
+      native_window_buffer_uv_stride, GetPlaneWidth(dav1d_picture, kPlaneU),
+      GetPlaneHeight(dav1d_picture, kPlaneU), dav1d_picture->p.bpc);
 
   if (ANativeWindow_unlockAndPost(context->native_window)) {
     context->jni_status_code = kJniStatusANativeWindowError;
