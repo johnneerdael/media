@@ -27,7 +27,7 @@ set(ffmpeg_location "${CMAKE_CURRENT_SOURCE_DIR}/ffmpeg")
 set(ffmpeg_headers "${CMAKE_CURRENT_SOURCE_DIR}/ffmpeg-headers")
 set(ffmpeg_binaries "${ffmpeg_location}/android-libs/${ANDROID_ABI}")
 
-foreach(ffmpeg_lib avutil swresample swscale avcodec)
+foreach(ffmpeg_lib avutil swresample swscale avcodec avformat)
     set(ffmpeg_lib_filename lib${ffmpeg_lib}.a)
     set(ffmpeg_lib_file_path ${ffmpeg_binaries}/${ffmpeg_lib_filename})
     add_library(
@@ -74,6 +74,7 @@ endif()
 find_library(android_log_lib log)
 find_library(android_dl_lib dl)
 find_library(android_vulkan_lib vulkan)
+find_library(android_z_lib z)
 
 add_library(ffmpegJNI
             SHARED
@@ -90,6 +91,7 @@ endif()
 
 target_link_libraries(ffmpegJNI
                       PRIVATE android
+                      PRIVATE avformat
                       PRIVATE swscale
                       PRIVATE swresample
                       PRIVATE avcodec
@@ -106,6 +108,9 @@ if(android_dl_lib)
 endif()
 if(android_vulkan_lib)
     target_link_libraries(ffmpegJNI PRIVATE ${android_vulkan_lib})
+endif()
+if(android_z_lib)
+    target_link_libraries(ffmpegJNI PRIVATE ${android_z_lib})
 endif()
 
 # Additional flags needed for "arm64-v8a" from NDK 23.1.7779620 and above.

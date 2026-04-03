@@ -117,6 +117,25 @@ public final class FfmpegLibrary {
   }
 
   /**
+   * Probes a media URL for a Dolby Vision profile using the bundled FFmpeg demux stack.
+   *
+   * <p>Return values:
+   * <ul>
+   *   <li>{@code >= 0}: detected Dolby Vision profile number</li>
+   *   <li>{@code -1}: not Dolby Vision</li>
+   *   <li>{@code -2}: unknown / inconclusive</li>
+   *   <li>{@code -3}: probe failed</li>
+   * </ul>
+   */
+  public static int probeDolbyVisionProfile(
+      String url, @Nullable String requestHeadersBlob) {
+    if (!isAvailable()) {
+      return -3;
+    }
+    return ffmpegProbeDolbyVisionProfile(url, requestHeadersBlob);
+  }
+
+  /**
    * Enables an experimental native DV5 tone-mapping path in {@link FfmpegVideoDecoder}.
    *
    * <p>This only affects newly created decoders.
@@ -345,4 +364,7 @@ public final class FfmpegLibrary {
       int displayedWidth,
       int displayedHeight,
       Surface outputSurface);
+
+  private static native int ffmpegProbeDolbyVisionProfile(
+      String url, @Nullable String requestHeadersBlob);
 }

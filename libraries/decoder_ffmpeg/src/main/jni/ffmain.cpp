@@ -2,7 +2,11 @@
 extern "C" {
 #include "libavcodec/version.h"
 #include "libavcodec/defs.h"
+#include "libavcodec/packet.h"
+#include "libavformat/avformat.h"
 #include "libavutil/hwcontext.h"
+#include "libavutil/dict.h"
+#include "libavutil/dovi_meta.h"
 }
 #include "config.h"
 #include "config_components.h"
@@ -10,6 +14,8 @@ extern "C" {
 #include <cstddef>
 #include <cstdint>
 #include <atomic>
+#include <string>
+#include <algorithm>
 
 #ifndef FFMPEG_TONEMAP_FILTERS
 #define FFMPEG_TONEMAP_FILTERS 0
@@ -221,4 +227,149 @@ Java_androidx_media3_decoder_ffmpeg_FfmpegLibrary_ffmpegRenderExperimentalDv5Har
                    output_surface)
            ? JNI_TRUE
            : JNI_FALSE;
+}
+
+extern "C"
+JNIEXPORT jint JNICALL
+Java_androidx_media3_decoder_ffmpeg_FfmpegLibrary_ffmpegProbeDolbyVisionProfile(
+        JNIEnv *env,
+        jclass clazz,
+        jstring url,
+        jstring request_headers_blob) {
+    (void) clazz;
+    if (url == nullptr) {
+        return -3;
+    }
+
+    const char *url_chars = env->GetStringUTFChars(url, nullptr);
+    const char *headers_chars =
+            request_headers_blob != nullptr
+            ? env->GetStringUTFChars(request_headers_blob, nullptr)
+            : nullptr;
+
+    AVFormatContext *format_context = nullptr;
+    AVDictionary *options = nullptr;
+    avformat_network_init();
+
+    if (headers_chars != nullptr && headers_chars[0] != '\0') {
+        av_dict_set(&options, "headers", headers_chars, 0);
+    }
+
+    int open_result = avformat_open_input(&format_context, url_chars, nullptr, &options);
+    av_dict_free(&options);
+
+    if (open_result < 0 || format_context == nullptr) {
+        logError("avformat_open_input[ffmpegProbeDolbyVisionProfile]", open_result);
+        if (headers_chars != nullptr) {
+            env->ReleaseStringUTFChars(request_headers_blob, headers_chars);
+        }
+        env->ReleaseStringUTFChars(url, url_chars);
+        return -3;
+    }
+
+    int info_result = avformat_find_stream_info(format_context, nullptr);
+    if (info_result < 0) {
+        logError("avformat_find_stream_info[ffmpegProbeDolbyVisionProfile]", info_result);
+        avformat_close_input(&format_context);
+        if (headers_chars != nullptr) {
+            env->ReleaseStringUTFChars(request_headers_blob, headers_chars);
+        }
+        env->ReleaseStringUTFChars(url, url_chars);
+        return -3;
+    }
+
+    int video_stream_index = av_find_best_stream(
+            format_context,
+            AVMEDIA_TYPE_VIDEO,
+            -1,
+            -1,
+            nullptr,
+            0);
+    if (video_stream_index < 0) {
+        avformat_close_input(&format_context);
+        if (headers_chars != nullptr) {
+            env->ReleaseStringUTFChars(request_headers_blob, headers_chars);
+        }
+        env->ReleaseStringUTFChars(url, url_chars);
+        return -3;
+    }
+
+    AVStream *stream = format_context->streams[video_stream_index];
+    auto extract_profile_from_dovi_side_data =
+            [](const AVPacketSideData *side_data) -> jint {
+        if (side_data == nullptr ||
+            side_data->size < static_cast<int>(sizeof(AVDOVIDecoderConfigurationRecord))) {
+            return -1;
+        }
+        const auto *dovi =
+                reinterpret_cast<const AVDOVIDecoderConfigurationRecord *>(side_data->data);
+        return static_cast<jint>(dovi->dv_profile);
+    };
+
+    auto extract_profile_from_dovi_box = [](const uint8_t *data, size_t size) -> jint {
+        if (data == nullptr || size < 8) return -1;
+        for (size_t i = 0; i + 8 <= size; ++i) {
+            const bool has_dovi_tag =
+                    (data[i] == 'd' && data[i + 1] == 'v' &&
+                     (data[i + 2] == 'c' || data[i + 2] == 'v' || data[i + 2] == 'w') &&
+                     data[i + 3] == 'C');
+            if (!has_dovi_tag) continue;
+            if (i + 8 > size) break;
+            const uint8_t *payload = data + i + 4;
+            const uint32_t buf = (static_cast<uint32_t>(payload[2]) << 8) |
+                                 static_cast<uint32_t>(payload[3]);
+            const jint profile = static_cast<jint>((buf >> 9) & 0x7f);
+            if (profile > 0 && profile < 32) {
+                return profile;
+            }
+        }
+        return -1;
+    };
+
+    jint result = -2;
+    result = extract_profile_from_dovi_side_data(
+        av_packet_side_data_get(
+                stream->codecpar->coded_side_data,
+                stream->codecpar->nb_coded_side_data,
+                AV_PKT_DATA_DOVI_CONF));
+
+    if (result < 0) {
+        result = extract_profile_from_dovi_box(
+                stream->codecpar->extradata,
+                static_cast<size_t>(std::max(stream->codecpar->extradata_size, 0)));
+    }
+
+    if (result < 0) {
+        AVPacket packet;
+        av_init_packet(&packet);
+        int packets_scanned = 0;
+        while (packets_scanned < 12 && av_read_frame(format_context, &packet) >= 0) {
+            if (packet.stream_index == video_stream_index) {
+                packets_scanned += 1;
+                result = extract_profile_from_dovi_side_data(
+                        av_packet_side_data_get(
+                                packet.side_data,
+                                packet.side_data_elems,
+                                AV_PKT_DATA_DOVI_CONF));
+                if (result < 0) {
+                    result = extract_profile_from_dovi_box(
+                            packet.data,
+                            static_cast<size_t>(std::max(packet.size, 0)));
+                }
+                av_packet_unref(&packet);
+                if (result >= 0) {
+                    break;
+                }
+            } else {
+                av_packet_unref(&packet);
+            }
+        }
+    }
+
+    avformat_close_input(&format_context);
+    if (headers_chars != nullptr) {
+        env->ReleaseStringUTFChars(request_headers_blob, headers_chars);
+    }
+    env->ReleaseStringUTFChars(url, url_chars);
+    return result;
 }
