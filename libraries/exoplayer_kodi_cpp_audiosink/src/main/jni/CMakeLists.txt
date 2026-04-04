@@ -41,6 +41,17 @@ set_target_properties(swresample PROPERTIES IMPORTED_LOCATION "${FFMPEG_BINARIES
 add_library(avutil STATIC IMPORTED)
 set_target_properties(avutil PROPERTIES IMPORTED_LOCATION "${FFMPEG_BINARIES_ROOT}/libavutil.a")
 
+set(ffmpeg_mbedtls_targets "")
+foreach(mbedtls_lib mbedtls mbedx509 mbedcrypto)
+    set(mbedtls_lib_file_path "${FFMPEG_BINARIES_ROOT}/lib${mbedtls_lib}.a")
+    if(EXISTS "${mbedtls_lib_file_path}")
+        set(mbedtls_target_name "${mbedtls_lib}_static")
+        add_library(${mbedtls_target_name} STATIC IMPORTED)
+        set_target_properties(${mbedtls_target_name} PROPERTIES IMPORTED_LOCATION "${mbedtls_lib_file_path}")
+        list(APPEND ffmpeg_mbedtls_targets "${mbedtls_target_name}")
+    endif()
+endforeach()
+
 add_library(kodiCppAudioSinkJNI
             SHARED
             src/kodi_cpp_audiosink_bridge.cpp
@@ -120,6 +131,7 @@ target_link_libraries(kodiCppAudioSinkJNI
                       avformat
                       swresample
                       avutil
+                      ${ffmpeg_mbedtls_targets}
                       ${android_log_lib}
                       ${android_z_lib})
 
