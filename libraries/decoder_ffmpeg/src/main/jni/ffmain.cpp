@@ -13,9 +13,11 @@ extern "C" {
 #include "ffcommon.h"
 #include <cstddef>
 #include <cstdint>
+#include <cctype>
 #include <atomic>
 #include <string>
 #include <algorithm>
+#include <vector>
 
 #ifndef FFMPEG_TONEMAP_FILTERS
 #define FFMPEG_TONEMAP_FILTERS 0
@@ -229,6 +231,90 @@ Java_androidx_media3_decoder_ffmpeg_FfmpegLibrary_ffmpegRenderExperimentalDv5Har
            : JNI_FALSE;
 }
 
+namespace {
+
+int openInputForProbe(
+        AVFormatContext **formatContext,
+        const char *urlChars,
+        const char *headersChars) {
+    if (urlChars == nullptr || urlChars[0] == '\0') {
+        return -1;
+    }
+    AVDictionary *options = nullptr;
+    if (headersChars != nullptr && headersChars[0] != '\0') {
+        av_dict_set(&options, "headers", headersChars, 0);
+    }
+    int openResult = avformat_open_input(formatContext, urlChars, nullptr, &options);
+    av_dict_free(&options);
+    return openResult;
+}
+
+std::string urlDecode(const std::string &value) {
+    auto hex_value = [](unsigned char input) -> int {
+        if (input >= '0' && input <= '9') return input - '0';
+        if (input >= 'a' && input <= 'f') return input - 'a' + 10;
+        if (input >= 'A' && input <= 'F') return input - 'A' + 10;
+        return -1;
+    };
+
+    std::string decoded;
+    decoded.reserve(value.size());
+    for (size_t i = 0; i < value.size(); ++i) {
+        const unsigned char c = static_cast<unsigned char>(value[i]);
+        if (c == '%' && i + 2 < value.size()) {
+            const unsigned char hi = static_cast<unsigned char>(value[i + 1]);
+            const unsigned char lo = static_cast<unsigned char>(value[i + 2]);
+            const int hi_value = hex_value(hi);
+            const int lo_value = hex_value(lo);
+            if (hi_value >= 0 && lo_value >= 0) {
+                decoded.push_back(static_cast<char>((hi_value << 4) | lo_value));
+                i += 2;
+                continue;
+            }
+        }
+        if (c == '+') {
+            decoded.push_back(' ');
+            continue;
+        }
+        decoded.push_back(static_cast<char>(c));
+    }
+    return decoded;
+}
+
+std::string extractEmbeddedResolveUrl(const std::string &sourceUrl) {
+    const std::string marker = "/resolve/";
+    const auto markerIndex = sourceUrl.find(marker);
+    if (markerIndex == std::string::npos) {
+        return "";
+    }
+
+    const auto afterResolve = sourceUrl.substr(markerIndex + marker.size());
+    const auto firstSlash = afterResolve.find('/');
+    if (firstSlash == std::string::npos) {
+        return "";
+    }
+    const auto secondSlash = afterResolve.find('/', firstSlash + 1);
+    if (secondSlash == std::string::npos) {
+        return "";
+    }
+    const auto nestedEncoded = afterResolve.substr(secondSlash + 1);
+    if (nestedEncoded.empty()) {
+        return "";
+    }
+    return urlDecode(nestedEncoded);
+}
+
+std::string toHttpFallbackUrl(const std::string &url) {
+    const std::string httpsPrefix = "https://";
+    if (url.size() >= httpsPrefix.size() &&
+        std::equal(httpsPrefix.begin(), httpsPrefix.end(), url.begin())) {
+        return std::string("http://") + url.substr(httpsPrefix.size());
+    }
+    return "";
+}
+
+}  // namespace
+
 extern "C"
 JNIEXPORT jint JNICALL
 Java_androidx_media3_decoder_ffmpeg_FfmpegLibrary_ffmpegProbeDolbyVisionProfile(
@@ -248,15 +334,33 @@ Java_androidx_media3_decoder_ffmpeg_FfmpegLibrary_ffmpegProbeDolbyVisionProfile(
             : nullptr;
 
     AVFormatContext *format_context = nullptr;
-    AVDictionary *options = nullptr;
     avformat_network_init();
 
-    if (headers_chars != nullptr && headers_chars[0] != '\0') {
-        av_dict_set(&options, "headers", headers_chars, 0);
+    std::vector<std::string> probe_urls;
+    probe_urls.reserve(3);
+    auto add_unique_probe_url = [&probe_urls](const std::string &candidate) {
+        if (candidate.empty()) {
+            return;
+        }
+        if (std::find(probe_urls.begin(), probe_urls.end(), candidate) == probe_urls.end()) {
+            probe_urls.push_back(candidate);
+        }
+    };
+
+    add_unique_probe_url(url_chars);
+    add_unique_probe_url(extractEmbeddedResolveUrl(url_chars));
+    for (size_t i = 0; i < probe_urls.size(); ++i) {
+        add_unique_probe_url(toHttpFallbackUrl(probe_urls[i]));
     }
 
-    int open_result = avformat_open_input(&format_context, url_chars, nullptr, &options);
-    av_dict_free(&options);
+    int open_result = -1;
+    for (const auto &probe_url : probe_urls) {
+        open_result = openInputForProbe(&format_context, probe_url.c_str(), headers_chars);
+        if (open_result >= 0 && format_context != nullptr) {
+            break;
+        }
+        format_context = nullptr;
+    }
 
     if (open_result < 0 || format_context == nullptr) {
         logError("avformat_open_input[ffmpegProbeDolbyVisionProfile]", open_result);

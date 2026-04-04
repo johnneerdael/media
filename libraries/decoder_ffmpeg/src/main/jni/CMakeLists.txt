@@ -57,9 +57,27 @@ if(EXISTS "${ffmpeg_avfilter_file_path}")
     # unresolved references that must be linked by this final JNI shared lib.
     file(GLOB CONFIGURE_DEPENDS ffmpeg_extension_static_libs "${ffmpeg_binaries}/*.a")
     list(FILTER ffmpeg_extension_static_libs EXCLUDE REGEX "/lib(avutil|swresample|swscale|avcodec|avfilter)\\.a$")
+    list(FILTER ffmpeg_extension_static_libs EXCLUDE REGEX "/lib(mbedtls|mbedx509|mbedcrypto)\\.a$")
     list(FILTER ffmpeg_extension_static_libs INCLUDE REGEX "\\.a$")
     list(SORT ffmpeg_extension_static_libs)
 endif()
+
+set(ffmpeg_mbedtls_targets "")
+foreach(mbedtls_lib mbedtls mbedx509 mbedcrypto)
+    set(mbedtls_lib_file_path "${ffmpeg_binaries}/lib${mbedtls_lib}.a")
+    if(EXISTS "${mbedtls_lib_file_path}")
+        set(mbedtls_target_name "${mbedtls_lib}_static")
+        add_library(
+                ${mbedtls_target_name}
+                STATIC
+                IMPORTED)
+        set_target_properties(
+                ${mbedtls_target_name} PROPERTIES
+                IMPORTED_LOCATION
+                ${mbedtls_lib_file_path})
+        list(APPEND ffmpeg_mbedtls_targets "${mbedtls_target_name}")
+    endif()
+endforeach()
 
 # Prefer staged FFmpeg headers. This avoids collisions with FFmpeg top-level
 # files (for example "version") when compiling C++.
@@ -97,6 +115,9 @@ target_link_libraries(ffmpegJNI
                       PRIVATE avcodec
                       PRIVATE avutil
                       PRIVATE ${android_log_lib})
+if(ffmpeg_mbedtls_targets)
+    target_link_libraries(ffmpegJNI PRIVATE ${ffmpeg_mbedtls_targets})
+endif()
 if(ffmpeg_has_avfilter)
     target_link_libraries(ffmpegJNI PRIVATE avfilter)
     if(ffmpeg_extension_static_libs)
