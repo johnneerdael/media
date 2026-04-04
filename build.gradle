@@ -41,11 +41,16 @@ allprojects {
             configuredExternalBuildDir = new File(rootDir, configuredExternalBuildDir)
         }
         buildDir = "${configuredExternalBuildDir}/${project.name}"
-    } else if (gradle.parent != null) {
-        // Composite builds from the nexio superproject must not share build outputs with a
-        // standalone `media` Gradle invocation, otherwise concurrent compilation can corrupt
-        // intermediate class directories and surface as spurious missing-symbol errors.
-        buildDir = new File(rootDir, "buildout-composite/${project.name}")
+    } else {
+        def compositeBuildDir = new File(rootDir, "buildout-composite/${project.name}")
+        if (gradle.parent != null || compositeBuildDir.exists()) {
+            // Composite builds from the nexio superproject must not share build outputs with a
+            // standalone `media` Gradle invocation, otherwise concurrent compilation can corrupt
+            // intermediate class directories and surface as spurious missing-symbol errors.
+            // If a composite output already exists, reuse it for follow-up standalone verification
+            // so dependent project jars resolve from the same output root.
+            buildDir = compositeBuildDir
+        }
     }
     group = 'androidx.media3'
 }
