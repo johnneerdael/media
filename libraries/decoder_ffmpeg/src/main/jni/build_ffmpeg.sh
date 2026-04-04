@@ -25,6 +25,8 @@ echo "Host platform is ${HOST_PLATFORM}"
 ANDROID_ABI="$4"
 echo "ANDROID_ABI is ${ANDROID_ABI}"
 ENABLED_DECODERS=()
+ENABLED_DEMUXERS=()
+ENABLED_PROTOCOLS=()
 if [[ "$#" -gt 4 ]]
 then
     ENABLED_DECODERS=("${@:5}")
@@ -58,6 +60,22 @@ REQUIRED_DECODERS=(
     vp8
     vp9
 )
+REQUIRED_DEMUXERS=(
+    matroska
+    mov
+    mpegts
+)
+REQUIRED_PROTOCOLS=(
+    file
+    pipe
+    data
+    android_content
+    http
+    https
+    tcp
+    udp
+    tls
+)
 
 append_unique_decoder() {
     local decoder="$1"
@@ -72,12 +90,50 @@ append_unique_decoder() {
     ENABLED_DECODERS+=("${decoder}")
 }
 
+append_unique_demuxer() {
+    local demuxer="$1"
+    local existing
+    for existing in "${ENABLED_DEMUXERS[@]-}"
+    do
+        if [[ "${existing}" == "${demuxer}" ]]
+        then
+            return
+        fi
+    done
+    ENABLED_DEMUXERS+=("${demuxer}")
+}
+
+append_unique_protocol() {
+    local protocol="$1"
+    local existing
+    for existing in "${ENABLED_PROTOCOLS[@]-}"
+    do
+        if [[ "${existing}" == "${protocol}" ]]
+        then
+            return
+        fi
+    done
+    ENABLED_PROTOCOLS+=("${protocol}")
+}
+
 for decoder in "${REQUIRED_DECODERS[@]}"
 do
     append_unique_decoder "${decoder}"
 done
 
+for demuxer in "${REQUIRED_DEMUXERS[@]}"
+do
+    append_unique_demuxer "${demuxer}"
+done
+
+for protocol in "${REQUIRED_PROTOCOLS[@]}"
+do
+    append_unique_protocol "${protocol}"
+done
+
 echo "Enabled decoders are ${ENABLED_DECODERS[@]-}"
+echo "Enabled demuxers are ${ENABLED_DEMUXERS[@]-}"
+echo "Enabled protocols are ${ENABLED_PROTOCOLS[@]-}"
 JOBS="$(nproc 2> /dev/null || sysctl -n hw.ncpu 2> /dev/null || echo 4)"
 echo "Using $JOBS jobs for make"
 FFMPEG_ENABLE_LIBPLACEBO="${FFMPEG_ENABLE_LIBPLACEBO:-0}"
@@ -87,8 +143,11 @@ LIBPLACEBO_MAX_VERSION="${LIBPLACEBO_MAX_VERSION:-7.360.0}"
 FFMPEG_ENABLE_LIBDOVI="${FFMPEG_ENABLE_LIBDOVI:-0}"
 LIBDOVI_PREBUILT_ROOT="${LIBDOVI_PREBUILT_ROOT:-${FFMPEG_MODULE_PATH}/../../../../../third_party/libdovi}"
 FFMPEG_REQUIRE_LIBDOVI="${FFMPEG_REQUIRE_LIBDOVI:-0}"
+FFMPEG_ENABLE_MBEDTLS="${FFMPEG_ENABLE_MBEDTLS:-0}"
+MBEDTLS_PREBUILT_ROOT="${MBEDTLS_PREBUILT_ROOT:-${FFMPEG_MODULE_PATH}/../../../../../third_party/mbedtls-prebuilt}"
 echo "FFMPEG_ENABLE_LIBPLACEBO is ${FFMPEG_ENABLE_LIBPLACEBO}"
 echo "FFMPEG_ENABLE_LIBDOVI is ${FFMPEG_ENABLE_LIBDOVI}"
+echo "FFMPEG_ENABLE_MBEDTLS is ${FFMPEG_ENABLE_MBEDTLS}"
 COMMON_OPTIONS="
     --target-os=android
     --pkg-config=pkg-config
@@ -98,6 +157,7 @@ COMMON_OPTIONS="
     --disable-doc
     --disable-programs
     --disable-everything
+    --enable-network
     --disable-avdevice
     --enable-swscale
     --enable-avfilter
@@ -187,7 +247,10 @@ echo "Detected FFmpeg version ${FFMPEG_VERSION}"
 
 configure_supports_option() {
     local option_name="$1"
-    "${FFMPEG_SOURCE_PATH}/configure" --help 2>/dev/null | grep -q -- "${option_name}"
+    (
+        cd "${FFMPEG_SOURCE_PATH}"
+        ./configure --help 2>/dev/null
+    ) | grep -q -- "${option_name}"
 }
 
 if [[ "${FFMPEG_ENABLE_LIBPLACEBO}" == "1" && "${FFMPEG_MAJOR_VERSION}" != "8" ]]
@@ -220,6 +283,20 @@ then
     fi
 fi
 
+if [[ "${FFMPEG_ENABLE_MBEDTLS}" == "1" ]]
+then
+    if [[ ! -d "${MBEDTLS_PREBUILT_ROOT}" ]]
+    then
+        echo "MBEDTLS_PREBUILT_ROOT does not exist: ${MBEDTLS_PREBUILT_ROOT}"
+        exit 1
+    fi
+    if ! configure_supports_option "--enable-mbedtls"
+    then
+        echo "Current FFmpeg source (${FFMPEG_SOURCE_PATH}) does not support --enable-mbedtls."
+        exit 1
+    fi
+fi
+
 if [[ "${FFMPEG_ENABLE_LIBPLACEBO}" == "1" && -z "${LIBPLACEBO_PREBUILT_ROOT}" ]]
 then
     echo "LIBPLACEBO_PREBUILT_ROOT must be set when FFMPEG_ENABLE_LIBPLACEBO=1"
@@ -230,6 +307,14 @@ if [[ "${FFMPEG_ENABLE_LIBDOVI}" == "1" ]]
 then
     COMMON_OPTIONS="${COMMON_OPTIONS}
         --enable-libdovi
+    "
+fi
+
+if [[ "${FFMPEG_ENABLE_MBEDTLS}" == "1" ]]
+then
+    COMMON_OPTIONS="${COMMON_OPTIONS}
+        --enable-mbedtls
+        --enable-version3
     "
 fi
 
@@ -321,6 +406,54 @@ validate_ffmpeg_tonemap_config() {
     if [[ "${FFMPEG_ENABLE_LIBDOVI}" == "1" ]]
     then
         require_ffmpeg_define_enabled "${config_h}" "CONFIG_LIBDOVI"
+    fi
+}
+
+validate_ffmpeg_tls_config() {
+    if [[ "${FFMPEG_ENABLE_MBEDTLS}" != "1" ]]
+    then
+        return
+    fi
+    local config_h="${FFMPEG_SOURCE_PATH}/config.h"
+    local config_components_h="${FFMPEG_SOURCE_PATH}/config_components.h"
+    require_ffmpeg_define_enabled "${config_h}" "CONFIG_MBEDTLS"
+    require_ffmpeg_define_enabled "${config_h}" "CONFIG_PROTOCOLS"
+    require_ffmpeg_define_enabled "${config_components_h}" "CONFIG_TCP_PROTOCOL"
+    require_ffmpeg_define_enabled "${config_components_h}" "CONFIG_TLS_PROTOCOL"
+    require_ffmpeg_define_enabled "${config_components_h}" "CONFIG_HTTPS_PROTOCOL"
+}
+
+validate_mbedtls_prebuilts_for_abi() {
+    local target_abi="$1"
+    if [[ "${FFMPEG_ENABLE_MBEDTLS}" != "1" ]]
+    then
+        return
+    fi
+    local abi_root="${MBEDTLS_PREBUILT_ROOT}/${target_abi}"
+    if [[ ! -f "${abi_root}/include/mbedtls/ssl.h" ]]
+    then
+        echo "Missing mbedtls ssl.h for ${target_abi}: ${abi_root}/include/mbedtls/ssl.h"
+        exit 1
+    fi
+    if [[ ! -f "${abi_root}/lib/libmbedtls.a" ]]
+    then
+        echo "Missing libmbedtls.a for ${target_abi}: ${abi_root}/lib/libmbedtls.a"
+        exit 1
+    fi
+    if [[ ! -f "${abi_root}/lib/libmbedx509.a" ]]
+    then
+        echo "Missing libmbedx509.a for ${target_abi}: ${abi_root}/lib/libmbedx509.a"
+        exit 1
+    fi
+    if [[ ! -f "${abi_root}/lib/libmbedcrypto.a" ]]
+    then
+        echo "Missing libmbedcrypto.a for ${target_abi}: ${abi_root}/lib/libmbedcrypto.a"
+        exit 1
+    fi
+    if [[ ! -f "${abi_root}/lib/pkgconfig/mbedtls.pc" ]]
+    then
+        echo "Missing mbedtls.pc for ${target_abi}: ${abi_root}/lib/pkgconfig/mbedtls.pc"
+        exit 1
     fi
 }
 
@@ -464,6 +597,20 @@ stage_tonemap_linker_libs_for_abi() {
     fi
 }
 
+stage_mbedtls_linker_libs_for_abi() {
+    local target_abi="$1"
+    if [[ "${FFMPEG_ENABLE_MBEDTLS}" != "1" ]]
+    then
+        return
+    fi
+    local source_lib_dir="${MBEDTLS_PREBUILT_ROOT}/${target_abi}/lib"
+    local target_lib_dir="${FFMPEG_SOURCE_PATH}/android-libs/${target_abi}"
+    mkdir -p "${target_lib_dir}"
+    cp "${source_lib_dir}/libmbedtls.a" "${target_lib_dir}/"
+    cp "${source_lib_dir}/libmbedx509.a" "${target_lib_dir}/"
+    cp "${source_lib_dir}/libmbedcrypto.a" "${target_lib_dir}/"
+}
+
 apply_ffmpeg_vulkan_compat_patch() {
     if [[ "${FFMPEG_ENABLE_LIBPLACEBO}" != "1" ]]
     then
@@ -529,6 +676,16 @@ do
     COMMON_OPTIONS="${COMMON_OPTIONS} --enable-parser=${parser}"
 done
 
+for demuxer in "${ENABLED_DEMUXERS[@]}"
+do
+    COMMON_OPTIONS="${COMMON_OPTIONS} --enable-demuxer=${demuxer}"
+done
+
+for protocol in "${ENABLED_PROTOCOLS[@]}"
+do
+    COMMON_OPTIONS="${COMMON_OPTIONS} --enable-protocol=${protocol}"
+done
+
 ARMV7_CLANG="${TOOLCHAIN_PREFIX}/armv7a-linux-androideabi${ANDROID_ABI}-clang"
 if [[ ! -e "$ARMV7_CLANG" ]]
 then
@@ -587,6 +744,12 @@ configure_ffmpeg() {
         pkg_config_dirs+=("$(prepare_libdovi_pkgconfig_for_abi "${target_abi}")")
     fi
 
+    if [[ "${FFMPEG_ENABLE_MBEDTLS}" == "1" ]]
+    then
+        validate_mbedtls_prebuilts_for_abi "${target_abi}"
+        pkg_config_dirs+=("${MBEDTLS_PREBUILT_ROOT}/${target_abi}/lib/pkgconfig")
+    fi
+
     local pkg_config_joined=""
     if [[ "${#pkg_config_dirs[@]}" -gt 0 ]]
     then
@@ -602,6 +765,7 @@ configure_ffmpeg() {
         ./configure "$@" ${COMMON_OPTIONS}
     fi
     validate_ffmpeg_tonemap_config
+    validate_ffmpeg_tls_config
 }
 
 cd "${FFMPEG_MODULE_PATH}/jni/ffmpeg"
@@ -621,6 +785,7 @@ make -j$JOBS
 make install-libs
 validate_tonemap_outputs_for_abi "armeabi-v7a"
 stage_tonemap_linker_libs_for_abi "armeabi-v7a"
+stage_mbedtls_linker_libs_for_abi "armeabi-v7a"
 make clean
 
 configure_ffmpeg "arm64-v8a" \
@@ -637,6 +802,7 @@ make -j$JOBS
 make install-libs
 validate_tonemap_outputs_for_abi "arm64-v8a"
 stage_tonemap_linker_libs_for_abi "arm64-v8a"
+stage_mbedtls_linker_libs_for_abi "arm64-v8a"
 make clean
 
 configure_ffmpeg "x86" \
@@ -654,6 +820,7 @@ make -j$JOBS
 make install-libs
 validate_tonemap_outputs_for_abi "x86"
 stage_tonemap_linker_libs_for_abi "x86"
+stage_mbedtls_linker_libs_for_abi "x86"
 make clean
 
 configure_ffmpeg "x86_64" \
@@ -671,6 +838,7 @@ make -j$JOBS
 make install-libs
 validate_tonemap_outputs_for_abi "x86_64"
 stage_tonemap_linker_libs_for_abi "x86_64"
+stage_mbedtls_linker_libs_for_abi "x86_64"
 make clean
 
 HEADER_STAGING_DIR="${FFMPEG_MODULE_PATH}/jni/ffmpeg-headers"
