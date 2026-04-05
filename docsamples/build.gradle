@@ -18,7 +18,7 @@ apply plugin: 'kotlin-android'
 apply plugin: 'org.jetbrains.kotlin.plugin.compose'
 
 android {
-    namespace 'androidx.media3.docsamples'
+    namespace = 'androidx.media3.docsamples'
 
     kotlinOptions {
         jvmTarget = '1.8'

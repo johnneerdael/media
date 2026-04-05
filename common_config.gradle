@@ -22,7 +22,7 @@ android {
         minSdkVersion project.ext.minSdkVersion
         targetSdkVersion project.ext.targetSdkVersion
         consumerProguardFiles 'proguard-rules.txt'
-        testInstrumentationRunner 'androidx.test.runner.AndroidJUnitRunner'
+        testInstrumentationRunner = 'androidx.test.runner.AndroidJUnitRunner'
         aarMetadata {
             minCompileSdk = project.ext.compileSdkVersion
         }
@@ -33,7 +33,7 @@ android {
     }
 
     lintOptions {
-        checkTestSources true
+        checkTestSources = true
     }
 
     compileOptions {
@@ -46,9 +46,9 @@ android {
             jvmArgs "-Xmx2g"
             systemProperty "robolectric.graphicsMode", "NATIVE"
         }
-        unitTests.includeAndroidResources true
+        unitTests.includeAndroidResources = true
         // See https://developer.android.com/training/testing/instrumented-tests/androidx-test-libraries/runner
-        execution 'ANDROIDX_TEST_ORCHESTRATOR'
+        execution = 'ANDROIDX_TEST_ORCHESTRATOR'
     }
 }
 

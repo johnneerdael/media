@@ -20,7 +20,7 @@ apply plugin: 'kotlin-android'
 apply plugin: 'org.jetbrains.kotlin.plugin.compose'
 
 android {
-    namespace 'androidx.media3.ui.compose'
+    namespace = 'androidx.media3.ui.compose'
 
     buildTypes {
         debug {
@@ -28,7 +28,7 @@ android {
         }
     }
     buildFeatures {
-        compose true
+        compose = true
     }
     publishing {
         singleVariant('release') {

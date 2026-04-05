@@ -20,7 +20,7 @@ apply plugin: 'kotlin-android'
 apply plugin: 'org.jetbrains.kotlin.plugin.compose'
 
 android {
-    namespace 'androidx.media3.cast'
+    namespace = 'androidx.media3.cast'
 
     publishing {
         singleVariant('release') {

@@ -14,10 +14,10 @@
 apply plugin: 'com.android.library'
 apply from: "$gradle.ext.androidxMediaSettingsDir/common_config.gradle"
 
-android.buildTypes.debug.testCoverageEnabled true
+android.buildTypes.debug.testCoverageEnabled = true
 
 android {
-    namespace 'androidx.media3.ui'
+    namespace = 'androidx.media3.ui'
 
     lint {
         baseline = file("lint-baseline.xml")

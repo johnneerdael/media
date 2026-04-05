@@ -14,4 +14,4 @@
 apply plugin: 'com.android.library'
 apply from: "$gradle.ext.androidxMediaSettingsDir/common_config.gradle"
 
-android.namespace 'androidx.media3.test.data'
+android.namespace = 'androidx.media3.test.data'

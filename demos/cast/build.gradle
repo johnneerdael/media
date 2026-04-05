@@ -15,7 +15,7 @@ apply from: '../../constants.gradle'
 apply plugin: 'com.android.application'
 
 android {
-    namespace 'androidx.media3.demo.cast'
+    namespace = 'androidx.media3.demo.cast'
 
     compileSdk project.ext.compileSdkVersion
 
@@ -33,13 +33,13 @@ android {
 
     buildTypes {
         release {
-            shrinkResources true
-            minifyEnabled true
+            shrinkResources = true
+            minifyEnabled = true
             proguardFiles = [
                 "proguard-rules.txt",
                 getDefaultProguardFile('proguard-android.txt')
             ]
-            signingConfig signingConfigs.debug
+            signingConfig = signingConfigs.debug
         }
         debug {
             jniDebuggable = true

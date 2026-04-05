@@ -16,7 +16,7 @@ apply plugin: 'com.android.application'
 apply plugin: 'kotlin-android'
 
 android {
-    namespace 'androidx.media3.demo.session.automotive'
+    namespace = 'androidx.media3.demo.session.automotive'
 
     compileSdk project.ext.compileSdkVersion
 
@@ -38,12 +38,12 @@ android {
 
     buildTypes {
         release {
-            shrinkResources true
-            minifyEnabled true
+            shrinkResources = true
+            minifyEnabled = true
             proguardFiles = [
                 getDefaultProguardFile('proguard-android-optimize.txt')
             ]
-            signingConfig signingConfigs.debug
+            signingConfig = signingConfigs.debug
         }
         debug {
             jniDebuggable = true

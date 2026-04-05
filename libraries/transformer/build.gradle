@@ -14,7 +14,7 @@
 apply plugin: 'com.android.library'
 apply from: "$gradle.ext.androidxMediaSettingsDir/common_config.gradle"
 android {
-    namespace 'androidx.media3.transformer'
+    namespace = 'androidx.media3.transformer'
 
     buildTypes {
         debug {
@@ -29,7 +29,7 @@ android {
 
     lintOptions {
         // TODO: b/353490583 - Enable this once the violations are fixed.
-        checkTestSources false
+        checkTestSources = false
     }
 
     publishing {

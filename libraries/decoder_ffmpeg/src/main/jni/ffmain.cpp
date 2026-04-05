@@ -7,6 +7,8 @@ extern "C" {
 #include "libavutil/hwcontext.h"
 #include "libavutil/dict.h"
 #include "libavutil/dovi_meta.h"
+#include "libavutil/pixdesc.h"
+#include "libavutil/pixfmt.h"
 }
 #include "config.h"
 #include "config_components.h"
@@ -241,6 +243,10 @@ int openInputForProbe(
         return -1;
     }
     AVDictionary *options = nullptr;
+    // Low-budget fast path for autoplay scoring probes.
+    av_dict_set(&options, "probesize", "10000", 0);
+    av_dict_set(&options, "analyzeduration", "10000", 0);
+    av_dict_set(&options, "rw_timeout", "5000000", 0);
     if (headersChars != nullptr && headersChars[0] != '\0') {
         av_dict_set(&options, "headers", headersChars, 0);
     }
@@ -311,6 +317,46 @@ std::string toHttpFallbackUrl(const std::string &url) {
         return std::string("http://") + url.substr(httpsPrefix.size());
     }
     return "";
+}
+
+std::string sanitizeProbeValue(const std::string &value) {
+    std::string sanitized = value;
+    std::replace(sanitized.begin(), sanitized.end(), ';', '_');
+    return sanitized;
+}
+
+std::string escapeJsonString(const std::string &value) {
+    std::string escaped;
+    escaped.reserve(value.size());
+    for (char c : value) {
+        switch (c) {
+            case '\\':
+                escaped += "\\\\";
+                break;
+            case '"':
+                escaped += "\\\"";
+                break;
+            case '\b':
+                escaped += "\\b";
+                break;
+            case '\f':
+                escaped += "\\f";
+                break;
+            case '\n':
+                escaped += "\\n";
+                break;
+            case '\r':
+                escaped += "\\r";
+                break;
+            case '\t':
+                escaped += "\\t";
+                break;
+            default:
+                escaped.push_back(c);
+                break;
+        }
+    }
+    return escaped;
 }
 
 }  // namespace
@@ -476,4 +522,399 @@ Java_androidx_media3_decoder_ffmpeg_FfmpegLibrary_ffmpegProbeDolbyVisionProfile(
     }
     env->ReleaseStringUTFChars(url, url_chars);
     return result;
+}
+
+extern "C"
+JNIEXPORT jstring JNICALL
+Java_androidx_media3_decoder_ffmpeg_FfmpegLibrary_ffmpegProbeDolbyVisionMetadataBlob(
+        JNIEnv *env,
+        jclass clazz,
+        jstring url,
+        jstring request_headers_blob) {
+    (void) clazz;
+    if (url == nullptr) {
+        return nullptr;
+    }
+
+    const char *url_chars = env->GetStringUTFChars(url, nullptr);
+    const char *headers_chars =
+            request_headers_blob != nullptr
+            ? env->GetStringUTFChars(request_headers_blob, nullptr)
+            : nullptr;
+
+    AVFormatContext *format_context = nullptr;
+    avformat_network_init();
+
+    std::vector<std::string> probe_urls;
+    probe_urls.reserve(3);
+    auto add_unique_probe_url = [&probe_urls](const std::string &candidate) {
+        if (candidate.empty()) {
+            return;
+        }
+        if (std::find(probe_urls.begin(), probe_urls.end(), candidate) == probe_urls.end()) {
+            probe_urls.push_back(candidate);
+        }
+    };
+
+    add_unique_probe_url(url_chars);
+    add_unique_probe_url(extractEmbeddedResolveUrl(url_chars));
+    for (size_t i = 0; i < probe_urls.size(); ++i) {
+        add_unique_probe_url(toHttpFallbackUrl(probe_urls[i]));
+    }
+
+    int open_result = -1;
+    for (const auto &probe_url : probe_urls) {
+        open_result = openInputForProbe(&format_context, probe_url.c_str(), headers_chars);
+        if (open_result >= 0 && format_context != nullptr) {
+            break;
+        }
+        format_context = nullptr;
+    }
+
+    std::string video_codec = "unknown";
+    std::string audio_codec = "unknown";
+    std::string hdr_type = "unknown";
+
+    if (open_result >= 0 && format_context != nullptr &&
+        avformat_find_stream_info(format_context, nullptr) >= 0) {
+        const int video_stream_index = av_find_best_stream(
+                format_context,
+                AVMEDIA_TYPE_VIDEO,
+                -1,
+                -1,
+                nullptr,
+                0);
+        if (video_stream_index >= 0) {
+            AVStream *video_stream = format_context->streams[video_stream_index];
+            if (video_stream != nullptr && video_stream->codecpar != nullptr) {
+                const char *codec_name = avcodec_get_name(video_stream->codecpar->codec_id);
+                if (codec_name != nullptr && codec_name[0] != '\0') {
+                    video_codec = codec_name;
+                }
+
+                const AVPacketSideData *dovi_side_data = av_packet_side_data_get(
+                        video_stream->codecpar->coded_side_data,
+                        video_stream->codecpar->nb_coded_side_data,
+                        AV_PKT_DATA_DOVI_CONF);
+                if (dovi_side_data != nullptr &&
+                    dovi_side_data->size >= static_cast<int>(sizeof(AVDOVIDecoderConfigurationRecord))) {
+                    hdr_type = "DolbyVision";
+                } else {
+                    const uint8_t *data = video_stream->codecpar->extradata;
+                    const size_t size = static_cast<size_t>(
+                            std::max(video_stream->codecpar->extradata_size, 0));
+                    if (data != nullptr && size >= 8) {
+                        for (size_t i = 0; i + 8 <= size; ++i) {
+                            const bool has_dovi_tag =
+                                    (data[i] == 'd' && data[i + 1] == 'v' &&
+                                     (data[i + 2] == 'c' || data[i + 2] == 'v' || data[i + 2] == 'w') &&
+                                     data[i + 3] == 'C');
+                            if (has_dovi_tag) {
+                                hdr_type = "DolbyVision";
+                                break;
+                            }
+                        }
+                    }
+                }
+
+                if (hdr_type == "unknown") {
+                    if (video_stream->codecpar->color_trc == AVCOL_TRC_SMPTE2084) {
+                        hdr_type = "HDR10";
+                    } else if (video_stream->codecpar->color_trc == AVCOL_TRC_ARIB_STD_B67) {
+                        hdr_type = "HLG";
+                    }
+                }
+            }
+        }
+
+        const int audio_stream_index = av_find_best_stream(
+                format_context,
+                AVMEDIA_TYPE_AUDIO,
+                -1,
+                -1,
+                nullptr,
+                0);
+        if (audio_stream_index >= 0) {
+            AVStream *audio_stream = format_context->streams[audio_stream_index];
+            if (audio_stream != nullptr && audio_stream->codecpar != nullptr) {
+                const char *codec_name = avcodec_get_name(audio_stream->codecpar->codec_id);
+                if (codec_name != nullptr && codec_name[0] != '\0') {
+                    audio_codec = codec_name;
+                }
+            }
+        }
+    }
+
+    if (format_context != nullptr) {
+        avformat_close_input(&format_context);
+    }
+    if (headers_chars != nullptr) {
+        env->ReleaseStringUTFChars(request_headers_blob, headers_chars);
+    }
+    env->ReleaseStringUTFChars(url, url_chars);
+
+    std::string blob = "video=" + video_codec + ";audio=" + audio_codec + ";hdr=" + hdr_type;
+    return env->NewStringUTF(blob.c_str());
+}
+
+extern "C"
+JNIEXPORT jstring JNICALL
+Java_androidx_media3_decoder_ffmpeg_FfmpegLibrary_ffmpegProbeDolbyVisionProbeBlob(
+        JNIEnv *env,
+        jclass clazz,
+        jstring url,
+        jstring request_headers_blob) {
+    (void) clazz;
+    if (url == nullptr) {
+        return nullptr;
+    }
+
+    const char *url_chars = env->GetStringUTFChars(url, nullptr);
+    const char *headers_chars =
+            request_headers_blob != nullptr
+            ? env->GetStringUTFChars(request_headers_blob, nullptr)
+            : nullptr;
+
+    AVFormatContext *format_context = nullptr;
+    avformat_network_init();
+
+    std::vector<std::string> probe_urls;
+    probe_urls.reserve(3);
+    auto add_unique_probe_url = [&probe_urls](const std::string &candidate) {
+        if (candidate.empty()) {
+            return;
+        }
+        if (std::find(probe_urls.begin(), probe_urls.end(), candidate) == probe_urls.end()) {
+            probe_urls.push_back(candidate);
+        }
+    };
+
+    add_unique_probe_url(url_chars);
+    add_unique_probe_url(extractEmbeddedResolveUrl(url_chars));
+    for (size_t i = 0; i < probe_urls.size(); ++i) {
+        add_unique_probe_url(toHttpFallbackUrl(probe_urls[i]));
+    }
+
+    int open_result = -1;
+    for (const auto &probe_url : probe_urls) {
+        open_result = openInputForProbe(&format_context, probe_url.c_str(), headers_chars);
+        if (open_result >= 0 && format_context != nullptr) {
+            break;
+        }
+        format_context = nullptr;
+    }
+
+    std::string status = "failed";
+    std::string error = "ffmpeg_probe_failed";
+    std::string video_codec = "unknown";
+    std::string audio_codec = "unknown";
+    std::string hdr_type = "unknown";
+    int profile = -2;
+    int video_stream_index = -1;
+
+    if (open_result >= 0 && format_context != nullptr) {
+        const int info_result = avformat_find_stream_info(format_context, nullptr);
+        if (info_result >= 0) {
+            video_stream_index = av_find_best_stream(
+                    format_context,
+                    AVMEDIA_TYPE_VIDEO,
+                    -1,
+                    -1,
+                    nullptr,
+                    0);
+            if (video_stream_index >= 0) {
+                AVStream *video_stream = format_context->streams[video_stream_index];
+                if (video_stream != nullptr && video_stream->codecpar != nullptr) {
+                    const char *codec_name = avcodec_get_name(video_stream->codecpar->codec_id);
+                    if (codec_name != nullptr && codec_name[0] != '\0') {
+                        video_codec = codec_name;
+                    }
+
+                    const AVPacketSideData *dovi_side_data = av_packet_side_data_get(
+                            video_stream->codecpar->coded_side_data,
+                            video_stream->codecpar->nb_coded_side_data,
+                            AV_PKT_DATA_DOVI_CONF);
+                    if (dovi_side_data != nullptr &&
+                        dovi_side_data->size >= static_cast<int>(sizeof(AVDOVIDecoderConfigurationRecord))) {
+                        const auto *dovi =
+                                reinterpret_cast<const AVDOVIDecoderConfigurationRecord *>(dovi_side_data->data);
+                        profile = static_cast<int>(dovi->dv_profile);
+                        hdr_type = "dolbyvision";
+                    } else if (video_stream->codecpar->color_trc == AVCOL_TRC_SMPTE2084) {
+                        hdr_type = "hdr10";
+                    } else if (video_stream->codecpar->color_trc == AVCOL_TRC_ARIB_STD_B67) {
+                        hdr_type = "hlg";
+                    }
+                }
+            }
+
+            const int audio_stream_index = av_find_best_stream(
+                    format_context,
+                    AVMEDIA_TYPE_AUDIO,
+                    -1,
+                    -1,
+                    nullptr,
+                    0);
+            if (audio_stream_index >= 0) {
+                AVStream *audio_stream = format_context->streams[audio_stream_index];
+                if (audio_stream != nullptr && audio_stream->codecpar != nullptr) {
+                    const char *codec_name = avcodec_get_name(audio_stream->codecpar->codec_id);
+                    if (codec_name != nullptr && codec_name[0] != '\0') {
+                        audio_codec = codec_name;
+                    }
+                }
+            }
+
+            if (profile >= 0) {
+                status = "detected";
+                error.clear();
+            } else if (video_stream_index >= 0) {
+                status = "not_dolby_vision";
+                error.clear();
+            }
+        }
+    }
+
+    if (format_context != nullptr) {
+        avformat_close_input(&format_context);
+    }
+    if (headers_chars != nullptr) {
+        env->ReleaseStringUTFChars(request_headers_blob, headers_chars);
+    }
+    env->ReleaseStringUTFChars(url, url_chars);
+
+    std::string blob = "status=" + sanitizeProbeValue(status) +
+                       ";video=" + sanitizeProbeValue(video_codec) +
+                       ";audio=" + sanitizeProbeValue(audio_codec) +
+                       ";hdr=" + sanitizeProbeValue(hdr_type);
+    if (profile >= 0) {
+        blob += ";profile=" + std::to_string(profile);
+    }
+    if (!error.empty()) {
+        blob += ";error=" + sanitizeProbeValue(error);
+    }
+    return env->NewStringUTF(blob.c_str());
+}
+
+extern "C"
+JNIEXPORT jstring JNICALL
+Java_androidx_media3_decoder_ffmpeg_FfmpegLibrary_ffmpegProbeDolbyVisionStreamMetadataJson(
+        JNIEnv *env,
+        jclass clazz,
+        jstring url,
+        jstring request_headers_blob) {
+    (void) clazz;
+    if (url == nullptr) {
+        return nullptr;
+    }
+
+    const char *url_chars = env->GetStringUTFChars(url, nullptr);
+    const char *headers_chars =
+            request_headers_blob != nullptr
+            ? env->GetStringUTFChars(request_headers_blob, nullptr)
+            : nullptr;
+
+    AVFormatContext *format_context = nullptr;
+    avformat_network_init();
+
+    std::vector<std::string> probe_urls;
+    probe_urls.reserve(3);
+    auto add_unique_probe_url = [&probe_urls](const std::string &candidate) {
+        if (candidate.empty()) {
+            return;
+        }
+        if (std::find(probe_urls.begin(), probe_urls.end(), candidate) == probe_urls.end()) {
+            probe_urls.push_back(candidate);
+        }
+    };
+
+    add_unique_probe_url(url_chars);
+    add_unique_probe_url(extractEmbeddedResolveUrl(url_chars));
+    for (size_t i = 0; i < probe_urls.size(); ++i) {
+        add_unique_probe_url(toHttpFallbackUrl(probe_urls[i]));
+    }
+
+    int open_result = -1;
+    for (const auto &probe_url : probe_urls) {
+        open_result = openInputForProbe(&format_context, probe_url.c_str(), headers_chars);
+        if (open_result >= 0 && format_context != nullptr) {
+            break;
+        }
+        format_context = nullptr;
+    }
+
+    std::string json = "{\"streams\":[";
+    bool first_stream = true;
+
+    if (open_result >= 0 && format_context != nullptr &&
+        avformat_find_stream_info(format_context, nullptr) >= 0) {
+        for (unsigned int i = 0; i < format_context->nb_streams; ++i) {
+            AVStream *stream = format_context->streams[i];
+            if (stream == nullptr || stream->codecpar == nullptr) {
+                continue;
+            }
+
+            const AVCodecParameters *codecpar = stream->codecpar;
+            const char *codec_type = av_get_media_type_string(codecpar->codec_type);
+            const char *codec_name = avcodec_get_name(codecpar->codec_id);
+            if (codec_type == nullptr || codec_name == nullptr || codec_name[0] == '\0') {
+                continue;
+            }
+
+            bool has_hdr10_plus = av_packet_side_data_get(
+                    codecpar->coded_side_data,
+                    codecpar->nb_coded_side_data,
+                    AV_PKT_DATA_DYNAMIC_HDR10_PLUS) != nullptr;
+
+            int dv_profile = -1;
+            const AVPacketSideData *dovi_side_data = av_packet_side_data_get(
+                    codecpar->coded_side_data,
+                    codecpar->nb_coded_side_data,
+                    AV_PKT_DATA_DOVI_CONF);
+            if (dovi_side_data != nullptr &&
+                dovi_side_data->size >= static_cast<int>(sizeof(AVDOVIDecoderConfigurationRecord))) {
+                const auto *dovi =
+                        reinterpret_cast<const AVDOVIDecoderConfigurationRecord *>(dovi_side_data->data);
+                dv_profile = static_cast<int>(dovi->dv_profile);
+            }
+
+            if (!first_stream) {
+                json += ",";
+            }
+            first_stream = false;
+            json += "{";
+            json += "\"codec_type\":\"" + escapeJsonString(codec_type) + "\"";
+            json += ",\"codec_name\":\"" + escapeJsonString(codec_name) + "\"";
+            if (codecpar->color_trc != AVCOL_TRC_UNSPECIFIED) {
+                const char *color_transfer = av_color_transfer_name(codecpar->color_trc);
+                if (color_transfer != nullptr && color_transfer[0] != '\0') {
+                    json += ",\"color_transfer\":\"" + escapeJsonString(color_transfer) + "\"";
+                }
+            }
+            if (codecpar->color_primaries != AVCOL_PRI_UNSPECIFIED) {
+                const char *color_primaries = av_color_primaries_name(codecpar->color_primaries);
+                if (color_primaries != nullptr && color_primaries[0] != '\0') {
+                    json += ",\"color_primaries\":\"" + escapeJsonString(color_primaries) + "\"";
+                }
+            }
+            if (dv_profile >= 0) {
+                json += ",\"dv_profile\":" + std::to_string(dv_profile);
+            }
+            if (has_hdr10_plus) {
+                json += ",\"hdr10_plus\":true";
+            }
+            json += "}";
+        }
+    }
+
+    json += "]}";
+
+    if (format_context != nullptr) {
+        avformat_close_input(&format_context);
+    }
+    if (headers_chars != nullptr) {
+        env->ReleaseStringUTFChars(request_headers_blob, headers_chars);
+    }
+    env->ReleaseStringUTFChars(url, url_chars);
+    return env->NewStringUTF(json.c_str());
 }

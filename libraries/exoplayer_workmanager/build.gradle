@@ -17,7 +17,7 @@ apply plugin: 'com.android.library'
 apply from: "$gradle.ext.androidxMediaSettingsDir/common_config.gradle"
 
 android {
-    namespace 'androidx.media3.exoplayer.workmanager'
+    namespace = 'androidx.media3.exoplayer.workmanager'
 
     publishing {
         singleVariant('release') {

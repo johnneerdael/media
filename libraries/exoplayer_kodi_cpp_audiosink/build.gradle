@@ -16,7 +16,7 @@
 apply from: "$gradle.ext.androidxMediaSettingsDir/common_library_config.gradle"
 
 android {
-    namespace 'androidx.media3.exoplayer.kodi.cppaudiosink'
+    namespace = 'androidx.media3.exoplayer.kodi.cppaudiosink'
 
     defaultConfig {
         externalNativeBuild {

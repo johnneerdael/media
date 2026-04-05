@@ -136,6 +136,52 @@ public final class FfmpegLibrary {
   }
 
   /**
+   * Probes media metadata used by the Dolby Vision autoplay gate.
+   *
+   * <p>Returns a compact key/value blob (`key=value;...`) with keys:
+   * {@code video}, {@code audio}, {@code hdr}. Values may be {@code unknown}.
+   */
+  @Nullable
+  public static String probeDolbyVisionMetadataBlob(
+      String url, @Nullable String requestHeadersBlob) {
+    if (!isAvailable()) {
+      return null;
+    }
+    return ffmpegProbeDolbyVisionMetadataBlob(url, requestHeadersBlob);
+  }
+
+  /**
+   * Probes a media URL once and returns a compact blob containing DV status and metadata.
+   *
+   * <p>Blob keys may include: {@code status}, {@code profile}, {@code video}, {@code audio},
+   * {@code hdr}, and {@code error}.
+   */
+  @Nullable
+  public static String probeDolbyVisionProbeBlob(
+      String url, @Nullable String requestHeadersBlob) {
+    if (!isAvailable()) {
+      return null;
+    }
+    return ffmpegProbeDolbyVisionProbeBlob(url, requestHeadersBlob);
+  }
+
+  /**
+   * Probes all streams once and returns stream metadata JSON for autoplay scoring.
+   *
+   * <p>The payload mirrors the small ffprobe-style subset used by Nexio:
+   * {@code codec_type}, {@code codec_name}, {@code color_transfer}, {@code color_primaries},
+   * {@code dv_profile}, and {@code hdr10_plus}.
+   */
+  @Nullable
+  public static String probeDolbyVisionStreamMetadataJson(
+      String url, @Nullable String requestHeadersBlob) {
+    if (!isAvailable()) {
+      return null;
+    }
+    return ffmpegProbeDolbyVisionStreamMetadataJson(url, requestHeadersBlob);
+  }
+
+  /**
    * Enables an experimental native DV5 tone-mapping path in {@link FfmpegVideoDecoder}.
    *
    * <p>This only affects newly created decoders.
@@ -366,5 +412,14 @@ public final class FfmpegLibrary {
       Surface outputSurface);
 
   private static native int ffmpegProbeDolbyVisionProfile(
+      String url, @Nullable String requestHeadersBlob);
+
+  private static native @Nullable String ffmpegProbeDolbyVisionMetadataBlob(
+      String url, @Nullable String requestHeadersBlob);
+
+  private static native @Nullable String ffmpegProbeDolbyVisionProbeBlob(
+      String url, @Nullable String requestHeadersBlob);
+
+  private static native @Nullable String ffmpegProbeDolbyVisionStreamMetadataJson(
       String url, @Nullable String requestHeadersBlob);
 }

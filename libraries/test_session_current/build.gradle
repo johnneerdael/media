@@ -15,12 +15,13 @@ apply plugin: 'com.android.application'
 apply from: "$gradle.ext.androidxMediaSettingsDir/common_config.gradle"
 
 android {
-    namespace 'androidx.media3.test.session'
+    namespace = 'androidx.media3.test.session'
 
     defaultConfig {
         versionName project.ext.releaseVersion
         versionCode project.ext.releaseVersionCode
         targetSdkVersion project.ext.appTargetSdkVersion
+        testInstrumentationRunner = 'androidx.test.runner.AndroidJUnitRunner'
     }
 
     lintOptions {

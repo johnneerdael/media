@@ -17,7 +17,7 @@ apply plugin: 'kotlin-android'
 apply plugin: 'org.jetbrains.kotlin.plugin.compose'
 
 android {
-    namespace 'androidx.media3.demo.effect'
+    namespace = 'androidx.media3.demo.effect'
 
     compileSdk project.ext.compileSdkVersion
 
@@ -39,9 +39,9 @@ android {
 
     buildTypes {
         release {
-            shrinkResources true
-            minifyEnabled true
-            signingConfig signingConfigs.debug
+            shrinkResources = true
+            minifyEnabled = true
+            signingConfig = signingConfigs.debug
         }
         debug {
             jniDebuggable = true
@@ -53,7 +53,7 @@ android {
         disable 'GoogleAppIndexingWarning','MissingTranslation'
     }
     buildFeatures {
-        compose true
+        compose = true
     }
     testOptions {
         unitTests {

@@ -29,7 +29,7 @@ allprojects {
         google()
         mavenCentral()
         maven {
-            url 'https://jitpack.io'
+            url = 'https://jitpack.io'
             content {
                 includeGroup "com.github.philburk"
             }

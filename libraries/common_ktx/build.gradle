@@ -20,7 +20,7 @@ apply from: "$gradle.ext.androidxMediaSettingsDir/common_config.gradle"
 apply plugin: 'kotlin-android'
 
 android {
-    namespace 'androidx.media3.common.ktx'
+    namespace = 'androidx.media3.common.ktx'
 
     buildTypes {
         debug {

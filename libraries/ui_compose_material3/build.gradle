@@ -20,7 +20,7 @@ apply plugin: 'kotlin-android'
 apply plugin: 'org.jetbrains.kotlin.plugin.compose'
 
 android {
-    namespace 'androidx.media3.ui.compose.material3'
+    namespace = 'androidx.media3.ui.compose.material3'
 
     lint {
         baseline = file("lint-baseline.xml")
@@ -32,7 +32,7 @@ android {
         }
     }
     buildFeatures {
-        compose true
+        compose = true
     }
     publishing {
         singleVariant('release') {
