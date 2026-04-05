@@ -14,9 +14,9 @@
 apply from: "$gradle.ext.androidxMediaSettingsDir/common_library_config.gradle"
 
 android {
-    namespace 'androidx.media3.exoplayer.ima'
+    namespace = 'androidx.media3.exoplayer.ima'
 
-    compileOptions.coreLibraryDesugaringEnabled true
+    compileOptions.coreLibraryDesugaringEnabled = true
 
     sourceSets {
         androidTest.assets.srcDir '../test_data/src/test/assets'

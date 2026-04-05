@@ -16,7 +16,7 @@ apply plugin: 'kotlin-android'
 apply plugin: 'com.google.protobuf'
 
 android {
-    namespace 'androidx.media3.demo.session.service'
+    namespace = 'androidx.media3.demo.session.service'
 
     compileSdk project.ext.compileSdkVersion
 
@@ -38,7 +38,7 @@ android {
 
     buildTypes {
         release {
-            signingConfig signingConfigs.debug
+            signingConfig = signingConfigs.debug
         }
         debug {
             jniDebuggable = true

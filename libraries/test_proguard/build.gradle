@@ -15,7 +15,7 @@ apply from: '../../constants.gradle'
 apply plugin: 'com.android.application'
 
 android {
-    namespace 'androidx.media3.test.proguard'
+    namespace = 'androidx.media3.test.proguard'
 
     sourceSets {
         androidTest.assets.srcDir '../test_data/src/test/assets/'
@@ -27,7 +27,7 @@ android {
     compileOptions {
         sourceCompatibility JavaVersion.VERSION_1_8
         targetCompatibility JavaVersion.VERSION_1_8
-        coreLibraryDesugaringEnabled true
+        coreLibraryDesugaringEnabled = true
     }
 
     defaultConfig {
@@ -35,18 +35,18 @@ android {
         versionCode project.ext.releaseVersionCode
         minSdkVersion project.ext.minSdkVersion
         targetSdkVersion project.ext.appTargetSdkVersion
-        testInstrumentationRunner 'androidx.test.runner.AndroidJUnitRunner'
+        testInstrumentationRunner = 'androidx.test.runner.AndroidJUnitRunner'
     }
 
     buildTypes {
         debug {
             // Avoid AGP warning about a debuggable build with minification.
-            debuggable false
+            debuggable = false
         }
         // Run R8 for all build types to discover potential proguard problems.
         configureEach {
-            shrinkResources true
-            minifyEnabled true
+            shrinkResources = true
+            minifyEnabled = true
             proguardFiles = [
                 'proguard-rules.txt',
                 getDefaultProguardFile('proguard-android.txt')

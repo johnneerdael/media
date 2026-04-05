@@ -18,7 +18,7 @@ apply from: "$gradle.ext.androidxMediaSettingsDir/common_library_config.gradle"
 apply plugin: 'kotlin-android'
 
 android {
-    namespace 'androidx.media3.test.utils'
+    namespace = 'androidx.media3.test.utils'
 
     sourceSets {
         test.assets.srcDir '../test_data/src/test/assets/'

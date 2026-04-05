@@ -14,7 +14,7 @@
 apply from: "$gradle.ext.androidxMediaSettingsDir/common_library_config.gradle"
 
 android {
-    namespace 'androidx.media3.session'
+    namespace = 'androidx.media3.session'
 
     buildTypes {
         debug {
@@ -31,7 +31,7 @@ android {
         }
     }
     buildFeatures {
-        aidl true
+        aidl = true
     }
 }
 dependencies {
