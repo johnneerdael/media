@@ -359,6 +359,13 @@ std::string escapeJsonString(const std::string &value) {
     return escaped;
 }
 
+std::string rationalToJsonString(AVRational rational) {
+    if (rational.num <= 0 || rational.den <= 0) {
+        return "";
+    }
+    return std::to_string(rational.num) + "/" + std::to_string(rational.den);
+}
+
 }  // namespace
 
 extern "C"
@@ -885,6 +892,24 @@ Java_androidx_media3_decoder_ffmpeg_FfmpegLibrary_ffmpegProbeDolbyVisionStreamMe
             json += "{";
             json += "\"codec_type\":\"" + escapeJsonString(codec_type) + "\"";
             json += ",\"codec_name\":\"" + escapeJsonString(codec_name) + "\"";
+            if (codecpar->codec_type == AVMEDIA_TYPE_VIDEO) {
+                if (codecpar->width > 0) {
+                    json += ",\"width\":" + std::to_string(codecpar->width);
+                }
+                if (codecpar->height > 0) {
+                    json += ",\"height\":" + std::to_string(codecpar->height);
+                }
+
+                const std::string avg_frame_rate = rationalToJsonString(stream->avg_frame_rate);
+                if (!avg_frame_rate.empty()) {
+                    json += ",\"avg_frame_rate\":\"" + escapeJsonString(avg_frame_rate) + "\"";
+                }
+
+                const std::string r_frame_rate = rationalToJsonString(stream->r_frame_rate);
+                if (!r_frame_rate.empty()) {
+                    json += ",\"r_frame_rate\":\"" + escapeJsonString(r_frame_rate) + "\"";
+                }
+            }
             if (codecpar->color_trc != AVCOL_TRC_UNSPECIFIED) {
                 const char *color_transfer = av_color_transfer_name(codecpar->color_trc);
                 if (color_transfer != nullptr && color_transfer[0] != '\0') {
