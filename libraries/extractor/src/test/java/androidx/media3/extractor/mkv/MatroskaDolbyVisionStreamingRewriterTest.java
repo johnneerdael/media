@@ -62,6 +62,7 @@ public final class MatroskaDolbyVisionStreamingRewriterTest {
     byte[] rpu = nal(/* type= */ 62, /* layerId= */ 1, new byte[] {0x05});
     byte[] convertedRpu = nal(/* type= */ 62, /* layerId= */ 0, new byte[] {0x55});
     CapturingTrackOutput output = new CapturingTrackOutput();
+    final int[] rpuBytesSeen = new int[1];
 
     int bytesWritten =
         MatroskaExtractor.writeDolbyVisionHevcSampleNalByNalForTest(
@@ -85,6 +86,7 @@ public final class MatroskaDolbyVisionStreamingRewriterTest {
                   byte[] blockAdditionalData,
                   byte[] dolbyVisionConfigBytes) {
                 assertThat(rpuNalPayload).isEqualTo(rpu);
+                rpuBytesSeen[0] += rpuNalPayload.length;
                 return convertedRpu;
               }
             },
@@ -94,6 +96,7 @@ public final class MatroskaDolbyVisionStreamingRewriterTest {
 
     assertThat(bytesWritten).isEqualTo(4 + base.length + 4 + convertedRpu.length);
     assertThat(flatten(output.chunks)).isEqualTo(annexBSample(base, convertedRpu));
+    assertThat(rpuBytesSeen[0]).isEqualTo(rpu.length);
   }
 
   @Test

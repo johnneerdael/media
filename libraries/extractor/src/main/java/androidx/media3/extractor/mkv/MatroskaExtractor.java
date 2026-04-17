@@ -2114,10 +2114,6 @@ public class MatroskaExtractor implements Extractor {
 
     if (CODEC_ID_H265.equals(track.codecId) && dolbyVisionSampleTransformer != null) {
       int remainingSampleBytes = size - sampleBytesRead;
-      byte[] sampleLengthDelimitedData = new byte[remainingSampleBytes];
-      writeToTarget(input, sampleLengthDelimitedData, /* offset= */ 0, remainingSampleBytes);
-      sampleBytesRead += remainingSampleBytes;
-
       boolean useStreamingDolbyVisionRewrite =
           !deferSupplementalMainSampleSizePrefix
               && dolbyVisionSampleTransformer.shouldTransformHevcSampleNalByNal(
@@ -2127,23 +2123,25 @@ public class MatroskaExtractor implements Extractor {
                   track.dolbyVisionConfigBytes);
       if (useStreamingDolbyVisionRewrite) {
         int bytesWritten =
-            writeDolbyVisionHevcSampleNalByNalFromArray(
-                sampleLengthDelimitedData,
-                track.nalUnitLengthFieldLength,
+            writeDolbyVisionHevcSampleNalByNalFromInput(
+                input,
                 output,
+                remainingSampleBytes,
+                track.nalUnitLengthFieldLength,
                 dolbyVisionSampleTransformer,
                 blockTimeUs,
                 track.pendingDolbyVisionBlockAdditionalData,
                 track.dolbyVisionConfigBytes);
-        if (bytesWritten >= 0) {
-          sampleBytesWritten += bytesWritten;
-        } else {
-          int fallbackBytesWritten =
-              writeLengthDelimitedSampleAsAnnexB(
-                  output, sampleLengthDelimitedData, track.nalUnitLengthFieldLength, track.codecId);
-          sampleBytesWritten += fallbackBytesWritten;
+        sampleBytesRead += remainingSampleBytes;
+        if (bytesWritten < 0) {
+          throw ParserException.createForMalformedContainer(
+              "Malformed HEVC sample during Dolby Vision streaming rewrite", /* cause= */ null);
         }
+        sampleBytesWritten += bytesWritten;
       } else if (deferSupplementalMainSampleSizePrefix) {
+        byte[] sampleLengthDelimitedData = new byte[remainingSampleBytes];
+        writeToTarget(input, sampleLengthDelimitedData, /* offset= */ 0, remainingSampleBytes);
+        sampleBytesRead += remainingSampleBytes;
         byte[] payloadToWrite = maybeTransformHevcSamplePayload(track, sampleLengthDelimitedData);
         byte[] annexBSample =
             convertLengthDelimitedSampleToAnnexB(
@@ -2154,6 +2152,9 @@ public class MatroskaExtractor implements Extractor {
         output.sampleData(annexBData, annexBSample.length);
         sampleBytesWritten += annexBSample.length;
       } else {
+        byte[] sampleLengthDelimitedData = new byte[remainingSampleBytes];
+        writeToTarget(input, sampleLengthDelimitedData, /* offset= */ 0, remainingSampleBytes);
+        sampleBytesRead += remainingSampleBytes;
         byte[] payloadToWrite = maybeTransformHevcSamplePayload(track, sampleLengthDelimitedData);
         int bytesWritten =
             writeLengthDelimitedSampleAsAnnexB(
@@ -2368,6 +2369,92 @@ public class MatroskaExtractor implements Extractor {
       offset += nalLength;
     }
     return bytesWritten;
+  }
+
+  private int writeDolbyVisionHevcSampleNalByNalFromInput(
+      ExtractorInput input,
+      TrackOutput output,
+      int remainingSampleBytes,
+      int nalUnitLengthFieldLength,
+      DolbyVisionSampleTransformer transformer,
+      long sampleTimeUs,
+      @Nullable byte[] blockAdditionalData,
+      @Nullable byte[] dolbyVisionConfigBytes)
+      throws IOException {
+    if (nalUnitLengthFieldLength <= 0 || nalUnitLengthFieldLength > 4) {
+      return -1;
+    }
+    int bytesRead = 0;
+    int bytesWritten = 0;
+    byte[] lengthField = nalLength.getData();
+    byte[] skipBuffer = new byte[8192];
+    lengthField[0] = 0;
+    lengthField[1] = 0;
+    lengthField[2] = 0;
+    int lengthFieldOffset = 4 - nalUnitLengthFieldLength;
+    ParsableByteArray scratch = new ParsableByteArray();
+    while (bytesRead < remainingSampleBytes) {
+      if (remainingSampleBytes - bytesRead < nalUnitLengthFieldLength) {
+        return -1;
+      }
+      writeToTarget(input, lengthField, lengthFieldOffset, nalUnitLengthFieldLength);
+      bytesRead += nalUnitLengthFieldLength;
+      nalLength.setPosition(0);
+      int nalLengthValue = nalLength.readUnsignedIntToInt();
+      if (nalLengthValue < 2 || nalLengthValue > remainingSampleBytes - bytesRead) {
+        return -1;
+      }
+
+      byte[] header = new byte[2];
+      writeToTarget(input, header, /* offset= */ 0, /* length= */ 2);
+      bytesRead += 2;
+      int nalType = getHevcNalUnitType(header[0]);
+      int layerId = getHevcNuhLayerId(header, 0, header.length);
+      int payloadTailBytes = nalLengthValue - 2;
+
+      if (layerId > 0 && nalType != HEVC_NAL_TYPE_UNSPEC62) {
+        int skipped = 0;
+        while (skipped < payloadTailBytes) {
+          int toRead = min(skipBuffer.length, payloadTailBytes - skipped);
+          writeToTarget(input, skipBuffer, /* offset= */ 0, toRead);
+          skipped += toRead;
+        }
+        bytesRead += payloadTailBytes;
+        continue;
+      }
+
+      scratch.reset(NAL_START_CODE);
+      output.sampleData(scratch, NAL_START_CODE.length);
+      bytesWritten += NAL_START_CODE.length;
+      if (nalType == HEVC_NAL_TYPE_UNSPEC62) {
+        byte[] rpuPayload = new byte[nalLengthValue];
+        rpuPayload[0] = header[0];
+        rpuPayload[1] = header[1];
+        writeToTarget(input, rpuPayload, /* offset= */ 2, payloadTailBytes);
+        bytesRead += payloadTailBytes;
+        byte[] transformed =
+            transformer.transformDolbyVisionRpuNal(
+                rpuPayload, sampleTimeUs, blockAdditionalData, dolbyVisionConfigBytes);
+        byte[] rpuToWrite = transformed != null && transformed.length > 0 ? transformed : rpuPayload;
+        if (rpuToWrite.length < 2) {
+          return -1;
+        }
+        scratch.reset(rpuToWrite);
+        output.sampleData(scratch, rpuToWrite.length);
+        bytesWritten += rpuToWrite.length;
+      } else {
+        scratch.reset(header);
+        output.sampleData(scratch, header.length);
+        bytesWritten += header.length;
+        int copied = writeToOutput(input, output, payloadTailBytes);
+        bytesRead += copied;
+        bytesWritten += copied;
+        if (copied != payloadTailBytes) {
+          return -1;
+        }
+      }
+    }
+    return bytesRead == remainingSampleBytes ? bytesWritten : -1;
   }
 
   private static int getHevcNalUnitType(byte firstHeaderByte) {
