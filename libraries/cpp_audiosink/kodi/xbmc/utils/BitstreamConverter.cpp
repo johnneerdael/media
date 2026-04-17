@@ -1330,6 +1330,16 @@ const DoviData* CBitstreamConverter::processDoviRpu(uint8_t* buf, uint32_t nalSi
     return NULL;
 
   DoviRpuOpaque* rpu = dovi_parse_unspec62_nalu(buf, nalSize);
+  if (!rpu)
+    return NULL;
+
+  const char* parseError = dovi_rpu_get_error(rpu);
+  if (parseError && parseError[0] != '\0')
+  {
+    dovi_rpu_free(rpu);
+    return NULL;
+  }
+
   const DoviRpuDataHeader* header = dovi_rpu_get_header(rpu);
   const DoviData* rpuData = NULL;
 
