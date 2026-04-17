@@ -2303,6 +2303,27 @@ public class MatroskaExtractor implements Extractor {
         dolbyVisionConfigBytes);
   }
 
+  int writeDolbyVisionHevcSampleNalByNalFromInputForTest(
+      ExtractorInput input,
+      TrackOutput output,
+      int remainingSampleBytes,
+      int nalUnitLengthFieldLength,
+      DolbyVisionSampleTransformer transformer,
+      long sampleTimeUs,
+      @Nullable byte[] blockAdditionalData,
+      @Nullable byte[] dolbyVisionConfigBytes)
+      throws IOException {
+    return writeDolbyVisionHevcSampleNalByNalFromInput(
+        input,
+        output,
+        remainingSampleBytes,
+        nalUnitLengthFieldLength,
+        transformer,
+        sampleTimeUs,
+        blockAdditionalData,
+        dolbyVisionConfigBytes);
+  }
+
   private static int writeDolbyVisionHevcSampleNalByNalFromArray(
       byte[] sampleLengthDelimitedData,
       int nalUnitLengthFieldLength,
@@ -2446,11 +2467,15 @@ public class MatroskaExtractor implements Extractor {
         scratch.reset(header);
         output.sampleData(scratch, header.length);
         bytesWritten += header.length;
-        int copied = writeToOutput(input, output, payloadTailBytes);
-        bytesRead += copied;
-        bytesWritten += copied;
-        if (copied != payloadTailBytes) {
-          return -1;
+        int copied = 0;
+        while (copied < payloadTailBytes) {
+          int bytesCopied = writeToOutput(input, output, payloadTailBytes - copied);
+          if (bytesCopied <= 0) {
+            return -1;
+          }
+          copied += bytesCopied;
+          bytesRead += bytesCopied;
+          bytesWritten += bytesCopied;
         }
       }
     }

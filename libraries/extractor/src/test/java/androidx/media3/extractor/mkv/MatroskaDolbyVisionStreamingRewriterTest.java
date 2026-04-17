@@ -22,6 +22,8 @@ import androidx.media3.common.DataReader;
 import androidx.media3.common.Format;
 import androidx.media3.common.util.ParsableByteArray;
 import androidx.media3.extractor.TrackOutput;
+import androidx.media3.extractor.text.SubtitleParser;
+import androidx.media3.test.utils.FakeExtractorInput;
 import androidx.test.ext.junit.runners.AndroidJUnit4;
 import java.io.IOException;
 import java.util.ArrayList;
@@ -128,6 +130,41 @@ public final class MatroskaDolbyVisionStreamingRewriterTest {
   }
 
   @Test
+  public void writeHevcSampleNalByNalFromInput_handlesPartialTrackOutputReads() throws Exception {
+    byte[] base = nal(/* type= */ 19, /* layerId= */ 0, new byte[] {0x01, 0x02, 0x03});
+    byte[] rpu = nal(/* type= */ 62, /* layerId= */ 1, new byte[] {0x05});
+    byte[] convertedRpu = nal(/* type= */ 62, /* layerId= */ 0, new byte[] {0x55});
+    byte[] sample = lengthDelimitedSample(4, base, rpu);
+    FakeExtractorInput input = new FakeExtractorInput.Builder().setData(sample).build();
+    CapturingTrackOutput output = new CapturingTrackOutput(/* maxDataReaderBytesPerRead= */ 1);
+
+    int bytesWritten =
+        new MatroskaExtractor(SubtitleParser.Factory.UNSUPPORTED)
+            .writeDolbyVisionHevcSampleNalByNalFromInputForTest(
+                input,
+                output,
+                sample.length,
+                /* nalUnitLengthFieldLength= */ 4,
+                new MatroskaExtractor.DolbyVisionSampleTransformer() {
+                  @Override
+                  public byte[] transformDolbyVisionRpuNal(
+                      byte[] rpuNalPayload,
+                      long sampleTimeUs,
+                      byte[] blockAdditionalData,
+                      byte[] dolbyVisionConfigBytes) {
+                    assertThat(rpuNalPayload).isEqualTo(rpu);
+                    return convertedRpu;
+                  }
+                },
+                /* sampleTimeUs= */ 123L,
+                /* blockAdditionalData= */ null,
+                /* dolbyVisionConfigBytes= */ null);
+
+    assertThat(bytesWritten).isEqualTo(4 + base.length + 4 + convertedRpu.length);
+    assertThat(flatten(output.chunks)).isEqualTo(annexBSample(base, convertedRpu));
+  }
+
+  @Test
   public void streamingDecisionFalse_keepsFullSampleFallbackAvailable() {
     MatroskaExtractor.DolbyVisionSampleTransformer transformer =
         new MatroskaExtractor.DolbyVisionSampleTransformer() {
@@ -216,6 +253,15 @@ public final class MatroskaDolbyVisionStreamingRewriterTest {
 
   private static final class CapturingTrackOutput implements TrackOutput {
     final List<byte[]> chunks = new ArrayList<>();
+    private final int maxDataReaderBytesPerRead;
+
+    CapturingTrackOutput() {
+      this(Integer.MAX_VALUE);
+    }
+
+    CapturingTrackOutput(int maxDataReaderBytesPerRead) {
+      this.maxDataReaderBytesPerRead = maxDataReaderBytesPerRead;
+    }
 
     @Override
     public void format(Format format) {}
@@ -224,7 +270,19 @@ public final class MatroskaDolbyVisionStreamingRewriterTest {
     public int sampleData(
         DataReader input, int length, boolean allowEndOfInput, int sampleDataPart)
         throws IOException {
-      throw new UnsupportedOperationException("DataReader path is not used by this contract test");
+      int bytesToRead = Math.min(length, maxDataReaderBytesPerRead);
+      byte[] copy = new byte[bytesToRead];
+      int bytesRead = input.read(copy, 0, bytesToRead);
+      if (bytesRead == C.RESULT_END_OF_INPUT) {
+        return C.RESULT_END_OF_INPUT;
+      }
+      if (bytesRead < copy.length) {
+        byte[] truncated = new byte[bytesRead];
+        System.arraycopy(copy, 0, truncated, 0, bytesRead);
+        copy = truncated;
+      }
+      chunks.add(copy);
+      return bytesRead;
     }
 
     @Override
