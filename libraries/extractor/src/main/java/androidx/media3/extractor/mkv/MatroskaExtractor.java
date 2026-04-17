@@ -169,6 +169,41 @@ public class MatroskaExtractor implements Extractor {
     }
 
     /**
+     * Returns whether this transformer wants the extractor to stream-rewrite this HEVC sample NAL
+     * by NAL instead of materializing the full sample for {@link #transformHevcSample}.
+     *
+     * <p>When true, the extractor owns length-delimited parsing and Annex-B output. Base-layer NALs
+     * are streamed directly, enhancement-layer non-RPU NALs are discarded, and RPU NALs are passed
+     * to {@link #transformDolbyVisionRpuNal}.
+     */
+    default boolean shouldTransformHevcSampleNalByNal(
+        long sampleTimeUs,
+        int nalUnitLengthFieldLength,
+        @Nullable byte[] blockAdditionalData,
+        @Nullable byte[] dolbyVisionConfigBytes) {
+      return false;
+    }
+
+    /**
+     * Optionally rewrites one Dolby Vision RPU NAL payload while streaming a length-delimited HEVC
+     * sample.
+     *
+     * @param rpuNalPayload RPU NAL payload bytes including the two-byte HEVC NAL header.
+     * @param sampleTimeUs Sample presentation timestamp in microseconds.
+     * @param blockAdditionalData BlockAdditional payload associated with this sample, if present.
+     * @param dolbyVisionConfigBytes Track-level Dolby Vision config bytes, if available.
+     * @return Replacement RPU NAL payload, or null to keep the original RPU.
+     */
+    @Nullable
+    default byte[] transformDolbyVisionRpuNal(
+        byte[] rpuNalPayload,
+        long sampleTimeUs,
+        @Nullable byte[] blockAdditionalData,
+        @Nullable byte[] dolbyVisionConfigBytes) {
+      return null;
+    }
+
+    /**
      * Optionally rewrites an HEVC sample payload.
      *
      * @param sampleLengthDelimitedData Sample payload in length-delimited NAL format.
