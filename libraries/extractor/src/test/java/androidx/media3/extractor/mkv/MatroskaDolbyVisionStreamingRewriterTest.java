@@ -130,6 +130,40 @@ public final class MatroskaDolbyVisionStreamingRewriterTest {
   }
 
   @Test
+  public void writeHevcSampleNalByNalFromInput_preservesShortNalPayloads() throws Exception {
+    byte[] zeroLengthNalSample = lengthDelimitedSample(4, new byte[0]);
+    byte[] oneByteNalSample = lengthDelimitedSample(4, new byte[] {0x7C});
+    CapturingTrackOutput output = new CapturingTrackOutput(/* maxDataReaderBytesPerRead= */ 1);
+
+    int zeroLengthBytesWritten =
+        new MatroskaExtractor(SubtitleParser.Factory.UNSUPPORTED)
+            .writeDolbyVisionHevcSampleNalByNalFromInputForTest(
+                new FakeExtractorInput.Builder().setData(zeroLengthNalSample).build(),
+                output,
+                zeroLengthNalSample.length,
+                /* nalUnitLengthFieldLength= */ 4,
+                new MatroskaExtractor.DolbyVisionSampleTransformer() {},
+                /* sampleTimeUs= */ 123L,
+                /* blockAdditionalData= */ null,
+                /* dolbyVisionConfigBytes= */ null);
+    int oneByteBytesWritten =
+        new MatroskaExtractor(SubtitleParser.Factory.UNSUPPORTED)
+            .writeDolbyVisionHevcSampleNalByNalFromInputForTest(
+                new FakeExtractorInput.Builder().setData(oneByteNalSample).build(),
+                output,
+                oneByteNalSample.length,
+                /* nalUnitLengthFieldLength= */ 4,
+                new MatroskaExtractor.DolbyVisionSampleTransformer() {},
+                /* sampleTimeUs= */ 123L,
+                /* blockAdditionalData= */ null,
+                /* dolbyVisionConfigBytes= */ null);
+
+    assertThat(zeroLengthBytesWritten).isEqualTo(4);
+    assertThat(oneByteBytesWritten).isEqualTo(5);
+    assertThat(flatten(output.chunks)).isEqualTo(annexBSample(new byte[0], new byte[] {0x7C}));
+  }
+
+  @Test
   public void writeHevcSampleNalByNalFromInput_handlesPartialTrackOutputReads() throws Exception {
     byte[] base = nal(/* type= */ 19, /* layerId= */ 0, new byte[] {0x01, 0x02, 0x03});
     byte[] rpu = nal(/* type= */ 62, /* layerId= */ 1, new byte[] {0x05});

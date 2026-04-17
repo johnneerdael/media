@@ -2348,8 +2348,21 @@ public class MatroskaExtractor implements Extractor {
         nalLength = (nalLength << 8) | (sampleLengthDelimitedData[offset + i] & 0xFF);
       }
       offset += nalUnitLengthFieldLength;
-      if (nalLength < 2 || offset + nalLength > sampleLengthDelimitedData.length) {
+      if (nalLength < 0 || offset + nalLength > sampleLengthDelimitedData.length) {
         return -1;
+      }
+      if (nalLength < 2) {
+        scratch.reset(NAL_START_CODE);
+        output.sampleData(scratch, NAL_START_CODE.length);
+        bytesWritten += NAL_START_CODE.length;
+        if (nalLength == 1) {
+          scratch.reset(sampleLengthDelimitedData, offset + nalLength);
+          scratch.setPosition(offset);
+          output.sampleData(scratch, nalLength);
+          bytesWritten += nalLength;
+        }
+        offset += nalLength;
+        continue;
       }
 
       int nalType = getHevcNalUnitType(sampleLengthDelimitedData[offset]);
@@ -2422,8 +2435,22 @@ public class MatroskaExtractor implements Extractor {
       bytesRead += nalUnitLengthFieldLength;
       nalLength.setPosition(0);
       int nalLengthValue = nalLength.readUnsignedIntToInt();
-      if (nalLengthValue < 2 || nalLengthValue > remainingSampleBytes - bytesRead) {
+      if (nalLengthValue < 0 || nalLengthValue > remainingSampleBytes - bytesRead) {
         return -1;
+      }
+      if (nalLengthValue < 2) {
+        scratch.reset(NAL_START_CODE);
+        output.sampleData(scratch, NAL_START_CODE.length);
+        bytesWritten += NAL_START_CODE.length;
+        if (nalLengthValue == 1) {
+          byte[] shortNal = new byte[1];
+          writeToTarget(input, shortNal, /* offset= */ 0, /* length= */ 1);
+          bytesRead += 1;
+          scratch.reset(shortNal);
+          output.sampleData(scratch, shortNal.length);
+          bytesWritten += shortNal.length;
+        }
+        continue;
       }
 
       byte[] header = new byte[2];
