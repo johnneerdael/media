@@ -26,6 +26,7 @@ import androidx.media3.common.Format;
 import androidx.media3.common.Label;
 import androidx.media3.common.MimeTypes;
 import androidx.media3.common.ParserException;
+import androidx.media3.common.util.DolbyVisionCompatibility;
 import androidx.media3.common.util.Util;
 import androidx.media3.datasource.DataSourceInputStream;
 import androidx.media3.datasource.DataSpec;
@@ -39,6 +40,7 @@ import androidx.media3.test.utils.TestUtil;
 import androidx.test.core.app.ApplicationProvider;
 import androidx.test.ext.junit.runners.AndroidJUnit4;
 import com.google.common.collect.ImmutableList;
+import java.io.ByteArrayInputStream;
 import java.io.IOException;
 import java.io.StringReader;
 import java.nio.charset.StandardCharsets;
@@ -95,6 +97,23 @@ public class DashManifestParserTest {
 
   private static final String NEXT_TAG_NAME = "Next";
   private static final String NEXT_TAG = "<" + NEXT_TAG_NAME + "/>";
+  private static final String DOLBY_VISION_PROFILE7_MPD =
+      "<?xml version=\"1.0\" encoding=\"UTF-8\"?>"
+          + "<MPD xmlns=\"urn:mpeg:dash:schema:mpd:2011\""
+          + " xmlns:scte214=\"urn:scte:dash:scte214-extensions\""
+          + " type=\"static\" mediaPresentationDuration=\"PT1S\" minBufferTime=\"PT1S\""
+          + " profiles=\"urn:mpeg:dash:profile:isoff-on-demand:2011\">"
+          + "<Period>"
+          + "<AdaptationSet mimeType=\"video/mp4\" contentType=\"video\">"
+          + "<Representation id=\"v1\" bandwidth=\"1000\" width=\"1920\" height=\"1080\""
+          + " codecs=\"hev1.2.4.L153.B0\" scte214:supplementalCodecs=\"dvhe.07.06\""
+          + " scte214:supplementalProfiles=\"db1p\">"
+          + "<BaseURL>video.mp4</BaseURL>"
+          + "<SegmentBase indexRange=\"0-1\"><Initialization range=\"0-1\" /></SegmentBase>"
+          + "</Representation>"
+          + "</AdaptationSet>"
+          + "</Period>"
+          + "</MPD>";
 
   @Test
   public void parse_withUpstreamError_throwsUpstreamException() {
@@ -428,6 +447,42 @@ public class DashManifestParserTest {
     assertThat(adaptationSet.supplementalProperties.get(0).schemeIdUri)
         .isEqualTo("urn:dolby:dash:dolby-vision:2018");
     assertThat(adaptationSet.supplementalProperties.get(0).value).isEqualTo("10.1");
+  }
+
+  @Test
+  public void parseMediaPresentationDescription_dolbyVisionProfile7MapToHevcDisabled_keepsDolbyVision()
+      throws IOException {
+    DolbyVisionCompatibility.setMapDv7ToHevcEnabled(false);
+    DashManifestParser parser = new DashManifestParser();
+
+    DashManifest manifest =
+        parser.parse(
+            Uri.parse("https://example.com/test.mpd"),
+            new ByteArrayInputStream(DOLBY_VISION_PROFILE7_MPD.getBytes(StandardCharsets.UTF_8)));
+
+    Format format = manifest.getPeriod(0).adaptationSets.get(0).representations.get(0).format;
+    assertThat(format.sampleMimeType).isEqualTo(MimeTypes.VIDEO_DOLBY_VISION);
+    assertThat(format.codecs).isEqualTo("dvhe.07.06");
+  }
+
+  @Test
+  public void parseMediaPresentationDescription_dolbyVisionProfile7MapToHevcEnabled_usesHevcBaseLayer()
+      throws IOException {
+    DolbyVisionCompatibility.setMapDv7ToHevcEnabled(true);
+    try {
+      DashManifestParser parser = new DashManifestParser();
+
+      DashManifest manifest =
+          parser.parse(
+              Uri.parse("https://example.com/test.mpd"),
+              new ByteArrayInputStream(DOLBY_VISION_PROFILE7_MPD.getBytes(StandardCharsets.UTF_8)));
+
+      Format format = manifest.getPeriod(0).adaptationSets.get(0).representations.get(0).format;
+      assertThat(format.sampleMimeType).isEqualTo(MimeTypes.VIDEO_H265);
+      assertThat(format.codecs).isEqualTo("hev1.2.4.L153.B0");
+    } finally {
+      DolbyVisionCompatibility.setMapDv7ToHevcEnabled(false);
+    }
   }
 
   @Test

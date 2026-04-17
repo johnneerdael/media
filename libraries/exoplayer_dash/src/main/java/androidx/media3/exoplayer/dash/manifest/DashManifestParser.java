@@ -103,6 +103,7 @@ public class DashManifestParser extends DefaultHandler
       new int[] {
         Format.NO_VALUE, 1, 2, 3, 4, 5, 6, 8, 2, 3, 4, 7, 8, 24, 8, 12, 10, 12, 14, 12, 14
       };
+  private static final String SCTE214_EXTENSION_NAMESPACE = "urn:scte:dash:scte214-extensions";
 
   private final XmlPullParserFactory xmlParserFactory;
 
@@ -420,8 +421,8 @@ public class DashManifestParser extends DefaultHandler
 
     String mimeType = xpp.getAttributeValue(null, "mimeType");
     String codecs = xpp.getAttributeValue(null, "codecs");
-    String supplementalCodecs = xpp.getAttributeValue(null, "scte214:supplementalCodecs");
-    String supplementalProfiles = xpp.getAttributeValue(null, "scte214:supplementalProfiles");
+    String supplementalCodecs = parseScte214String(xpp, "supplementalCodecs", null);
+    String supplementalProfiles = parseScte214String(xpp, "supplementalProfiles", null);
     int width = parseInt(xpp, "width", Format.NO_VALUE);
     int height = parseInt(xpp, "height", Format.NO_VALUE);
     float frameRate = parseFrameRate(xpp, Format.NO_VALUE);
@@ -724,9 +725,9 @@ public class DashManifestParser extends DefaultHandler
     String mimeType = parseString(xpp, "mimeType", adaptationSetMimeType);
     String codecs = parseString(xpp, "codecs", adaptationSetCodecs);
     String supplementalCodecs =
-        parseString(xpp, "scte214:supplementalCodecs", adaptationSetSupplementalCodecs);
+        parseScte214String(xpp, "supplementalCodecs", adaptationSetSupplementalCodecs);
     String supplementalProfiles =
-        parseString(xpp, "scte214:supplementalProfiles", adaptationSetSupplementalProfiles);
+        parseScte214String(xpp, "supplementalProfiles", adaptationSetSupplementalProfiles);
     int width = parseInt(xpp, "width", adaptationSetWidth);
     int height = parseInt(xpp, "height", adaptationSetHeight);
     float frameRate = parseFrameRate(xpp, adaptationSetFrameRate);
@@ -2017,6 +2018,15 @@ public class DashManifestParser extends DefaultHandler
 
   protected static String parseString(XmlPullParser xpp, String name, String defaultValue) {
     String value = xpp.getAttributeValue(null, name);
+    return value == null ? defaultValue : value;
+  }
+
+  protected static String parseScte214String(
+      XmlPullParser xpp, String localName, String defaultValue) {
+    String value = xpp.getAttributeValue(SCTE214_EXTENSION_NAMESPACE, localName);
+    if (value == null) {
+      value = xpp.getAttributeValue(null, "scte214:" + localName);
+    }
     return value == null ? defaultValue : value;
   }
 

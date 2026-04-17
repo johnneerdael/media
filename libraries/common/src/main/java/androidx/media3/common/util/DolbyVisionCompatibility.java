@@ -57,7 +57,7 @@ public final class DolbyVisionCompatibility {
       // without an explicit codec string.
       return Objects.equals(sampleMimeType, MimeTypes.VIDEO_DOLBY_VISION);
     }
-    return extractDolbyVisionCodec(codecs) != null;
+    return isDolbyVisionProfile7(codecs);
   }
 
   public static boolean isDolbyVisionProfile7(@Nullable String codecs) {
@@ -76,11 +76,13 @@ public final class DolbyVisionCompatibility {
   @Nullable
   public static String chooseHevcCodecsString(
       @Nullable String codecs, @Nullable String supplementalCodecs) {
-    if (isHevcCodecsString(codecs)) {
-      return codecs;
+    @Nullable String hevcCodecs = findHevcCodecsString(codecs);
+    if (hevcCodecs != null) {
+      return hevcCodecs;
     }
-    if (isHevcCodecsString(supplementalCodecs)) {
-      return supplementalCodecs;
+    hevcCodecs = findHevcCodecsString(supplementalCodecs);
+    if (hevcCodecs != null) {
+      return hevcCodecs;
     }
     return null;
   }
@@ -127,6 +129,21 @@ public final class DolbyVisionCompatibility {
     }
     String trimmed = codecs.trim();
     return trimmed.startsWith("hvc1") || trimmed.startsWith("hev1");
+  }
+
+  @Nullable
+  private static String findHevcCodecsString(@Nullable String codecs) {
+    if (codecs == null) {
+      return null;
+    }
+    String[] codecParts = Util.splitCodecs(codecs);
+    for (int i = 0; i < codecParts.length; i++) {
+      String codec = codecParts[i].trim();
+      if (isHevcCodecsString(codec)) {
+        return codec;
+      }
+    }
+    return null;
   }
 
   @Nullable
