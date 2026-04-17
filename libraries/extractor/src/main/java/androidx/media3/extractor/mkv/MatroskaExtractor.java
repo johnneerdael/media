@@ -2118,23 +2118,33 @@ public class MatroskaExtractor implements Extractor {
       writeToTarget(input, sampleLengthDelimitedData, /* offset= */ 0, remainingSampleBytes);
       sampleBytesRead += remainingSampleBytes;
 
-      byte[] payloadToWrite = sampleLengthDelimitedData;
-      try {
-        byte[] transformedPayload =
-            dolbyVisionSampleTransformer.transformHevcSample(
+      boolean useStreamingDolbyVisionRewrite =
+          !deferSupplementalMainSampleSizePrefix
+              && dolbyVisionSampleTransformer.shouldTransformHevcSampleNalByNal(
+                  blockTimeUs,
+                  track.nalUnitLengthFieldLength,
+                  track.pendingDolbyVisionBlockAdditionalData,
+                  track.dolbyVisionConfigBytes);
+      if (useStreamingDolbyVisionRewrite) {
+        int bytesWritten =
+            writeDolbyVisionHevcSampleNalByNalFromArray(
                 sampleLengthDelimitedData,
                 track.nalUnitLengthFieldLength,
+                output,
+                dolbyVisionSampleTransformer,
+                blockTimeUs,
                 track.pendingDolbyVisionBlockAdditionalData,
-                track.dolbyVisionConfigBytes,
-                blockTimeUs);
-        if (transformedPayload != null) {
-          payloadToWrite = transformedPayload;
+                track.dolbyVisionConfigBytes);
+        if (bytesWritten >= 0) {
+          sampleBytesWritten += bytesWritten;
+        } else {
+          int fallbackBytesWritten =
+              writeLengthDelimitedSampleAsAnnexB(
+                  output, sampleLengthDelimitedData, track.nalUnitLengthFieldLength, track.codecId);
+          sampleBytesWritten += fallbackBytesWritten;
         }
-      } catch (RuntimeException e) {
-        Log.w(TAG, "DolbyVisionSampleTransformer.transformHevcSample failed: " + e.getMessage());
-      }
-
-      if (deferSupplementalMainSampleSizePrefix) {
+      } else if (deferSupplementalMainSampleSizePrefix) {
+        byte[] payloadToWrite = maybeTransformHevcSamplePayload(track, sampleLengthDelimitedData);
         byte[] annexBSample =
             convertLengthDelimitedSampleToAnnexB(
                 payloadToWrite, track.nalUnitLengthFieldLength, track.codecId);
@@ -2144,6 +2154,7 @@ public class MatroskaExtractor implements Extractor {
         output.sampleData(annexBData, annexBSample.length);
         sampleBytesWritten += annexBSample.length;
       } else {
+        byte[] payloadToWrite = maybeTransformHevcSamplePayload(track, sampleLengthDelimitedData);
         int bytesWritten =
             writeLengthDelimitedSampleAsAnnexB(
                 output, payloadToWrite, track.nalUnitLengthFieldLength, track.codecId);
@@ -2210,6 +2221,26 @@ public class MatroskaExtractor implements Extractor {
     }
 
     return finishWriteSampleData();
+  }
+
+  private byte[] maybeTransformHevcSamplePayload(Track track, byte[] sampleLengthDelimitedData) {
+    byte[] payloadToWrite = sampleLengthDelimitedData;
+    try {
+      byte[] transformedPayload =
+          checkNotNull(dolbyVisionSampleTransformer)
+              .transformHevcSample(
+                  sampleLengthDelimitedData,
+                  track.nalUnitLengthFieldLength,
+                  track.pendingDolbyVisionBlockAdditionalData,
+                  track.dolbyVisionConfigBytes,
+                  blockTimeUs);
+      if (transformedPayload != null) {
+        payloadToWrite = transformedPayload;
+      }
+    } catch (RuntimeException e) {
+      Log.w(TAG, "DolbyVisionSampleTransformer.transformHevcSample failed: " + e.getMessage());
+    }
+    return payloadToWrite;
   }
 
   private int writeLengthDelimitedSampleAsAnnexB(

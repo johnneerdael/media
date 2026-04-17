@@ -124,6 +124,30 @@ public final class MatroskaDolbyVisionStreamingRewriterTest {
     assertThat(output.chunks).isEmpty();
   }
 
+  @Test
+  public void streamingDecisionFalse_keepsFullSampleFallbackAvailable() {
+    MatroskaExtractor.DolbyVisionSampleTransformer transformer =
+        new MatroskaExtractor.DolbyVisionSampleTransformer() {
+          @Override
+          public byte[] transformHevcSample(
+              byte[] sampleLengthDelimitedData,
+              int nalUnitLengthFieldLength,
+              byte[] blockAdditionalData,
+              byte[] dolbyVisionConfigBytes,
+              long sampleTimeUs) {
+            return sampleLengthDelimitedData;
+          }
+        };
+
+    assertThat(
+            transformer.shouldTransformHevcSampleNalByNal(
+                /* sampleTimeUs= */ 1L,
+                /* nalUnitLengthFieldLength= */ 4,
+                /* blockAdditionalData= */ null,
+                /* dolbyVisionConfigBytes= */ null))
+        .isFalse();
+  }
+
   private static byte[] nal(int type, int layerId, byte[] payload) {
     byte[] out = new byte[2 + payload.length];
     out[0] = (byte) ((type << 1) | ((layerId >>> 5) & 0x01));
