@@ -286,6 +286,9 @@ public class MatroskaExtractor implements Extractor {
 
   private static final String TAG = "MatroskaExtractor";
 
+  private static final int HEVC_NAL_TYPE_UNSPEC62 = 62;
+  private static final byte[] NAL_START_CODE = new byte[] {0, 0, 0, 1};
+
   private static final int UNSET_ENTRY_ID = -1;
 
   private static final int BLOCK_STATE_START = 0;
@@ -2247,6 +2250,106 @@ public class MatroskaExtractor implements Extractor {
     }
 
     return bytesWritten;
+  }
+
+  static int writeDolbyVisionHevcSampleNalByNalForTest(
+      byte[] sampleLengthDelimitedData,
+      int nalUnitLengthFieldLength,
+      TrackOutput output,
+      DolbyVisionSampleTransformer transformer,
+      long sampleTimeUs,
+      @Nullable byte[] blockAdditionalData,
+      @Nullable byte[] dolbyVisionConfigBytes)
+      throws ParserException {
+    return writeDolbyVisionHevcSampleNalByNalFromArray(
+        sampleLengthDelimitedData,
+        nalUnitLengthFieldLength,
+        output,
+        transformer,
+        sampleTimeUs,
+        blockAdditionalData,
+        dolbyVisionConfigBytes);
+  }
+
+  private static int writeDolbyVisionHevcSampleNalByNalFromArray(
+      byte[] sampleLengthDelimitedData,
+      int nalUnitLengthFieldLength,
+      TrackOutput output,
+      DolbyVisionSampleTransformer transformer,
+      long sampleTimeUs,
+      @Nullable byte[] blockAdditionalData,
+      @Nullable byte[] dolbyVisionConfigBytes)
+      throws ParserException {
+    if (nalUnitLengthFieldLength <= 0 || nalUnitLengthFieldLength > 4) {
+      return -1;
+    }
+    int offset = 0;
+    int bytesWritten = 0;
+    ParsableByteArray scratch = new ParsableByteArray();
+    while (offset < sampleLengthDelimitedData.length) {
+      if (offset + nalUnitLengthFieldLength > sampleLengthDelimitedData.length) {
+        return -1;
+      }
+      int nalLength = 0;
+      for (int i = 0; i < nalUnitLengthFieldLength; i++) {
+        nalLength = (nalLength << 8) | (sampleLengthDelimitedData[offset + i] & 0xFF);
+      }
+      offset += nalUnitLengthFieldLength;
+      if (nalLength < 2 || offset + nalLength > sampleLengthDelimitedData.length) {
+        return -1;
+      }
+
+      int nalType = getHevcNalUnitType(sampleLengthDelimitedData[offset]);
+      int layerId = getHevcNuhLayerId(sampleLengthDelimitedData, offset, nalLength);
+      if (layerId > 0 && nalType != HEVC_NAL_TYPE_UNSPEC62) {
+        offset += nalLength;
+        continue;
+      }
+
+      byte[] nalToWrite;
+      if (nalType == HEVC_NAL_TYPE_UNSPEC62) {
+        byte[] rpuPayload = new byte[nalLength];
+        System.arraycopy(sampleLengthDelimitedData, offset, rpuPayload, 0, nalLength);
+        byte[] transformed =
+            transformer.transformDolbyVisionRpuNal(
+                rpuPayload, sampleTimeUs, blockAdditionalData, dolbyVisionConfigBytes);
+        nalToWrite = transformed != null && transformed.length > 0 ? transformed : rpuPayload;
+        if (nalToWrite.length < 2) {
+          return -1;
+        }
+      } else {
+        nalToWrite = null;
+      }
+
+      scratch.reset(NAL_START_CODE);
+      output.sampleData(scratch, NAL_START_CODE.length);
+      bytesWritten += NAL_START_CODE.length;
+      if (nalToWrite != null) {
+        scratch.reset(nalToWrite);
+        output.sampleData(scratch, nalToWrite.length);
+        bytesWritten += nalToWrite.length;
+      } else {
+        scratch.reset(sampleLengthDelimitedData, offset + nalLength);
+        scratch.setPosition(offset);
+        output.sampleData(scratch, nalLength);
+        bytesWritten += nalLength;
+      }
+      offset += nalLength;
+    }
+    return bytesWritten;
+  }
+
+  private static int getHevcNalUnitType(byte firstHeaderByte) {
+    return (firstHeaderByte & 0x7E) >> 1;
+  }
+
+  private static int getHevcNuhLayerId(byte[] data, int offset, int nalLength) {
+    if (nalLength < 2) {
+      return 0;
+    }
+    int b0 = data[offset] & 0x01;
+    int b1 = data[offset + 1] & 0xF8;
+    return (b0 << 5) | (b1 >> 3);
   }
 
   private byte[] convertLengthDelimitedSampleToAnnexB(
