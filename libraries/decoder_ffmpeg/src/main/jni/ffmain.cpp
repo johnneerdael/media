@@ -862,16 +862,25 @@ Java_androidx_media3_decoder_ffmpeg_FfmpegLibrary_ffmpegProbeDolbyVisionStreamMe
             }
 
             const AVCodecParameters *codecpar = stream->codecpar;
+            if (codecpar->codec_type != AVMEDIA_TYPE_VIDEO &&
+                codecpar->codec_type != AVMEDIA_TYPE_SUBTITLE) {
+                continue;
+            }
+            if (codecpar->codec_type == AVMEDIA_TYPE_VIDEO &&
+                static_cast<int>(i) != av_find_best_stream(
+                        format_context,
+                        AVMEDIA_TYPE_VIDEO,
+                        -1,
+                        -1,
+                        nullptr,
+                        0)) {
+                continue;
+            }
             const char *codec_type = av_get_media_type_string(codecpar->codec_type);
             const char *codec_name = avcodec_get_name(codecpar->codec_id);
             if (codec_type == nullptr || codec_name == nullptr || codec_name[0] == '\0') {
                 continue;
             }
-
-            bool has_hdr10_plus = av_packet_side_data_get(
-                    codecpar->coded_side_data,
-                    codecpar->nb_coded_side_data,
-                    AV_PKT_DATA_DYNAMIC_HDR10_PLUS) != nullptr;
 
             int dv_profile = -1;
             const AVPacketSideData *dovi_side_data = av_packet_side_data_get(
@@ -890,7 +899,8 @@ Java_androidx_media3_decoder_ffmpeg_FfmpegLibrary_ffmpegProbeDolbyVisionStreamMe
             }
             first_stream = false;
             json += "{";
-            json += "\"codec_type\":\"" + escapeJsonString(codec_type) + "\"";
+            json += "\"index\":" + std::to_string(stream->index);
+            json += ",\"codec_type\":\"" + escapeJsonString(codec_type) + "\"";
             json += ",\"codec_name\":\"" + escapeJsonString(codec_name) + "\"";
             if (codecpar->codec_type == AVMEDIA_TYPE_VIDEO) {
                 if (codecpar->width > 0) {
@@ -910,23 +920,9 @@ Java_androidx_media3_decoder_ffmpeg_FfmpegLibrary_ffmpegProbeDolbyVisionStreamMe
                     json += ",\"r_frame_rate\":\"" + escapeJsonString(r_frame_rate) + "\"";
                 }
             }
-            if (codecpar->color_trc != AVCOL_TRC_UNSPECIFIED) {
-                const char *color_transfer = av_color_transfer_name(codecpar->color_trc);
-                if (color_transfer != nullptr && color_transfer[0] != '\0') {
-                    json += ",\"color_transfer\":\"" + escapeJsonString(color_transfer) + "\"";
-                }
-            }
-            if (codecpar->color_primaries != AVCOL_PRI_UNSPECIFIED) {
-                const char *color_primaries = av_color_primaries_name(codecpar->color_primaries);
-                if (color_primaries != nullptr && color_primaries[0] != '\0') {
-                    json += ",\"color_primaries\":\"" + escapeJsonString(color_primaries) + "\"";
-                }
-            }
             if (dv_profile >= 0) {
-                json += ",\"dv_profile\":" + std::to_string(dv_profile);
-            }
-            if (has_hdr10_plus) {
-                json += ",\"hdr10_plus\":true";
+                json += ",\"side_data_list\":[{\"side_data_type\":\"DOVI configuration record\",\"dv_profile\":" +
+                        std::to_string(dv_profile) + "}]";
             }
             json += "}";
         }
