@@ -610,6 +610,7 @@ public final class DefaultAudioSink implements AudioSink {
   private boolean handledEndOfStream;
   private boolean stoppedAudioOutput;
   private boolean handledOffloadOnPresentationEnded;
+  private boolean pendingPassthroughBufferDiagnosticAfterFlush;
 
   private boolean playing;
   private boolean externalAudioSessionIdProvided;
@@ -993,6 +994,8 @@ public final class DefaultAudioSink implements AudioSink {
           return true;
         }
       }
+      maybeLogFirstPassthroughBufferAfterFlush(
+          buffer, presentationTimeUs, encodedAccessUnitCount, framesPerEncodedSample);
 
       if (afterDrainParameters != null) {
         if (!drainToEndOfStream()) {
@@ -1505,6 +1508,7 @@ public final class DefaultAudioSink implements AudioSink {
   @Override
   public void flush() {
     if (isAudioOutputInitialized()) {
+      maybeLogPassthroughFlush();
       resetSinkStateForFlush();
       audioOutputListener = null;
       if (pendingConfiguration != null) {
@@ -1596,6 +1600,7 @@ public final class DefaultAudioSink implements AudioSink {
     stoppedAudioOutput = false;
     handledEndOfStream = false;
     handledOffloadOnPresentationEnded = false;
+    pendingPassthroughBufferDiagnosticAfterFlush = true;
     trimmingAudioProcessor.resetTrimmedFrameCount();
     setupAudioProcessors();
   }
@@ -1880,6 +1885,87 @@ public final class DefaultAudioSink implements AudioSink {
         Util.durationUsToSampleCount(
             audioOutput.getPositionUs(), checkNotNull(audioOutput).getSampleRate());
     return writtenFrames > currentPositionFrames;
+  }
+
+  private void maybeLogPassthroughFlush() {
+    if (configuration == null
+        || configuration.isPcm()
+        || !PassthroughAudioDiagnostics.isEnabled()) {
+      return;
+    }
+    Log.i(
+        TAG,
+        "PASSTHROUGH_AUDIO_FLUSH"
+            + " encoding="
+            + configuration.outputConfig.encoding
+            + " sampleRate="
+            + configuration.outputConfig.sampleRate
+            + " channelMask="
+            + configuration.outputConfig.channelMask
+            + " bufferSize="
+            + configuration.outputConfig.bufferSize
+            + " offload="
+            + configuration.outputConfig.isOffload
+            + " tunneling="
+            + configuration.outputConfig.isTunneling
+            + " submittedFrames="
+            + getSubmittedFrames()
+            + " writtenFrames="
+            + getWrittenFrames());
+  }
+
+  private void maybeLogFirstPassthroughBufferAfterFlush(
+      ByteBuffer buffer,
+      long presentationTimeUs,
+      int encodedAccessUnitCount,
+      int framesPerEncodedSample) {
+    boolean shouldLog =
+        PassthroughAudioDiagnostics.shouldLogFirstEncodedBufferAfterFlush(
+            pendingPassthroughBufferDiagnosticAfterFlush, configuration.isPcm());
+    if (pendingPassthroughBufferDiagnosticAfterFlush && !configuration.isPcm()) {
+      pendingPassthroughBufferDiagnosticAfterFlush = false;
+    }
+    if (!shouldLog) {
+      return;
+    }
+    int trueHdSyncframeOffset =
+        configuration.outputConfig.encoding == C.ENCODING_DOLBY_TRUEHD
+            ? Ac3Util.findTrueHdSyncframeOffset(buffer)
+            : C.INDEX_UNSET;
+    Log.i(
+        TAG,
+        "PASSTHROUGH_AUDIO_FIRST_BUFFER_AFTER_FLUSH"
+            + " encoding="
+            + configuration.outputConfig.encoding
+            + " presentationTimeUs="
+            + presentationTimeUs
+            + " bytes="
+            + buffer.remaining()
+            + " accessUnits="
+            + encodedAccessUnitCount
+            + " framesPerAccessUnit="
+            + framesPerEncodedSample
+            + " trueHdSyncOffset="
+            + trueHdSyncframeOffset
+            + " firstBytes="
+            + firstBytesHex(buffer, /* maxBytes= */ 12));
+  }
+
+  private static String firstBytesHex(ByteBuffer buffer, int maxBytes) {
+    int position = buffer.position();
+    int count = min(maxBytes, buffer.remaining());
+    StringBuilder builder = new StringBuilder(count * 3);
+    for (int i = 0; i < count; i++) {
+      if (i > 0) {
+        builder.append(' ');
+      }
+      int value = buffer.get(position + i) & 0xFF;
+      if (value < 0x10) {
+        builder.append('0');
+      }
+      builder.append(Integer.toHexString(value));
+    }
+    return builder.toString();
   }
 
   private static boolean hasPendingAudioOutputReleases() {

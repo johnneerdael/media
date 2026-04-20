@@ -23,6 +23,7 @@ import android.media.AudioTrack;
 import androidx.annotation.Nullable;
 import androidx.media3.common.AudioAttributes;
 import androidx.media3.common.C;
+import androidx.media3.common.util.AmazonQuirks;
 import androidx.media3.exoplayer.audio.AudioOutputProvider.OutputConfig;
 import androidx.media3.test.utils.FakeClock;
 import androidx.test.ext.junit.runners.AndroidJUnit4;
@@ -71,6 +72,31 @@ public final class AudioTrackAudioOutputTest {
     clock.advanceTime(TIME_TO_ADVANCE_MS);
 
     assertThat(audioTrackAudioOutput.getPositionUs()).isEqualTo(2_000_000L);
+  }
+
+  @Test
+  public void shouldLogFirstEncodedBufferAfterFlush_requiresVerboseToggleAndEncodedOutput() {
+    AmazonQuirks.setFireOsIecVerboseLoggingEnabled(false);
+    assertThat(
+            PassthroughAudioDiagnostics.shouldLogFirstEncodedBufferAfterFlush(
+                /* pendingFirstBufferAfterFlush= */ true, /* isOutputPcm= */ false))
+        .isFalse();
+
+    AmazonQuirks.setFireOsIecVerboseLoggingEnabled(true);
+    assertThat(
+            PassthroughAudioDiagnostics.shouldLogFirstEncodedBufferAfterFlush(
+                /* pendingFirstBufferAfterFlush= */ true, /* isOutputPcm= */ false))
+        .isTrue();
+    assertThat(
+            PassthroughAudioDiagnostics.shouldLogFirstEncodedBufferAfterFlush(
+                /* pendingFirstBufferAfterFlush= */ false, /* isOutputPcm= */ false))
+        .isFalse();
+    assertThat(
+            PassthroughAudioDiagnostics.shouldLogFirstEncodedBufferAfterFlush(
+                /* pendingFirstBufferAfterFlush= */ true, /* isOutputPcm= */ true))
+        .isFalse();
+
+    AmazonQuirks.setFireOsIecVerboseLoggingEnabled(false);
   }
 
   private void initializeAudioTrackAudioOutput() {

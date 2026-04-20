@@ -108,6 +108,7 @@ public final class AudioTrackAudioOutput implements AudioOutput {
   private int framesPerEncodedSample;
   private int lastUnderrunCount;
   private boolean hasData;
+  private boolean pendingPassthroughWriteDiagnostic;
 
   /**
    * @deprecated Use {@link
@@ -155,6 +156,7 @@ public final class AudioTrackAudioOutput implements AudioOutput {
     } else {
       pcmFrameSize = C.LENGTH_UNSET;
     }
+    pendingPassthroughWriteDiagnostic = !isOutputPcm;
 
     boolean applyLegacyDolbyPassthroughQuirk = audioTrack instanceof DolbyPassthroughAudioTrack;
     audioTrackPositionTracker =
@@ -271,6 +273,12 @@ public final class AudioTrackAudioOutput implements AudioOutput {
     }
     int bytesWritten = bytesWrittenOrError;
     boolean fullyHandled = bytesWritten == bytesRemaining;
+    maybeLogFirstPassthroughWriteAfterOutputStart(
+        bytesRemaining,
+        bytesWritten,
+        fullyHandled,
+        encodedAccessUnitCount,
+        presentationTimeUs);
 
     if (isOutputPcm) {
       writtenPcmBytes += bytesWritten;
@@ -290,6 +298,7 @@ public final class AudioTrackAudioOutput implements AudioOutput {
     writtenEncodedFrames = 0;
     hasBeenStopped = false;
     framesPerEncodedSample = 0;
+    pendingPassthroughWriteDiagnostic = !isOutputPcm;
     audioTrack.flush();
     audioTrackPositionTracker.reset();
   }
@@ -399,6 +408,52 @@ public final class AudioTrackAudioOutput implements AudioOutput {
 
   private long getWrittenFrames() {
     return isOutputPcm ? Util.ceilDivide(writtenPcmBytes, pcmFrameSize) : writtenEncodedFrames;
+  }
+
+  private void maybeLogFirstPassthroughWriteAfterOutputStart(
+      int bytesAttempted,
+      int bytesWritten,
+      boolean fullyHandled,
+      int encodedAccessUnitCount,
+      long presentationTimeUs) {
+    boolean shouldLog =
+        PassthroughAudioDiagnostics.shouldLogFirstEncodedBufferAfterFlush(
+            pendingPassthroughWriteDiagnostic, isOutputPcm);
+    if (pendingPassthroughWriteDiagnostic && !isOutputPcm) {
+      pendingPassthroughWriteDiagnostic = false;
+    }
+    if (!shouldLog) {
+      return;
+    }
+    Log.i(
+        TAG,
+        "PASSTHROUGH_AUDIO_FIRST_WRITE"
+            + " encoding="
+            + config.encoding
+            + " sampleRate="
+            + config.sampleRate
+            + " channelMask="
+            + config.channelMask
+            + " bufferSize="
+            + config.bufferSize
+            + " offload="
+            + config.isOffload
+            + " tunneling="
+            + config.isTunneling
+            + " presentationTimeUs="
+            + presentationTimeUs
+            + " bytesAttempted="
+            + bytesAttempted
+            + " bytesWritten="
+            + bytesWritten
+            + " fullyHandled="
+            + fullyHandled
+            + " accessUnits="
+            + encodedAccessUnitCount
+            + " framesPerAccessUnit="
+            + framesPerEncodedSample
+            + " playState="
+            + audioTrack.getPlayState());
   }
 
   private int writeWithAvSync(AudioTrack audioTrack, ByteBuffer buffer, long presentationTimeUs) {

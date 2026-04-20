@@ -718,6 +718,7 @@ public class MediaCodecAudioRenderer extends MediaCodecRenderer implements Media
   protected void onPositionReset(
       long positionUs, boolean joining, boolean sampleStreamIsResetToKeyFrame)
       throws ExoPlaybackException {
+    maybeLogPassthroughPositionReset(positionUs, joining, sampleStreamIsResetToKeyFrame);
     super.onPositionReset(positionUs, joining, sampleStreamIsResetToKeyFrame);
     audioSink.flush();
 
@@ -726,6 +727,35 @@ public class MediaCodecAudioRenderer extends MediaCodecRenderer implements Media
     hasPendingReportedSkippedSilence = false;
     hasReportedAudioPositionAdvancing = false;
     allowPositionDiscontinuity = true;
+  }
+
+  private void maybeLogPassthroughPositionReset(
+      long positionUs, boolean joining, boolean sampleStreamIsResetToKeyFrame) {
+    if (!PassthroughAudioDiagnostics.isEnabled()
+        || inputFormat == null
+        || MimeTypes.AUDIO_RAW.equals(inputFormat.sampleMimeType)
+        || !audioSink.supportsFormat(inputFormat)) {
+      return;
+    }
+    Log.i(
+        TAG,
+        "PASSTHROUGH_AUDIO_POSITION_RESET"
+            + " positionUs="
+            + positionUs
+            + " joining="
+            + joining
+            + " sampleStreamIsResetToKeyFrame="
+            + sampleStreamIsResetToKeyFrame
+            + " bypass="
+            + isBypassEnabled()
+            + " mime="
+            + inputFormat.sampleMimeType
+            + " codecs="
+            + inputFormat.codecs
+            + " channels="
+            + inputFormat.channelCount
+            + " sampleRate="
+            + inputFormat.sampleRate);
   }
 
   @Override
