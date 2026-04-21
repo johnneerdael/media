@@ -9,6 +9,7 @@ extern "C" {
 #include "libavutil/dovi_meta.h"
 #include "libavutil/pixdesc.h"
 #include "libavutil/pixfmt.h"
+#include "libavutil/time.h"
 }
 #include "config.h"
 #include "config_components.h"
@@ -18,8 +19,6 @@ extern "C" {
 #include <cctype>
 #include <atomic>
 #include <string>
-#include <algorithm>
-#include <vector>
 
 #ifndef FFMPEG_TONEMAP_FILTERS
 #define FFMPEG_TONEMAP_FILTERS 0
@@ -255,74 +254,37 @@ int openInputForProbe(
     return openResult;
 }
 
-std::string urlDecode(const std::string &value) {
-    auto hex_value = [](unsigned char input) -> int {
-        if (input >= '0' && input <= '9') return input - '0';
-        if (input >= 'a' && input <= 'f') return input - 'a' + 10;
-        if (input >= 'A' && input <= 'F') return input - 'A' + 10;
-        return -1;
-    };
-
-    std::string decoded;
-    decoded.reserve(value.size());
-    for (size_t i = 0; i < value.size(); ++i) {
-        const unsigned char c = static_cast<unsigned char>(value[i]);
-        if (c == '%' && i + 2 < value.size()) {
-            const unsigned char hi = static_cast<unsigned char>(value[i + 1]);
-            const unsigned char lo = static_cast<unsigned char>(value[i + 2]);
-            const int hi_value = hex_value(hi);
-            const int lo_value = hex_value(lo);
-            if (hi_value >= 0 && lo_value >= 0) {
-                decoded.push_back(static_cast<char>((hi_value << 4) | lo_value));
-                i += 2;
-                continue;
-            }
-        }
-        if (c == '+') {
-            decoded.push_back(' ');
-            continue;
-        }
-        decoded.push_back(static_cast<char>(c));
+std::string probeUrlForLog(const std::string &url) {
+    std::string safe = url;
+    const auto q = safe.find('?');
+    if (q != std::string::npos) {
+        safe = safe.substr(0, q) + "?...";
     }
-    return decoded;
+    if (safe.size() > 160) {
+        safe = safe.substr(0, 160) + "...";
+    }
+    return safe;
 }
 
-std::string extractEmbeddedResolveUrl(const std::string &sourceUrl) {
-    const std::string marker = "/resolve/";
-    const auto markerIndex = sourceUrl.find(marker);
-    if (markerIndex == std::string::npos) {
-        return "";
-    }
-
-    const auto afterResolve = sourceUrl.substr(markerIndex + marker.size());
-    const auto firstSlash = afterResolve.find('/');
-    if (firstSlash == std::string::npos) {
-        return "";
-    }
-    const auto secondSlash = afterResolve.find('/', firstSlash + 1);
-    if (secondSlash == std::string::npos) {
-        return "";
-    }
-    const auto nestedEncoded = afterResolve.substr(secondSlash + 1);
-    if (nestedEncoded.empty()) {
-        return "";
-    }
-    return urlDecode(nestedEncoded);
-}
-
-std::string toHttpFallbackUrl(const std::string &url) {
-    const std::string httpsPrefix = "https://";
-    if (url.size() >= httpsPrefix.size() &&
-        std::equal(httpsPrefix.begin(), httpsPrefix.end(), url.begin())) {
-        return std::string("http://") + url.substr(httpsPrefix.size());
-    }
-    return "";
-}
-
-std::string sanitizeProbeValue(const std::string &value) {
-    std::string sanitized = value;
-    std::replace(sanitized.begin(), sanitized.end(), ';', '_');
-    return sanitized;
+int openInputForProbeTimed(
+        AVFormatContext **formatContext,
+        const char *urlChars,
+        const char *headersChars,
+        const char *probeName,
+        int attemptIndex) {
+    const int64_t start_us = av_gettime_relative();
+    const int result = openInputForProbe(formatContext, urlChars, headersChars);
+    const int64_t elapsed_ms = (av_gettime_relative() - start_us) / 1000;
+    const std::string safe = urlChars != nullptr ? probeUrlForLog(urlChars) : std::string();
+    __android_log_print(
+            ANDROID_LOG_INFO, LOG_TAG,
+            "PROBE_OPEN: name=%s attempt=%d result=%d elapsedMs=%lld url=%s",
+            probeName != nullptr ? probeName : "unknown",
+            attemptIndex,
+            result,
+            static_cast<long long>(elapsed_ms),
+            safe.c_str());
+    return result;
 }
 
 std::string escapeJsonString(const std::string &value) {
@@ -369,441 +331,6 @@ std::string rationalToJsonString(AVRational rational) {
 }  // namespace
 
 extern "C"
-JNIEXPORT jint JNICALL
-Java_androidx_media3_decoder_ffmpeg_FfmpegLibrary_ffmpegProbeDolbyVisionProfile(
-        JNIEnv *env,
-        jclass clazz,
-        jstring url,
-        jstring request_headers_blob) {
-    (void) clazz;
-    if (url == nullptr) {
-        return -3;
-    }
-
-    const char *url_chars = env->GetStringUTFChars(url, nullptr);
-    const char *headers_chars =
-            request_headers_blob != nullptr
-            ? env->GetStringUTFChars(request_headers_blob, nullptr)
-            : nullptr;
-
-    AVFormatContext *format_context = nullptr;
-    avformat_network_init();
-
-    std::vector<std::string> probe_urls;
-    probe_urls.reserve(3);
-    auto add_unique_probe_url = [&probe_urls](const std::string &candidate) {
-        if (candidate.empty()) {
-            return;
-        }
-        if (std::find(probe_urls.begin(), probe_urls.end(), candidate) == probe_urls.end()) {
-            probe_urls.push_back(candidate);
-        }
-    };
-
-    add_unique_probe_url(url_chars);
-    add_unique_probe_url(extractEmbeddedResolveUrl(url_chars));
-    for (size_t i = 0; i < probe_urls.size(); ++i) {
-        add_unique_probe_url(toHttpFallbackUrl(probe_urls[i]));
-    }
-
-    int open_result = -1;
-    for (const auto &probe_url : probe_urls) {
-        open_result = openInputForProbe(&format_context, probe_url.c_str(), headers_chars);
-        if (open_result >= 0 && format_context != nullptr) {
-            break;
-        }
-        format_context = nullptr;
-    }
-
-    if (open_result < 0 || format_context == nullptr) {
-        logError("avformat_open_input[ffmpegProbeDolbyVisionProfile]", open_result);
-        if (headers_chars != nullptr) {
-            env->ReleaseStringUTFChars(request_headers_blob, headers_chars);
-        }
-        env->ReleaseStringUTFChars(url, url_chars);
-        return -3;
-    }
-
-    int info_result = avformat_find_stream_info(format_context, nullptr);
-    if (info_result < 0) {
-        logError("avformat_find_stream_info[ffmpegProbeDolbyVisionProfile]", info_result);
-        avformat_close_input(&format_context);
-        if (headers_chars != nullptr) {
-            env->ReleaseStringUTFChars(request_headers_blob, headers_chars);
-        }
-        env->ReleaseStringUTFChars(url, url_chars);
-        return -3;
-    }
-
-    int video_stream_index = av_find_best_stream(
-            format_context,
-            AVMEDIA_TYPE_VIDEO,
-            -1,
-            -1,
-            nullptr,
-            0);
-    if (video_stream_index < 0) {
-        avformat_close_input(&format_context);
-        if (headers_chars != nullptr) {
-            env->ReleaseStringUTFChars(request_headers_blob, headers_chars);
-        }
-        env->ReleaseStringUTFChars(url, url_chars);
-        return -3;
-    }
-
-    AVStream *stream = format_context->streams[video_stream_index];
-    auto extract_profile_from_dovi_side_data =
-            [](const AVPacketSideData *side_data) -> jint {
-        if (side_data == nullptr ||
-            side_data->size < static_cast<int>(sizeof(AVDOVIDecoderConfigurationRecord))) {
-            return -1;
-        }
-        const auto *dovi =
-                reinterpret_cast<const AVDOVIDecoderConfigurationRecord *>(side_data->data);
-        return static_cast<jint>(dovi->dv_profile);
-    };
-
-    auto extract_profile_from_dovi_box = [](const uint8_t *data, size_t size) -> jint {
-        if (data == nullptr || size < 8) return -1;
-        for (size_t i = 0; i + 8 <= size; ++i) {
-            const bool has_dovi_tag =
-                    (data[i] == 'd' && data[i + 1] == 'v' &&
-                     (data[i + 2] == 'c' || data[i + 2] == 'v' || data[i + 2] == 'w') &&
-                     data[i + 3] == 'C');
-            if (!has_dovi_tag) continue;
-            if (i + 8 > size) break;
-            const uint8_t *payload = data + i + 4;
-            const uint32_t buf = (static_cast<uint32_t>(payload[2]) << 8) |
-                                 static_cast<uint32_t>(payload[3]);
-            const jint profile = static_cast<jint>((buf >> 9) & 0x7f);
-            if (profile > 0 && profile < 32) {
-                return profile;
-            }
-        }
-        return -1;
-    };
-
-    jint result = -2;
-    result = extract_profile_from_dovi_side_data(
-        av_packet_side_data_get(
-                stream->codecpar->coded_side_data,
-                stream->codecpar->nb_coded_side_data,
-                AV_PKT_DATA_DOVI_CONF));
-
-    if (result < 0) {
-        result = extract_profile_from_dovi_box(
-                stream->codecpar->extradata,
-                static_cast<size_t>(std::max(stream->codecpar->extradata_size, 0)));
-    }
-
-    if (result < 0) {
-        AVPacket packet;
-        av_init_packet(&packet);
-        int packets_scanned = 0;
-        while (packets_scanned < 12 && av_read_frame(format_context, &packet) >= 0) {
-            if (packet.stream_index == video_stream_index) {
-                packets_scanned += 1;
-                result = extract_profile_from_dovi_side_data(
-                        av_packet_side_data_get(
-                                packet.side_data,
-                                packet.side_data_elems,
-                                AV_PKT_DATA_DOVI_CONF));
-                if (result < 0) {
-                    result = extract_profile_from_dovi_box(
-                            packet.data,
-                            static_cast<size_t>(std::max(packet.size, 0)));
-                }
-                av_packet_unref(&packet);
-                if (result >= 0) {
-                    break;
-                }
-            } else {
-                av_packet_unref(&packet);
-            }
-        }
-    }
-
-    avformat_close_input(&format_context);
-    if (headers_chars != nullptr) {
-        env->ReleaseStringUTFChars(request_headers_blob, headers_chars);
-    }
-    env->ReleaseStringUTFChars(url, url_chars);
-    return result;
-}
-
-extern "C"
-JNIEXPORT jstring JNICALL
-Java_androidx_media3_decoder_ffmpeg_FfmpegLibrary_ffmpegProbeDolbyVisionMetadataBlob(
-        JNIEnv *env,
-        jclass clazz,
-        jstring url,
-        jstring request_headers_blob) {
-    (void) clazz;
-    if (url == nullptr) {
-        return nullptr;
-    }
-
-    const char *url_chars = env->GetStringUTFChars(url, nullptr);
-    const char *headers_chars =
-            request_headers_blob != nullptr
-            ? env->GetStringUTFChars(request_headers_blob, nullptr)
-            : nullptr;
-
-    AVFormatContext *format_context = nullptr;
-    avformat_network_init();
-
-    std::vector<std::string> probe_urls;
-    probe_urls.reserve(3);
-    auto add_unique_probe_url = [&probe_urls](const std::string &candidate) {
-        if (candidate.empty()) {
-            return;
-        }
-        if (std::find(probe_urls.begin(), probe_urls.end(), candidate) == probe_urls.end()) {
-            probe_urls.push_back(candidate);
-        }
-    };
-
-    add_unique_probe_url(url_chars);
-    add_unique_probe_url(extractEmbeddedResolveUrl(url_chars));
-    for (size_t i = 0; i < probe_urls.size(); ++i) {
-        add_unique_probe_url(toHttpFallbackUrl(probe_urls[i]));
-    }
-
-    int open_result = -1;
-    for (const auto &probe_url : probe_urls) {
-        open_result = openInputForProbe(&format_context, probe_url.c_str(), headers_chars);
-        if (open_result >= 0 && format_context != nullptr) {
-            break;
-        }
-        format_context = nullptr;
-    }
-
-    std::string video_codec = "unknown";
-    std::string audio_codec = "unknown";
-    std::string hdr_type = "unknown";
-
-    if (open_result >= 0 && format_context != nullptr &&
-        avformat_find_stream_info(format_context, nullptr) >= 0) {
-        const int video_stream_index = av_find_best_stream(
-                format_context,
-                AVMEDIA_TYPE_VIDEO,
-                -1,
-                -1,
-                nullptr,
-                0);
-        if (video_stream_index >= 0) {
-            AVStream *video_stream = format_context->streams[video_stream_index];
-            if (video_stream != nullptr && video_stream->codecpar != nullptr) {
-                const char *codec_name = avcodec_get_name(video_stream->codecpar->codec_id);
-                if (codec_name != nullptr && codec_name[0] != '\0') {
-                    video_codec = codec_name;
-                }
-
-                const AVPacketSideData *dovi_side_data = av_packet_side_data_get(
-                        video_stream->codecpar->coded_side_data,
-                        video_stream->codecpar->nb_coded_side_data,
-                        AV_PKT_DATA_DOVI_CONF);
-                if (dovi_side_data != nullptr &&
-                    dovi_side_data->size >= static_cast<int>(sizeof(AVDOVIDecoderConfigurationRecord))) {
-                    hdr_type = "DolbyVision";
-                } else {
-                    const uint8_t *data = video_stream->codecpar->extradata;
-                    const size_t size = static_cast<size_t>(
-                            std::max(video_stream->codecpar->extradata_size, 0));
-                    if (data != nullptr && size >= 8) {
-                        for (size_t i = 0; i + 8 <= size; ++i) {
-                            const bool has_dovi_tag =
-                                    (data[i] == 'd' && data[i + 1] == 'v' &&
-                                     (data[i + 2] == 'c' || data[i + 2] == 'v' || data[i + 2] == 'w') &&
-                                     data[i + 3] == 'C');
-                            if (has_dovi_tag) {
-                                hdr_type = "DolbyVision";
-                                break;
-                            }
-                        }
-                    }
-                }
-
-                if (hdr_type == "unknown") {
-                    if (video_stream->codecpar->color_trc == AVCOL_TRC_SMPTE2084) {
-                        hdr_type = "HDR10";
-                    } else if (video_stream->codecpar->color_trc == AVCOL_TRC_ARIB_STD_B67) {
-                        hdr_type = "HLG";
-                    }
-                }
-            }
-        }
-
-        const int audio_stream_index = av_find_best_stream(
-                format_context,
-                AVMEDIA_TYPE_AUDIO,
-                -1,
-                -1,
-                nullptr,
-                0);
-        if (audio_stream_index >= 0) {
-            AVStream *audio_stream = format_context->streams[audio_stream_index];
-            if (audio_stream != nullptr && audio_stream->codecpar != nullptr) {
-                const char *codec_name = avcodec_get_name(audio_stream->codecpar->codec_id);
-                if (codec_name != nullptr && codec_name[0] != '\0') {
-                    audio_codec = codec_name;
-                }
-            }
-        }
-    }
-
-    if (format_context != nullptr) {
-        avformat_close_input(&format_context);
-    }
-    if (headers_chars != nullptr) {
-        env->ReleaseStringUTFChars(request_headers_blob, headers_chars);
-    }
-    env->ReleaseStringUTFChars(url, url_chars);
-
-    std::string blob = "video=" + video_codec + ";audio=" + audio_codec + ";hdr=" + hdr_type;
-    return env->NewStringUTF(blob.c_str());
-}
-
-extern "C"
-JNIEXPORT jstring JNICALL
-Java_androidx_media3_decoder_ffmpeg_FfmpegLibrary_ffmpegProbeDolbyVisionProbeBlob(
-        JNIEnv *env,
-        jclass clazz,
-        jstring url,
-        jstring request_headers_blob) {
-    (void) clazz;
-    if (url == nullptr) {
-        return nullptr;
-    }
-
-    const char *url_chars = env->GetStringUTFChars(url, nullptr);
-    const char *headers_chars =
-            request_headers_blob != nullptr
-            ? env->GetStringUTFChars(request_headers_blob, nullptr)
-            : nullptr;
-
-    AVFormatContext *format_context = nullptr;
-    avformat_network_init();
-
-    std::vector<std::string> probe_urls;
-    probe_urls.reserve(3);
-    auto add_unique_probe_url = [&probe_urls](const std::string &candidate) {
-        if (candidate.empty()) {
-            return;
-        }
-        if (std::find(probe_urls.begin(), probe_urls.end(), candidate) == probe_urls.end()) {
-            probe_urls.push_back(candidate);
-        }
-    };
-
-    add_unique_probe_url(url_chars);
-    add_unique_probe_url(extractEmbeddedResolveUrl(url_chars));
-    for (size_t i = 0; i < probe_urls.size(); ++i) {
-        add_unique_probe_url(toHttpFallbackUrl(probe_urls[i]));
-    }
-
-    int open_result = -1;
-    for (const auto &probe_url : probe_urls) {
-        open_result = openInputForProbe(&format_context, probe_url.c_str(), headers_chars);
-        if (open_result >= 0 && format_context != nullptr) {
-            break;
-        }
-        format_context = nullptr;
-    }
-
-    std::string status = "failed";
-    std::string error = "ffmpeg_probe_failed";
-    std::string video_codec = "unknown";
-    std::string audio_codec = "unknown";
-    std::string hdr_type = "unknown";
-    int profile = -2;
-    int video_stream_index = -1;
-
-    if (open_result >= 0 && format_context != nullptr) {
-        const int info_result = avformat_find_stream_info(format_context, nullptr);
-        if (info_result >= 0) {
-            video_stream_index = av_find_best_stream(
-                    format_context,
-                    AVMEDIA_TYPE_VIDEO,
-                    -1,
-                    -1,
-                    nullptr,
-                    0);
-            if (video_stream_index >= 0) {
-                AVStream *video_stream = format_context->streams[video_stream_index];
-                if (video_stream != nullptr && video_stream->codecpar != nullptr) {
-                    const char *codec_name = avcodec_get_name(video_stream->codecpar->codec_id);
-                    if (codec_name != nullptr && codec_name[0] != '\0') {
-                        video_codec = codec_name;
-                    }
-
-                    const AVPacketSideData *dovi_side_data = av_packet_side_data_get(
-                            video_stream->codecpar->coded_side_data,
-                            video_stream->codecpar->nb_coded_side_data,
-                            AV_PKT_DATA_DOVI_CONF);
-                    if (dovi_side_data != nullptr &&
-                        dovi_side_data->size >= static_cast<int>(sizeof(AVDOVIDecoderConfigurationRecord))) {
-                        const auto *dovi =
-                                reinterpret_cast<const AVDOVIDecoderConfigurationRecord *>(dovi_side_data->data);
-                        profile = static_cast<int>(dovi->dv_profile);
-                        hdr_type = "dolbyvision";
-                    } else if (video_stream->codecpar->color_trc == AVCOL_TRC_SMPTE2084) {
-                        hdr_type = "hdr10";
-                    } else if (video_stream->codecpar->color_trc == AVCOL_TRC_ARIB_STD_B67) {
-                        hdr_type = "hlg";
-                    }
-                }
-            }
-
-            const int audio_stream_index = av_find_best_stream(
-                    format_context,
-                    AVMEDIA_TYPE_AUDIO,
-                    -1,
-                    -1,
-                    nullptr,
-                    0);
-            if (audio_stream_index >= 0) {
-                AVStream *audio_stream = format_context->streams[audio_stream_index];
-                if (audio_stream != nullptr && audio_stream->codecpar != nullptr) {
-                    const char *codec_name = avcodec_get_name(audio_stream->codecpar->codec_id);
-                    if (codec_name != nullptr && codec_name[0] != '\0') {
-                        audio_codec = codec_name;
-                    }
-                }
-            }
-
-            if (profile >= 0) {
-                status = "detected";
-                error.clear();
-            } else if (video_stream_index >= 0) {
-                status = "not_dolby_vision";
-                error.clear();
-            }
-        }
-    }
-
-    if (format_context != nullptr) {
-        avformat_close_input(&format_context);
-    }
-    if (headers_chars != nullptr) {
-        env->ReleaseStringUTFChars(request_headers_blob, headers_chars);
-    }
-    env->ReleaseStringUTFChars(url, url_chars);
-
-    std::string blob = "status=" + sanitizeProbeValue(status) +
-                       ";video=" + sanitizeProbeValue(video_codec) +
-                       ";audio=" + sanitizeProbeValue(audio_codec) +
-                       ";hdr=" + sanitizeProbeValue(hdr_type);
-    if (profile >= 0) {
-        blob += ";profile=" + std::to_string(profile);
-    }
-    if (!error.empty()) {
-        blob += ";error=" + sanitizeProbeValue(error);
-    }
-    return env->NewStringUTF(blob.c_str());
-}
-
-extern "C"
 JNIEXPORT jstring JNICALL
 Java_androidx_media3_decoder_ffmpeg_FfmpegLibrary_ffmpegProbeDolbyVisionStreamMetadataJson(
         JNIEnv *env,
@@ -824,37 +351,35 @@ Java_androidx_media3_decoder_ffmpeg_FfmpegLibrary_ffmpegProbeDolbyVisionStreamMe
     AVFormatContext *format_context = nullptr;
     avformat_network_init();
 
-    std::vector<std::string> probe_urls;
-    probe_urls.reserve(3);
-    auto add_unique_probe_url = [&probe_urls](const std::string &candidate) {
-        if (candidate.empty()) {
-            return;
-        }
-        if (std::find(probe_urls.begin(), probe_urls.end(), candidate) == probe_urls.end()) {
-            probe_urls.push_back(candidate);
-        }
-    };
-
-    add_unique_probe_url(url_chars);
-    add_unique_probe_url(extractEmbeddedResolveUrl(url_chars));
-    for (size_t i = 0; i < probe_urls.size(); ++i) {
-        add_unique_probe_url(toHttpFallbackUrl(probe_urls[i]));
-    }
-
-    int open_result = -1;
-    for (const auto &probe_url : probe_urls) {
-        open_result = openInputForProbe(&format_context, probe_url.c_str(), headers_chars);
-        if (open_result >= 0 && format_context != nullptr) {
-            break;
-        }
+    // Proxy-URL filtering lives in Kotlin (FfmpegStreamMetadataProbe.resolveDirectProbeUrl).
+    // The native side never rewrites the URL; a single probe attempt keeps the native
+    // surface strict and makes misrouted calls visible via PROBE_OPEN logs.
+    const int open_result = openInputForProbeTimed(
+            &format_context,
+            url_chars,
+            headers_chars,
+            "StreamMetadataJson",
+            /* attemptIndex */ 0);
+    if (open_result < 0 || format_context == nullptr) {
         format_context = nullptr;
     }
 
     std::string json = "{\"streams\":[";
     bool first_stream = true;
 
-    if (open_result >= 0 && format_context != nullptr &&
-        avformat_find_stream_info(format_context, nullptr) >= 0) {
+    int find_info_result = -1;
+    if (open_result >= 0 && format_context != nullptr) {
+        const int64_t find_info_start_us = av_gettime_relative();
+        find_info_result = avformat_find_stream_info(format_context, nullptr);
+        const int64_t find_info_elapsed_ms =
+                (av_gettime_relative() - find_info_start_us) / 1000;
+        __android_log_print(
+                ANDROID_LOG_INFO, LOG_TAG,
+                "PROBE_FIND_INFO: name=StreamMetadataJson result=%d elapsedMs=%lld",
+                find_info_result,
+                static_cast<long long>(find_info_elapsed_ms));
+    }
+    if (open_result >= 0 && format_context != nullptr && find_info_result >= 0) {
         for (unsigned int i = 0; i < format_context->nb_streams; ++i) {
             AVStream *stream = format_context->streams[i];
             if (stream == nullptr || stream->codecpar == nullptr) {
