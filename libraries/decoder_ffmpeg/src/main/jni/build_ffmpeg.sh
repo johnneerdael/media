@@ -151,9 +151,9 @@ echo "FFMPEG_ENABLE_MBEDTLS is ${FFMPEG_ENABLE_MBEDTLS}"
 COMMON_OPTIONS="
     --target-os=android
     --pkg-config=pkg-config
-    --enable-static
+    --disable-static
     --enable-pic
-    --disable-shared
+    --enable-shared
     --disable-doc
     --disable-programs
     --disable-everything
@@ -566,10 +566,31 @@ validate_tonemap_outputs_for_abi() {
         return
     fi
     local lib_dir="${FFMPEG_SOURCE_PATH}/android-libs/${target_abi}"
-    if [[ ! -f "${lib_dir}/libavfilter.a" ]]
+    if [[ ! -f "${lib_dir}/libavfilter.so" ]]
     then
-        echo "Missing libavfilter.a for ${target_abi}; libplacebo filter path is not built."
+        echo "Missing libavfilter.so for ${target_abi}; libplacebo filter path is not built."
         exit 1
+    fi
+}
+
+stage_shared_ffmpeg_for_aar() {
+    local target_abi="$1"
+    local source_lib_dir="${FFMPEG_SOURCE_PATH}/android-libs/${target_abi}"
+    local jnilibs_dir="${FFMPEG_MODULE_PATH}/jniLibs/${target_abi}"
+    mkdir -p "${jnilibs_dir}"
+    local lib
+    for lib in libavcodec.so libavformat.so libavutil.so libswresample.so libswscale.so
+    do
+        if [[ ! -f "${source_lib_dir}/${lib}" ]]
+        then
+            echo "Missing ${lib} for ${target_abi} in ${source_lib_dir}"
+            exit 1
+        fi
+        cp "${source_lib_dir}/${lib}" "${jnilibs_dir}/${lib}"
+    done
+    if [[ -f "${source_lib_dir}/libavfilter.so" ]]
+    then
+        cp "${source_lib_dir}/libavfilter.so" "${jnilibs_dir}/libavfilter.so"
     fi
 }
 
@@ -786,6 +807,7 @@ make install-libs
 validate_tonemap_outputs_for_abi "armeabi-v7a"
 stage_tonemap_linker_libs_for_abi "armeabi-v7a"
 stage_mbedtls_linker_libs_for_abi "armeabi-v7a"
+stage_shared_ffmpeg_for_aar "armeabi-v7a"
 make clean
 
 configure_ffmpeg "arm64-v8a" \
@@ -803,6 +825,7 @@ make install-libs
 validate_tonemap_outputs_for_abi "arm64-v8a"
 stage_tonemap_linker_libs_for_abi "arm64-v8a"
 stage_mbedtls_linker_libs_for_abi "arm64-v8a"
+stage_shared_ffmpeg_for_aar "arm64-v8a"
 make clean
 
 configure_ffmpeg "x86" \
@@ -821,6 +844,7 @@ make install-libs
 validate_tonemap_outputs_for_abi "x86"
 stage_tonemap_linker_libs_for_abi "x86"
 stage_mbedtls_linker_libs_for_abi "x86"
+stage_shared_ffmpeg_for_aar "x86"
 make clean
 
 configure_ffmpeg "x86_64" \
@@ -839,6 +863,7 @@ make install-libs
 validate_tonemap_outputs_for_abi "x86_64"
 stage_tonemap_linker_libs_for_abi "x86_64"
 stage_mbedtls_linker_libs_for_abi "x86_64"
+stage_shared_ffmpeg_for_aar "x86_64"
 make clean
 
 HEADER_STAGING_DIR="${FFMPEG_MODULE_PATH}/jni/ffmpeg-headers"

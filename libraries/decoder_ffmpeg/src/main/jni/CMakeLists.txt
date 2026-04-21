@@ -28,11 +28,11 @@ set(ffmpeg_headers "${CMAKE_CURRENT_SOURCE_DIR}/ffmpeg-headers")
 set(ffmpeg_binaries "${ffmpeg_location}/android-libs/${ANDROID_ABI}")
 
 foreach(ffmpeg_lib avutil swresample swscale avcodec avformat)
-    set(ffmpeg_lib_filename lib${ffmpeg_lib}.a)
+    set(ffmpeg_lib_filename lib${ffmpeg_lib}.so)
     set(ffmpeg_lib_file_path ${ffmpeg_binaries}/${ffmpeg_lib_filename})
     add_library(
             ${ffmpeg_lib}
-            STATIC
+            SHARED
             IMPORTED)
     set_target_properties(
             ${ffmpeg_lib} PROPERTIES
@@ -40,26 +40,18 @@ foreach(ffmpeg_lib avutil swresample swscale avcodec avformat)
             ${ffmpeg_lib_file_path})
 endforeach()
 
-set(ffmpeg_avfilter_file_path "${ffmpeg_binaries}/libavfilter.a")
+set(ffmpeg_avfilter_file_path "${ffmpeg_binaries}/libavfilter.so")
 set(ffmpeg_has_avfilter FALSE)
-set(ffmpeg_extension_static_libs "")
 if(EXISTS "${ffmpeg_avfilter_file_path}")
     add_library(
             avfilter
-            STATIC
+            SHARED
             IMPORTED)
     set_target_properties(
             avfilter PROPERTIES
             IMPORTED_LOCATION
             "${ffmpeg_avfilter_file_path}")
     set(ffmpeg_has_avfilter TRUE)
-    # When FFmpeg is built with static libplacebo/shaderc, libavfilter.a keeps
-    # unresolved references that must be linked by this final JNI shared lib.
-    file(GLOB CONFIGURE_DEPENDS ffmpeg_extension_static_libs "${ffmpeg_binaries}/*.a")
-    list(FILTER ffmpeg_extension_static_libs EXCLUDE REGEX "/lib(avutil|swresample|swscale|avcodec|avfilter)\\.a$")
-    list(FILTER ffmpeg_extension_static_libs EXCLUDE REGEX "/lib(mbedtls|mbedx509|mbedcrypto)\\.a$")
-    list(FILTER ffmpeg_extension_static_libs INCLUDE REGEX "\\.a$")
-    list(SORT ffmpeg_extension_static_libs)
 endif()
 
 set(ffmpeg_mbedtls_targets "")
@@ -120,9 +112,6 @@ if(ffmpeg_mbedtls_targets)
 endif()
 if(ffmpeg_has_avfilter)
     target_link_libraries(ffmpegJNI PRIVATE avfilter)
-    if(ffmpeg_extension_static_libs)
-        target_link_libraries(ffmpegJNI PRIVATE ${ffmpeg_extension_static_libs})
-    endif()
 endif()
 if(android_dl_lib)
     target_link_libraries(ffmpegJNI PRIVATE ${android_dl_lib})
