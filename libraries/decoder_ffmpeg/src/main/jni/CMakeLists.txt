@@ -42,6 +42,7 @@ endforeach()
 
 set(ffmpeg_avfilter_file_path "${ffmpeg_binaries}/libavfilter.so")
 set(ffmpeg_has_avfilter FALSE)
+set(ffmpeg_extension_static_libs "")
 if(EXISTS "${ffmpeg_avfilter_file_path}")
     add_library(
             avfilter
@@ -52,6 +53,20 @@ if(EXISTS "${ffmpeg_avfilter_file_path}")
             IMPORTED_LOCATION
             "${ffmpeg_avfilter_file_path}")
     set(ffmpeg_has_avfilter TRUE)
+
+    # libavfilter.so is built with libplacebo/libshaderc statically absorbed but
+    # with hidden visibility (see build_libplacebo_android.sh DPL_STATIC patch),
+    # so those symbols are not exported. ffvideo.cpp calls libplacebo directly,
+    # so we also link the static archives into libffmpegJNI.so. build_ffmpeg.sh
+    # stages the *.a files (libplacebo, libshaderc*, spirv-cross*, glslang*,
+    # SPIRV-Tools*) next to libavfilter.so via stage_tonemap_linker_libs_for_abi.
+    file(GLOB ffmpeg_extension_static_libs CONFIGURE_DEPENDS "${ffmpeg_binaries}/*.a")
+    list(FILTER ffmpeg_extension_static_libs EXCLUDE REGEX "/lib(avutil|swresample|swscale|avcodec|avfilter|avformat)\\.a$")
+    list(FILTER ffmpeg_extension_static_libs EXCLUDE REGEX "/lib(mbedtls|mbedx509|mbedcrypto)\\.a$")
+    # libshaderc_combined.a bundles glslang + SPIRV-Tools + spirv-cross. Linking
+    # it alongside the individual archives causes duplicate symbols.
+    list(FILTER ffmpeg_extension_static_libs EXCLUDE REGEX "/libshaderc_combined\\.a$")
+    list(SORT ffmpeg_extension_static_libs)
 endif()
 
 set(ffmpeg_mbedtls_targets "")
@@ -112,6 +127,9 @@ if(ffmpeg_mbedtls_targets)
 endif()
 if(ffmpeg_has_avfilter)
     target_link_libraries(ffmpegJNI PRIVATE avfilter)
+    if(ffmpeg_extension_static_libs)
+        target_link_libraries(ffmpegJNI PRIVATE ${ffmpeg_extension_static_libs})
+    endif()
 endif()
 if(android_dl_lib)
     target_link_libraries(ffmpegJNI PRIVATE ${android_dl_lib})

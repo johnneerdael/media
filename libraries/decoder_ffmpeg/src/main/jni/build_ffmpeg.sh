@@ -400,7 +400,9 @@ validate_ffmpeg_tonemap_config() {
         require_ffmpeg_define_enabled "${config_h}" "CONFIG_AVFILTER"
         require_ffmpeg_define_enabled "${config_h}" "CONFIG_LIBPLACEBO"
         require_ffmpeg_define_enabled "${config_h}" "CONFIG_VULKAN"
-        require_ffmpeg_define_enabled "${config_h}" "CONFIG_DOVI_RPU"
+        # FFmpeg 8.0 renamed DOVI_RPU → DOVI_RPUDEC (decoder) + DOVI_RPUENC (encoder).
+        # Only DOVI_RPUDEC is needed for the tone-map read path.
+        require_ffmpeg_define_enabled "${config_h}" "CONFIG_DOVI_RPUDEC"
         require_ffmpeg_define_enabled "${config_components_h}" "CONFIG_LIBPLACEBO_FILTER"
     fi
     if [[ "${FFMPEG_ENABLE_LIBDOVI}" == "1" ]]
@@ -651,6 +653,27 @@ apply_ffmpeg_vulkan_compat_patch() {
         "${vulkan_source_file}"
 }
 
+# ffvideo.cpp calls ff_dovi_rpu_parse / ff_dovi_ctx_unref directly. FFmpeg's
+# shared-library link uses --version-script with libavcodec.v, which by default
+# only exports av_*/avcodec_*/avpriv_*. Without a patch these ff_dovi_* symbols
+# are linked internally into libavcodec.so but marked `local` and cannot be
+# resolved by libffmpegJNI.so at link time. Add ff_dovi_* to the globals.
+apply_ffmpeg_dovi_export_patch() {
+    local ver_file="${FFMPEG_SOURCE_PATH}/libavcodec/libavcodec.v"
+    if [[ ! -f "${ver_file}" ]]
+    then
+        return
+    fi
+    if grep -q "ff_dovi_\*;" "${ver_file}"
+    then
+        return
+    fi
+    sed -i.bak \
+        "s/avsubtitle_free;/avsubtitle_free;\\
+        ff_dovi_*;/" \
+        "${ver_file}"
+}
+
 for decoder in "${ENABLED_DECODERS[@]}"
 do
     COMMON_OPTIONS="${COMMON_OPTIONS} --enable-decoder=${decoder}"
@@ -791,6 +814,7 @@ configure_ffmpeg() {
 
 cd "${FFMPEG_MODULE_PATH}/jni/ffmpeg"
 apply_ffmpeg_vulkan_compat_patch
+apply_ffmpeg_dovi_export_patch
 configure_ffmpeg "armeabi-v7a" \
     --libdir=android-libs/armeabi-v7a \
     --arch=arm \

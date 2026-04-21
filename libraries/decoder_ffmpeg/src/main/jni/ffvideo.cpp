@@ -40,7 +40,7 @@ extern "C" {
 #include <cstdint>
 #endif
 #include <libavcodec/avcodec.h>
-#include "ffmpeg/libavcodec/dovi_rpu.h"
+#include <libavcodec/dovi_rpu.h>
 #include <libavutil/channel_layout.h>
 #include <libavutil/error.h>
 #include <libavutil/opt.h>
@@ -1484,7 +1484,8 @@ bool maybeApplyExternalDv5RpuToPureFrame(
     const int parseResult = ff_dovi_rpu_parse(
             &doviContext,
             matchedRpu.data() + rpuOffset,
-            matchedRpu.size() - rpuOffset);
+            matchedRpu.size() - rpuOffset,
+            0);
     if (parseResult < 0 || !doviContext.mapping || !doviContext.color ||
         !doviContext.header.disable_residual_flag) {
         ff_dovi_ctx_unref(&doviContext);

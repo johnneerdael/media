@@ -285,7 +285,13 @@ EOF
   meson install -C "${build_dir}"
 
   if [[ -f "${prefix}/lib/pkgconfig/libplacebo.pc" ]]; then
-    echo "Libs.private: -lstdc++" >> "${prefix}/lib/pkgconfig/libplacebo.pc"
+    # Android NDK has no libstdc++; the C++ stdlib symbols libplacebo pulls in
+    # (e.g. std::to_chars for float/double in convert.cc) must resolve against
+    # libc++_shared at link time. Expose it on both Libs and Libs.private so
+    # FFmpeg's configure probe and any downstream consumer both see it.
+    sed -i.bak '/^Libs: -L\${libdir} -lplacebo/s/$/ -lc++_shared/' "${prefix}/lib/pkgconfig/libplacebo.pc"
+    rm -f "${prefix}/lib/pkgconfig/libplacebo.pc.bak"
+    echo "Libs.private: -lc++_shared" >> "${prefix}/lib/pkgconfig/libplacebo.pc"
   fi
 }
 
