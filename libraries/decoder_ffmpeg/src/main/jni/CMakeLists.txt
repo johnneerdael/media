@@ -54,12 +54,12 @@ if(EXISTS "${ffmpeg_avfilter_file_path}")
             "${ffmpeg_avfilter_file_path}")
     set(ffmpeg_has_avfilter TRUE)
 
-    # libavfilter.so is built with libplacebo/libshaderc statically absorbed but
-    # with hidden visibility (see build_libplacebo_android.sh DPL_STATIC patch),
-    # so those symbols are not exported. ffvideo.cpp calls libplacebo directly,
-    # so we also link the static archives into libffmpegJNI.so. build_ffmpeg.sh
-    # stages the *.a files (libplacebo, libshaderc*, spirv-cross*, glslang*,
-    # SPIRV-Tools*) next to libavfilter.so via stage_tonemap_linker_libs_for_abi.
+    # libavfilter.so/libswscale.so still rely on the staged libplacebo toolchain.
+    # In practice the FFmpeg shared libs may keep a runtime NEEDED on
+    # libshaderc_shared.so, while ffvideo.cpp also calls libplacebo directly and
+    # needs the static archives at link time. build_ffmpeg.sh stages both the
+    # static archives (libplacebo, libshaderc*, spirv-cross*, glslang*,
+    # SPIRV-Tools*) and the shared shaderc runtime next to libavfilter.so.
     file(GLOB ffmpeg_extension_static_libs CONFIGURE_DEPENDS "${ffmpeg_binaries}/*.a")
     list(FILTER ffmpeg_extension_static_libs EXCLUDE REGEX "/lib(avutil|swresample|swscale|avcodec|avfilter|avformat)\\.a$")
     list(FILTER ffmpeg_extension_static_libs EXCLUDE REGEX "/lib(mbedtls|mbedx509|mbedcrypto)\\.a$")

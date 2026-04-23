@@ -578,7 +578,7 @@ validate_tonemap_outputs_for_abi() {
 stage_shared_ffmpeg_for_aar() {
     local target_abi="$1"
     local source_lib_dir="${FFMPEG_SOURCE_PATH}/android-libs/${target_abi}"
-    local jnilibs_dir="${FFMPEG_MODULE_PATH}/jniLibs/${target_abi}"
+    local jnilibs_dir="${FFMPEG_MODULE_PATH}/src/main/jniLibs/${target_abi}"
     mkdir -p "${jnilibs_dir}"
     local lib
     for lib in libavcodec.so libavformat.so libavutil.so libswresample.so libswscale.so
@@ -593,6 +593,10 @@ stage_shared_ffmpeg_for_aar() {
     if [[ -f "${source_lib_dir}/libavfilter.so" ]]
     then
         cp "${source_lib_dir}/libavfilter.so" "${jnilibs_dir}/libavfilter.so"
+    fi
+    if [[ -f "${source_lib_dir}/libshaderc_shared.so" ]]
+    then
+        cp "${source_lib_dir}/libshaderc_shared.so" "${jnilibs_dir}/libshaderc_shared.so"
     fi
 }
 
@@ -611,6 +615,12 @@ stage_tonemap_linker_libs_for_abi() {
     fi
     mkdir -p "${target_lib_dir}"
     find "${source_lib_dir}" -maxdepth 1 -type f -name "*.a" -exec cp "{}" "${target_lib_dir}/" \;
+    # libavfilter.so/libswscale.so may retain a runtime dependency on shaderc
+    # even when the rest of the libplacebo toolchain is staged as static libs.
+    if [[ -f "${source_lib_dir}/libshaderc_shared.so" ]]
+    then
+        cp "${source_lib_dir}/libshaderc_shared.so" "${target_lib_dir}/"
+    fi
     local source_include_dir="${LIBPLACEBO_PREBUILT_ROOT}/${target_abi}/include"
     local target_include_dir="${target_lib_dir}/include"
     if [[ -d "${source_include_dir}" ]]
