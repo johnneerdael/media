@@ -119,6 +119,46 @@ abi_to_cpu() {
   esac
 }
 
+# Drop everything downstream FFmpeg link and APK runtime never reference.
+# Keeps each ABI prefix to ~50 MB instead of ~1 GB.
+#
+# What survives: libplacebo.{a,pc}, libshaderc_combined.a + libshaderc_util.a,
+# libSPIRV-Tools{,-opt}.a, libspirv-cross-*.a, vulkan/libplacebo headers,
+# pkg-config metadata. That's the link surface FFmpeg's configure consumes.
+prune_install_prefix() {
+  local prefix="$1"
+
+  # CLI binaries (glslc ~150 MB) — only used during shaderc's own build.
+  rm -rf "${prefix}/bin"
+
+  # CMake package configs — downstream consumers go through pkg-config.
+  rm -rf "${prefix}/lib/cmake"
+  rm -rf "${prefix}/share/cmake"
+
+  # SPIRV-Cross helpers we don't link against.
+  rm -rf "${prefix}/share/spirv_cross_core"
+  rm -rf "${prefix}/share/spirv_cross_cpp"
+  rm -rf "${prefix}/share/spirv_cross_glsl"
+  rm -rf "${prefix}/share/spirv_cross_hlsl"
+  rm -rf "${prefix}/share/spirv_cross_msl"
+  rm -rf "${prefix}/share/spirv_cross_reflect"
+  rm -rf "${prefix}/share/spirv_cross_util"
+
+  # libglslang family is built as a transitive dep of shaderc but disabled
+  # in libplacebo (-Dglslang=disabled). Nothing links it.
+  rm -f "${prefix}/lib/libglslang.a"
+  rm -f "${prefix}/lib/libglslang-default-resource-limits.a"
+  rm -f "${prefix}/lib/libMachineIndependent.a"
+  rm -f "${prefix}/lib/libGenericCodeGen.a"
+  rm -f "${prefix}/lib/libOSDependent.a"
+  rm -f "${prefix}/lib/libOGLCompiler.a"
+  rm -f "${prefix}/lib/libHLSL.a"
+
+  # libplacebo links libshaderc_combined.a statically; the shared variant
+  # would re-introduce a runtime NEEDED on libavfilter.so.
+  rm -f "${prefix}/lib/libshaderc_shared.so"
+}
+
 build_vulkan_headers() {
   local prefix="$1"
   mkdir -p "${prefix}/include" "${prefix}/lib/pkgconfig" "${prefix}/share/vulkan/registry"
@@ -157,7 +197,7 @@ build_spirv_cross() {
     -DSPIRV_CROSS_FORCE_PIC=ON \
     -DSPIRV_CROSS_ENABLE_CPP=OFF
   cmake --build "${build_dir}" -j"$(nproc 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 4)"
-  cmake --install "${build_dir}"
+  cmake --install "${build_dir}" --strip
 }
 
 build_shaderc() {
@@ -180,6 +220,8 @@ build_shaderc() {
     -DCMAKE_BUILD_TYPE=Release \
     -DCMAKE_INSTALL_PREFIX="${prefix}" \
     -DBUILD_SHARED_LIBS=OFF \
+    -DSHADERC_ENABLE_SHARED_CRT=OFF \
+    -DSHADERC_SKIP_INSTALL=OFF \
     -DSHADERC_SKIP_TESTS=ON \
     -DSHADERC_SKIP_EXAMPLES=ON \
     -DSHADERC_SKIP_COPYRIGHT_CHECK=ON \
@@ -189,10 +231,11 @@ build_shaderc() {
     -DSPIRV_SKIP_EXECUTABLES=ON \
     -DSPIRV_TOOLS_BUILD_STATIC=ON
   cmake --build "${build_dir}" -j"$(nproc 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 4)"
-  cmake --install "${build_dir}"
+  cmake --install "${build_dir}" --strip
 
   if [[ -f "${build_dir}/libshaderc_util/libshaderc_util.a" ]]; then
     cp "${build_dir}/libshaderc_util/libshaderc_util.a" "${prefix}/lib/"
+    "${TOOLCHAIN_PREFIX}/llvm-strip" --strip-debug "${prefix}/lib/libshaderc_util.a" || true
   fi
 
   mkdir -p "${prefix}/lib/pkgconfig"
@@ -282,7 +325,7 @@ EOF
     -Dfuzz=false
 
   meson compile -C "${build_dir}" -j"$(nproc 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 4)"
-  meson install -C "${build_dir}"
+  meson install -C "${build_dir}" --strip
 
   if [[ -f "${prefix}/lib/pkgconfig/libplacebo.pc" ]]; then
     # Android NDK has no libstdc++; the C++ stdlib symbols libplacebo pulls in
@@ -311,6 +354,7 @@ for abi in ${ABIS}; do
   build_spirv_cross "${abi}" "${prefix}"
   build_shaderc "${abi}" "${prefix}"
   build_libplacebo "${abi}" "${prefix}"
+  prune_install_prefix "${prefix}"
 done
 
 echo "Done. Staged prebuilts at ${OUTPUT_ROOT}"

@@ -127,6 +127,45 @@ Notes:
   fast unless the detected FFmpeg version is 8.x when
   `FFMPEG_ENABLE_LIBPLACEBO=1`.
 
+#### Footprint, regeneration, and verification
+
+`build_libplacebo_android.sh` writes a slim install layout: it passes
+`--strip` to `cmake --install` / `meson install` and runs an internal
+`prune_install_prefix` that drops everything not consumed downstream
+(the `glslc` CLI, `lib/cmake`, `share/cmake`, `share/spirv_cross_*`,
+the `libglslang*` family, and `libshaderc_shared.so`). Each ABI prefix
+is ~50 MB instead of ~1 GB; the four-ABI total is ~200 MB instead of
+~4.1 GB.
+
+Both staging directories are intentionally gitignored — they are
+**not** sources, they are caches:
+- `${LIBPLACEBO_PREBUILT_ROOT}` (typically `third_party/libplacebo-prebuilt-v7.360.0/`)
+  is the install prefix; `build_ffmpeg.sh` reads from it but never writes.
+- `.libplacebo-build/` (the script's `WORK_DIR`) holds upstream source
+  checkouts and intermediate `ninja`/`meson`/`cmake` outputs. It can be
+  deleted at any time; the next run re-clones what it needs.
+
+If either is missing when `FFMPEG_ENABLE_LIBPLACEBO=1`, `build_ffmpeg.sh`
+fails its `validate_tonemap_prebuilts_for_abi` check at startup. Re-run
+`build_libplacebo_android.sh` to regenerate.
+
+After a rebuild, sanity-check that `libavfilter.so` no longer carries a
+runtime dependency on `libshaderc_shared.so` (the script forces libplacebo
+to link `libshaderc_combined.a` statically):
+
+```
+NDK_TOOL=$(find ~/Library/Android/sdk/ndk -name llvm-readelf | head -1)
+for so in $(find media -name libavfilter.so); do
+  echo "=== $so ==="
+  "$NDK_TOOL" -d "$so" | grep "NEEDED" | grep -i shaderc || echo "  (clean)"
+done
+```
+
+Expected: `(clean)` for every line. If the `NEEDED` reappears, libplacebo's
+meson picked up the shared variant — re-check that `libshaderc_shared.so`
+was actually pruned from the prefix and that `pkgconfig/libplacebo.pc`
+references `-lshaderc_combined`.
+
 * [Install CMake][]
 
 Having followed these steps, gradle will build the module automatically when run
