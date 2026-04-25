@@ -157,6 +157,15 @@ prune_install_prefix() {
   # libplacebo links libshaderc_combined.a statically; the shared variant
   # would re-introduce a runtime NEEDED on libavfilter.so.
   rm -f "${prefix}/lib/libshaderc_shared.so"
+
+  # cmake/meson --strip only strip ELF binaries (.so / executables); static
+  # archives keep their per-object DWARF debug symbols and end up 10–15x
+  # larger than necessary (libshaderc_combined.a was 371 MB unstripped vs
+  # 25 MB with --strip-debug). Strip every .a we kept above.
+  if [[ -d "${prefix}/lib" ]]; then
+    find "${prefix}/lib" -maxdepth 1 -name "*.a" -type f -print0 |
+      xargs -0 -n1 "${TOOLCHAIN_PREFIX}/llvm-strip" --strip-debug
+  fi
 }
 
 build_vulkan_headers() {
