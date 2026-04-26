@@ -18,6 +18,7 @@ apply from: "$gradle.ext.androidxMediaSettingsDir/common_config.gradle"
 
 def nativeAbiFilter = findProperty('NEXIO_NATIVE_ABI_FILTER')?.toString()?.trim()
 def nativeAbiFilters = nativeAbiFilter ? nativeAbiFilter.split(',').collect { it.trim() }.findAll { it } : []
+def ffmpegPrebuiltRoot = findProperty('NEXIO_PREBUILT_FFMPEG_ROOT')?.toString()?.trim()
 
 android {
     namespace = 'androidx.media3.exoplayer.kodi.cppaudiosink'
@@ -31,6 +32,14 @@ android {
         externalNativeBuild {
             cmake {
                 targets "kodiCppAudioSinkJNI"
+            }
+        }
+    }
+
+    if (ffmpegPrebuiltRoot) {
+        externalNativeBuild {
+            cmake {
+                arguments "-DNEXIO_PREBUILT_FFMPEG_ROOT=${file(ffmpegPrebuiltRoot).absolutePath}"
             }
         }
     }

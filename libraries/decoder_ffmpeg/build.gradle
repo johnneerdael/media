@@ -16,6 +16,7 @@ apply from: "$gradle.ext.androidxMediaSettingsDir/common_config.gradle"
 
 def nativeAbiFilter = findProperty('NEXIO_NATIVE_ABI_FILTER')?.toString()?.trim()
 def nativeAbiFilters = nativeAbiFilter ? nativeAbiFilter.split(',').collect { it.trim() }.findAll { it } : []
+def ffmpegPrebuiltRoot = findProperty('NEXIO_PREBUILT_FFMPEG_ROOT')?.toString()?.trim()
 
 android {
     namespace = 'androidx.media3.decoder.ffmpeg'
@@ -28,6 +29,14 @@ android {
         }
     }
 
+    if (ffmpegPrebuiltRoot) {
+        externalNativeBuild {
+            cmake {
+                arguments "-DNEXIO_PREBUILT_FFMPEG_ROOT=${file(ffmpegPrebuiltRoot).absolutePath}"
+            }
+        }
+    }
+
     sourceSets {
         androidTest.assets.srcDir '../test_data/src/test/assets'
     }
@@ -35,7 +44,7 @@ android {
 
 // Configure the native build only if ffmpeg is present to avoid gradle sync
 // failures if ffmpeg hasn't been built according to the README instructions.
-if (project.file('src/main/jni/ffmpeg').exists()) {
+if (ffmpegPrebuiltRoot || project.file('src/main/jni/ffmpeg').exists()) {
     android.externalNativeBuild.cmake.path = 'src/main/jni/CMakeLists.txt'
     // LINT.IfChange
     // Should match cmake_minimum_required.

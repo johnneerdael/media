@@ -24,9 +24,24 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 set(KODI_XBMC_ROOT "${CMAKE_CURRENT_LIST_DIR}/../../../../cpp_audiosink/kodi/xbmc")
 set(FFMPEG_MODULE_ROOT "${CMAKE_CURRENT_LIST_DIR}/../../../../decoder_ffmpeg/src/main/jni")
-set(FFMPEG_SOURCE_ROOT "${FFMPEG_MODULE_ROOT}/ffmpeg")
-set(FFMPEG_HEADERS_ROOT "${FFMPEG_MODULE_ROOT}/ffmpeg-headers")
 set(FFMPEG_BINARIES_ROOT "${FFMPEG_MODULE_ROOT}/ffmpeg/android-libs/${ANDROID_ABI}")
+set(FFMPEG_PREBUILT_ROOT "${NEXIO_PREBUILT_FFMPEG_ROOT}")
+
+if (DEFINED FFMPEG_PREBUILT_ROOT AND EXISTS "${FFMPEG_PREBUILT_ROOT}")
+    set(FFMPEG_SOURCE_ROOT "${FFMPEG_PREBUILT_ROOT}/include")
+    set(FFMPEG_HEADERS_ROOT "${FFMPEG_PREBUILT_ROOT}/include")
+    set(FFMPEG_BINARIES_ROOT "${FFMPEG_PREBUILT_ROOT}/android-libs/${ANDROID_ABI}")
+else()
+    set(FFMPEG_SOURCE_ROOT "${FFMPEG_MODULE_ROOT}/ffmpeg")
+    set(FFMPEG_HEADERS_ROOT "${FFMPEG_MODULE_ROOT}/ffmpeg-headers")
+endif()
+
+if (NOT EXISTS "${FFMPEG_BINARIES_ROOT}/libavcodec.so" OR NOT EXISTS "${FFMPEG_SOURCE_ROOT}")
+    message(FATAL_ERROR
+            "Missing FFmpeg prebuilts at '${FFMPEG_PREBUILT_ROOT}'. "
+            "Set -DNEXIO_PREBUILT_FFMPEG_ROOT to point at tracked native artifacts "
+            "or provide ffmpeg sources at '${FFMPEG_MODULE_ROOT}/ffmpeg'.")
+endif()
 set(FMT_ROOT "${CMAKE_CURRENT_LIST_DIR}/../../../../../fmt")
 set(SPDLOG_ROOT "${CMAKE_CURRENT_LIST_DIR}/../../../../../spdlog")
 

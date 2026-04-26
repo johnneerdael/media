@@ -24,8 +24,15 @@ set(CMAKE_CXX_STANDARD 11)
 project(libffmpegJNI C CXX)
 
 set(ffmpeg_location "${CMAKE_CURRENT_SOURCE_DIR}/ffmpeg")
+set(ffmpeg_prebuilt_root "${NEXIO_PREBUILT_FFMPEG_ROOT}")
+set(ffmpeg_include_root "${ffmpeg_location}")
 set(ffmpeg_headers "${CMAKE_CURRENT_SOURCE_DIR}/ffmpeg-headers")
 set(ffmpeg_binaries "${ffmpeg_location}/android-libs/${ANDROID_ABI}")
+
+if (DEFINED ffmpeg_prebuilt_root AND EXISTS "${ffmpeg_prebuilt_root}")
+    set(ffmpeg_binaries "${ffmpeg_prebuilt_root}/android-libs/${ANDROID_ABI}")
+    set(ffmpeg_include_root "${ffmpeg_prebuilt_root}/include")
+endif()
 
 foreach(ffmpeg_lib avutil swresample swscale avcodec avformat)
     set(ffmpeg_lib_filename lib${ffmpeg_lib}.so)
@@ -88,10 +95,11 @@ endforeach()
 
 # Prefer staged FFmpeg headers. This avoids collisions with FFmpeg top-level
 # files (for example "version") when compiling C++.
-if(EXISTS "${ffmpeg_headers}/config.h")
+if (EXISTS "${ffmpeg_headers}/config.h")
     include_directories(${ffmpeg_headers})
-else()
-    include_directories(${ffmpeg_location})
+endif()
+if (EXISTS "${ffmpeg_include_root}")
+    include_directories(${ffmpeg_include_root})
 endif()
 if(EXISTS "${ffmpeg_binaries}/include")
     include_directories(${ffmpeg_binaries}/include)
