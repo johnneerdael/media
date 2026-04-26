@@ -16,10 +16,18 @@
 apply plugin: 'com.android.library'
 apply from: "$gradle.ext.androidxMediaSettingsDir/common_config.gradle"
 
+def nativeAbiFilter = findProperty('NEXIO_NATIVE_ABI_FILTER')?.toString()?.trim()
+def nativeAbiFilters = nativeAbiFilter ? nativeAbiFilter.split(',').collect { it.trim() }.findAll { it } : []
+
 android {
     namespace = 'androidx.media3.exoplayer.kodi.cppaudiosink'
 
     defaultConfig {
+        if (!nativeAbiFilters.isEmpty()) {
+            ndk {
+                abiFilters += nativeAbiFilters
+            }
+        }
         externalNativeBuild {
             cmake {
                 targets "kodiCppAudioSinkJNI"
