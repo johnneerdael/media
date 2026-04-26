@@ -29,17 +29,16 @@ android {
                 abiFilters += nativeAbiFilters
             }
         }
+        if (ffmpegPrebuiltRoot) {
+            externalNativeBuild {
+                cmake {
+                    arguments "-DNEXIO_PREBUILT_FFMPEG_ROOT=${file(ffmpegPrebuiltRoot).absolutePath}"
+                }
+            }
+        }
         externalNativeBuild {
             cmake {
                 targets "kodiCppAudioSinkJNI"
-            }
-        }
-    }
-
-    if (ffmpegPrebuiltRoot) {
-        externalNativeBuild {
-            cmake {
-                arguments "-DNEXIO_PREBUILT_FFMPEG_ROOT=${file(ffmpegPrebuiltRoot).absolutePath}"
             }
         }
     }

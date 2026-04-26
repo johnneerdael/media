@@ -22,17 +22,16 @@ android {
     namespace = 'androidx.media3.decoder.ffmpeg'
 
     defaultConfig {
+        if (ffmpegPrebuiltRoot) {
+            externalNativeBuild {
+                cmake {
+                    arguments "-DNEXIO_PREBUILT_FFMPEG_ROOT=${file(ffmpegPrebuiltRoot).absolutePath}"
+                }
+            }
+        }
         if (!nativeAbiFilters.isEmpty()) {
             ndk {
                 abiFilters += nativeAbiFilters
-            }
-        }
-    }
-
-    if (ffmpegPrebuiltRoot) {
-        externalNativeBuild {
-            cmake {
-                arguments "-DNEXIO_PREBUILT_FFMPEG_ROOT=${file(ffmpegPrebuiltRoot).absolutePath}"
             }
         }
     }
