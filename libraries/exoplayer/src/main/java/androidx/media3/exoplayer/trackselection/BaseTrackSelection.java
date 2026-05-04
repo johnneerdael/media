@@ -194,6 +194,12 @@ public abstract class BaseTrackSelection implements ExoTrackSelection {
 
   @Override
   public boolean isTrackExcluded(int index, long nowMs) {
+    // HlsChunkSource.createFallbackOptions can call this with a variant index equal to the
+    // variant array size after a track-group change mid-load; treat out-of-range as not excluded
+    // rather than crashing the playback thread.
+    if (index < 0 || index >= excludeUntilTimes.length) {
+      return false;
+    }
     return excludeUntilTimes[index] > nowMs;
   }
 
