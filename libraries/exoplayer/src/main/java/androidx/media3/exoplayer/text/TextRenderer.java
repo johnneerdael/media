@@ -23,6 +23,7 @@ import android.os.Handler;
 import android.os.Handler.Callback;
 import android.os.Looper;
 import android.os.Message;
+import android.os.SystemClock;
 import androidx.annotation.IntDef;
 import androidx.annotation.Nullable;
 import androidx.media3.common.C;
@@ -136,6 +137,7 @@ public final class TextRenderer extends BaseRenderer implements Callback {
   private boolean outputStreamEnded;
   @Nullable private Format streamFormat;
   private long lastRendererPositionUs;
+  private long lastCueGroupTranslationDiagnosticMs;
   private long finalStreamEndPositionUs;
   private boolean legacyDecodingEnabled;
   @Nullable private String cueGroupTranslationToken;
@@ -202,6 +204,7 @@ public final class TextRenderer extends BaseRenderer implements Callback {
     futureSubtitles = new ArrayDeque<>();
     finalStreamEndPositionUs = C.TIME_UNSET;
     lastRendererPositionUs = C.TIME_UNSET;
+    lastCueGroupTranslationDiagnosticMs = C.TIME_UNSET;
     legacyDecodingEnabled = false;
     cueGroupTranslationGeneration = 0L;
     lastOutputCueGroup = CueGroup.EMPTY_TIME_ZERO;
@@ -455,13 +458,14 @@ public final class TextRenderer extends BaseRenderer implements Callback {
       return;
     }
 
+    boolean readLoopCompleted = false;
     try {
       while (!inputStreamEnded) {
         @Nullable SubtitleInputBuffer nextInputBuffer = this.nextSubtitleInputBuffer;
         if (nextInputBuffer == null) {
           nextInputBuffer = checkNotNull(subtitleDecoder).dequeueInputBuffer();
           if (nextInputBuffer == null) {
-            return;
+            break;
           }
           this.nextSubtitleInputBuffer = nextInputBuffer;
         }
@@ -470,7 +474,7 @@ public final class TextRenderer extends BaseRenderer implements Callback {
           checkNotNull(subtitleDecoder).queueInputBuffer(nextInputBuffer);
           this.nextSubtitleInputBuffer = null;
           decoderReplacementState = REPLACEMENT_STATE_WAIT_END_OF_STREAM;
-          return;
+          break;
         }
         // Try and read the next subtitle from the source.
         @ReadDataResult int result = readSource(formatHolder, nextInputBuffer, /* readFlags= */ 0);
@@ -482,7 +486,7 @@ public final class TextRenderer extends BaseRenderer implements Callback {
             @Nullable Format format = formatHolder.format;
             if (format == null) {
               // We haven't received a format yet.
-              return;
+              break;
             }
             nextInputBuffer.subsampleOffsetUs = format.subsampleOffsetUs;
             nextInputBuffer.flip();
@@ -493,11 +497,23 @@ public final class TextRenderer extends BaseRenderer implements Callback {
             this.nextSubtitleInputBuffer = null;
           }
         } else if (result == C.RESULT_NOTHING_READ) {
-          return;
+          break;
         }
       }
+      readLoopCompleted = true;
     } catch (SubtitleDecoderException e) {
       handleDecoderError(e);
+      return;
+    }
+
+    if (readLoopCompleted) {
+      try {
+        maybeDequeueSubtitleOutputBuffers(positionUs);
+      } catch (SubtitleDecoderException e) {
+        handleDecoderError(e);
+        return;
+      }
+      maybePrefetchTranslatedCueGroups(positionUs);
     }
   }
 
@@ -725,6 +741,12 @@ public final class TextRenderer extends BaseRenderer implements Callback {
         cueGroupsToTranslate.add(cueGroup);
         requestedPresentationTimesUs.add(presentationTimeUs);
       }
+      maybeLogCueGroupTranslationDiagnostic(
+          positionUs,
+          upcomingCueGroups.size(),
+          cueGroupsToTranslate.size(),
+          translatedCueGroupsByPresentationTimeUs.size(),
+          pendingTranslationPresentationTimesUs.size());
     }
     if (cueGroupsToTranslate.isEmpty()) {
       return;
@@ -765,6 +787,41 @@ public final class TextRenderer extends BaseRenderer implements Callback {
             Log.w(TAG, "Cue group translation failed. streamFormat=" + streamFormat, exception);
           }
         });
+  }
+
+  private void maybeLogCueGroupTranslationDiagnostic(
+      long positionUs,
+      int upcomingCueGroupCount,
+      int cueGroupsToTranslateCount,
+      int translatedCacheSize,
+      int pendingTranslationCount) {
+    long nowMs = SystemClock.elapsedRealtime();
+    if (cueGroupsToTranslateCount == 0
+        && lastCueGroupTranslationDiagnosticMs != C.TIME_UNSET
+        && nowMs - lastCueGroupTranslationDiagnosticMs < 10_000L) {
+      return;
+    }
+    lastCueGroupTranslationDiagnosticMs = nowMs;
+    Log.d(
+        TAG,
+        "Cue group translation prefetch positionUs="
+            + positionUs
+            + " upcoming="
+            + upcomingCueGroupCount
+            + " toTranslate="
+            + cueGroupsToTranslateCount
+            + " translatedCache="
+            + translatedCacheSize
+            + " pending="
+            + pendingTranslationCount
+            + " futureSubtitles="
+            + futureSubtitles.size()
+            + " hasSubtitle="
+            + (subtitle != null)
+            + " hasNextSubtitle="
+            + (nextSubtitle != null)
+            + " inputStreamEnded="
+            + inputStreamEnded);
   }
 
   private void maybeDequeueSubtitleOutputBuffers(long positionUs) throws SubtitleDecoderException {
