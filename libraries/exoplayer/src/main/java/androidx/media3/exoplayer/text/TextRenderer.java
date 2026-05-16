@@ -860,8 +860,11 @@ public final class TextRenderer extends BaseRenderer implements Callback {
     synchronized (cueGroupTranslationLock) {
       CueGroup translatedCueGroup =
           translatedCueGroupsByPresentationTimeUs.get(cueGroup.presentationTimeUs);
-      return translatedCueGroup != null ? translatedCueGroup : cueGroup;
+      if (translatedCueGroup != null) {
+        return translatedCueGroup;
+      }
     }
+    return new CueGroup(ImmutableList.of(), cueGroup.presentationTimeUs);
   }
 
   private ImmutableList<CueGroup> getUpcomingCuesWithTimingCueGroups(
