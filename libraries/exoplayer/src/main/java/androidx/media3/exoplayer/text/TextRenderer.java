@@ -108,6 +108,7 @@ public final class TextRenderer extends BaseRenderer implements Callback {
 
   private static final int MSG_UPDATE_OUTPUT = 1;
   private static final int MAX_FUTURE_SUBTITLE_OUTPUT_BUFFERS = 60;
+  private static final int MAX_CUES_WITH_TIMING_INPUT_BUFFERS_PER_RENDER = 64;
 
   // Fields used when handling CuesWithTiming objects from application/x-media3-cues samples.
   private final CueDecoder cueDecoder;
@@ -366,8 +367,9 @@ public final class TextRenderer extends BaseRenderer implements Callback {
   }
 
   /**
-   * Tries to {@linkplain #readSource(FormatHolder, DecoderInputBuffer, int) read} a buffer, and if
-   * one is read decodes it to a {@link CuesWithTiming} and adds it to {@link MergingCuesResolver}.
+   * Tries to {@linkplain #readSource(FormatHolder, DecoderInputBuffer, int) read} available
+   * buffers, and decodes each one to a {@link CuesWithTiming} and adds it to {@link
+   * MergingCuesResolver}.
    *
    * @return true if a {@link CuesWithTiming} was read that changes what should be on screen now.
    */
@@ -376,30 +378,36 @@ public final class TextRenderer extends BaseRenderer implements Callback {
     if (inputStreamEnded) {
       return false;
     }
-    @ReadDataResult
-    int readResult = readSource(formatHolder, cueDecoderInputBuffer, /* readFlags= */ 0);
-    switch (readResult) {
-      case C.RESULT_BUFFER_READ:
-        if (cueDecoderInputBuffer.isEndOfStream()) {
-          inputStreamEnded = true;
-          return false;
-        }
-        cueDecoderInputBuffer.flip();
-        ByteBuffer cueData = checkNotNull(cueDecoderInputBuffer.data);
-        CuesWithTiming cuesWithTiming =
-            cueDecoder.decode(
-                cueDecoderInputBuffer.timeUs,
-                cueData.array(),
-                cueData.arrayOffset(),
-                cueData.limit());
-        cueDecoderInputBuffer.clear();
-
-        return cuesResolver.addCues(cuesWithTiming, positionUs);
-      case C.RESULT_FORMAT_READ:
-      case C.RESULT_NOTHING_READ:
-      default:
-        return false;
+    boolean outputNeedsUpdating = false;
+    for (int i = 0; i < MAX_CUES_WITH_TIMING_INPUT_BUFFERS_PER_RENDER; i++) {
+      @ReadDataResult
+      int readResult = readSource(formatHolder, cueDecoderInputBuffer, /* readFlags= */ 0);
+      switch (readResult) {
+        case C.RESULT_BUFFER_READ:
+          if (cueDecoderInputBuffer.isEndOfStream()) {
+            inputStreamEnded = true;
+            cueDecoderInputBuffer.clear();
+            return outputNeedsUpdating;
+          }
+          cueDecoderInputBuffer.flip();
+          ByteBuffer cueData = checkNotNull(cueDecoderInputBuffer.data);
+          CuesWithTiming cuesWithTiming =
+              cueDecoder.decode(
+                  cueDecoderInputBuffer.timeUs,
+                  cueData.array(),
+                  cueData.arrayOffset(),
+                  cueData.limit());
+          cueDecoderInputBuffer.clear();
+          outputNeedsUpdating |= cuesResolver.addCues(cuesWithTiming, positionUs);
+          break;
+        case C.RESULT_FORMAT_READ:
+          break;
+        case C.RESULT_NOTHING_READ:
+        default:
+          return outputNeedsUpdating;
+      }
     }
+    return outputNeedsUpdating;
   }
 
   private void renderFromSubtitles(long positionUs) {
