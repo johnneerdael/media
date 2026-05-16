@@ -54,6 +54,7 @@ import java.lang.annotation.Documented;
 import java.lang.annotation.Retention;
 import java.lang.annotation.RetentionPolicy;
 import java.lang.annotation.Target;
+import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.HashSet;
@@ -105,6 +106,7 @@ public final class TextRenderer extends BaseRenderer implements Callback {
   private static final int REPLACEMENT_STATE_WAIT_END_OF_STREAM = 2;
 
   private static final int MSG_UPDATE_OUTPUT = 1;
+  private static final int MAX_FUTURE_SUBTITLE_OUTPUT_BUFFERS = 60;
 
   // Fields used when handling CuesWithTiming objects from application/x-media3-cues samples.
   private final CueDecoder cueDecoder;
@@ -119,6 +121,7 @@ public final class TextRenderer extends BaseRenderer implements Callback {
   @Nullable private SubtitleInputBuffer nextSubtitleInputBuffer;
   @Nullable private SubtitleOutputBuffer subtitle;
   @Nullable private SubtitleOutputBuffer nextSubtitle;
+  private final ArrayDeque<SubtitleOutputBuffer> futureSubtitles;
   private int nextSubtitleEventIndex;
 
   // Fields used with both CuesWithTiming and Subtitle objects
@@ -196,6 +199,7 @@ public final class TextRenderer extends BaseRenderer implements Callback {
     cueGroupTranslationLock = new Object();
     translatedCueGroupsByPresentationTimeUs = new HashMap<>();
     pendingTranslationPresentationTimesUs = new HashSet<>();
+    futureSubtitles = new ArrayDeque<>();
     finalStreamEndPositionUs = C.TIME_UNSET;
     lastRendererPositionUs = C.TIME_UNSET;
     legacyDecodingEnabled = false;
@@ -397,14 +401,11 @@ public final class TextRenderer extends BaseRenderer implements Callback {
 
   private void renderFromSubtitles(long positionUs) {
     lastRendererPositionUs = positionUs;
-    if (nextSubtitle == null) {
-      checkNotNull(subtitleDecoder).setPositionUs(positionUs);
-      try {
-        nextSubtitle = checkNotNull(subtitleDecoder).dequeueOutputBuffer();
-      } catch (SubtitleDecoderException e) {
-        handleDecoderError(e);
-        return;
-      }
+    try {
+      maybeDequeueSubtitleOutputBuffers(positionUs);
+    } catch (SubtitleDecoderException e) {
+      handleDecoderError(e);
+      return;
     }
 
     if (getState() != STATE_STARTED) {
@@ -440,7 +441,7 @@ public final class TextRenderer extends BaseRenderer implements Callback {
         }
         nextSubtitleEventIndex = nextSubtitle.getNextEventTimeIndex(positionUs);
         subtitle = nextSubtitle;
-        this.nextSubtitle = null;
+        this.nextSubtitle = futureSubtitles.pollFirst();
         textRendererNeedsUpdate = true;
       }
     }
@@ -545,8 +546,18 @@ public final class TextRenderer extends BaseRenderer implements Callback {
           && (!inputStreamEnded
               || hasEventsAfter(subtitle, lastRendererPositionUs)
               || hasEventsAfter(nextSubtitle, lastRendererPositionUs)
+              || hasFutureSubtitleEventsAfter(lastRendererPositionUs)
               || nextSubtitleInputBuffer == null);
     }
+  }
+
+  private boolean hasFutureSubtitleEventsAfter(long timeUs) {
+    for (SubtitleOutputBuffer futureSubtitle : futureSubtitles) {
+      if (hasEventsAfter(futureSubtitle, timeUs)) {
+        return true;
+      }
+    }
+    return false;
   }
 
   private static boolean hasEventsAfter(@Nullable Subtitle subtitle, long timeUs) {
@@ -565,6 +576,9 @@ public final class TextRenderer extends BaseRenderer implements Callback {
     if (nextSubtitle != null) {
       nextSubtitle.release();
       nextSubtitle = null;
+    }
+    while (!futureSubtitles.isEmpty()) {
+      futureSubtitles.removeFirst().release();
     }
   }
 
@@ -753,6 +767,25 @@ public final class TextRenderer extends BaseRenderer implements Callback {
         });
   }
 
+  private void maybeDequeueSubtitleOutputBuffers(long positionUs) throws SubtitleDecoderException {
+    checkNotNull(subtitleDecoder).setPositionUs(positionUs);
+    while (nextSubtitle == null || futureSubtitles.size() < MAX_FUTURE_SUBTITLE_OUTPUT_BUFFERS) {
+      @Nullable SubtitleOutputBuffer outputBuffer =
+          checkNotNull(subtitleDecoder).dequeueOutputBuffer();
+      if (outputBuffer == null) {
+        return;
+      }
+      if (nextSubtitle == null) {
+        nextSubtitle = outputBuffer;
+      } else {
+        futureSubtitles.addLast(outputBuffer);
+      }
+      if (outputBuffer.isEndOfStream()) {
+        return;
+      }
+    }
+  }
+
   private CueGroup maybeGetTranslatedCueGroup(CueGroup cueGroup) {
     if (cueGroupSubtitleTranslator == null
         || cueGroupTranslationToken == null
@@ -809,6 +842,15 @@ public final class TextRenderer extends BaseRenderer implements Callback {
           nextSubtitle,
           nextSubtitle.timeUs,
           nextSubtitle.timeUs,
+          horizonUs,
+          seenPresentationTimesUs,
+          upcomingCueGroups);
+    }
+    for (SubtitleOutputBuffer futureSubtitle : futureSubtitles) {
+      maybeAddUpcomingCueGroupsFromSubtitle(
+          futureSubtitle,
+          futureSubtitle.timeUs,
+          futureSubtitle.timeUs,
           horizonUs,
           seenPresentationTimesUs,
           upcomingCueGroups);

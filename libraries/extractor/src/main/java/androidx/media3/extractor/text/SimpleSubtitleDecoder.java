@@ -28,6 +28,8 @@ public abstract class SimpleSubtitleDecoder
     extends SimpleDecoder<SubtitleInputBuffer, SubtitleOutputBuffer, SubtitleDecoderException>
     implements SubtitleDecoder {
 
+  private static final int SUBTITLE_BUFFER_COUNT = 64;
+
   private final String name;
 
   /**
@@ -35,7 +37,9 @@ public abstract class SimpleSubtitleDecoder
    */
   @SuppressWarnings("nullness:method.invocation")
   protected SimpleSubtitleDecoder(String name) {
-    super(new SubtitleInputBuffer[2], new SubtitleOutputBuffer[2]);
+    super(
+        new SubtitleInputBuffer[SUBTITLE_BUFFER_COUNT],
+        new SubtitleOutputBuffer[SUBTITLE_BUFFER_COUNT]);
     this.name = name;
     setInitialInputBufferSize(1024);
   }
