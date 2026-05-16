@@ -728,11 +728,9 @@ public final class TextRenderer extends BaseRenderer implements Callback {
                   || !Objects.equals(configurationToken, cueGroupTranslationToken)) {
                 return;
               }
-              for (int i = 0; i < requestedPresentationTimesUs.size(); i++) {
-                pendingTranslationPresentationTimesUs.remove(requestedPresentationTimesUs.get(i));
-              }
               for (int i = 0; i < translatedCueGroups.size(); i++) {
                 CueGroup translatedCueGroup = translatedCueGroups.get(i);
+                pendingTranslationPresentationTimesUs.remove(translatedCueGroup.presentationTimeUs);
                 translatedCueGroupsByPresentationTimeUs.put(
                     translatedCueGroup.presentationTimeUs, translatedCueGroup);
               }
