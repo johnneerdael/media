@@ -41,6 +41,18 @@ public interface CueGroupSubtitleTranslator {
   long getPrefetchDurationUs();
 
   /**
+   * Returns a previously translated cue group for {@code sourceCueGroup}, or {@code null} if none
+   * is available.
+   */
+  @Nullable
+  default CueGroup getTranslatedCueGroup(Format format, CueGroup sourceCueGroup) {
+    return null;
+  }
+
+  /** Called when {@code sourceCueGroup} is rendered because no translation is available. */
+  default void onCueGroupRenderedWithoutTranslation(Format format, CueGroup sourceCueGroup) {}
+
+  /**
    * Translates the given cue groups asynchronously.
    *
    * <p>The callback may be invoked on any thread.

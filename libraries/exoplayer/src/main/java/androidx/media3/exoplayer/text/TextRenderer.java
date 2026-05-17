@@ -852,19 +852,26 @@ public final class TextRenderer extends BaseRenderer implements Callback {
   }
 
   private CueGroup maybeGetTranslatedCueGroup(CueGroup cueGroup) {
+    @Nullable Format streamFormat = this.streamFormat;
     if (cueGroupSubtitleTranslator == null
         || cueGroupTranslationToken == null
-        || cueGroup.cues.isEmpty()) {
+        || cueGroup.cues.isEmpty()
+        || streamFormat == null) {
       return cueGroup;
     }
+    @Nullable CueGroup translatedCueGroup =
+        cueGroupSubtitleTranslator.getTranslatedCueGroup(streamFormat, cueGroup);
+    if (translatedCueGroup != null) {
+      return translatedCueGroup;
+    }
     synchronized (cueGroupTranslationLock) {
-      CueGroup translatedCueGroup =
-          translatedCueGroupsByPresentationTimeUs.get(cueGroup.presentationTimeUs);
+      translatedCueGroup = translatedCueGroupsByPresentationTimeUs.get(cueGroup.presentationTimeUs);
       if (translatedCueGroup != null) {
         return translatedCueGroup;
       }
     }
-    return new CueGroup(ImmutableList.of(), cueGroup.presentationTimeUs);
+    cueGroupSubtitleTranslator.onCueGroupRenderedWithoutTranslation(streamFormat, cueGroup);
+    return cueGroup;
   }
 
   private ImmutableList<CueGroup> getUpcomingCuesWithTimingCueGroups(

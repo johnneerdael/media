@@ -87,7 +87,7 @@ public final class TextRendererTest {
   }
 
   @Test
-  public void renderFromCuesWithTiming_hidesSourceCueWhileTranslationIsPending() throws Exception {
+  public void renderFromCuesWithTiming_keepsSourceCueWhileTranslationIsPending() throws Exception {
     PendingTranslator translator = new PendingTranslator();
     ArrayList<CueGroup> outputs = new ArrayList<>();
     TextRenderer renderer =
@@ -109,12 +109,40 @@ public final class TextRendererTest {
     renderer.render(/* positionUs= */ 0, /* elapsedRealtimeUs= */ 0);
     renderer.render(/* positionUs= */ 0, /* elapsedRealtimeUs= */ 0);
 
-    assertThat(lastOutputText(outputs)).isEmpty();
+    assertThat(lastOutputText(outputs)).isEqualTo("bonjour");
 
-    translator.completeWith("hello");
+    translator.completeWith("hallo");
     renderer.render(/* positionUs= */ 0, /* elapsedRealtimeUs= */ 0);
 
-    assertThat(lastOutputText(outputs)).isEqualTo("hello");
+    assertThat(lastOutputText(outputs)).isEqualTo("hallo");
+  }
+
+  @Test
+  public void renderFromCuesWithTiming_rendersTranslatorStoreHitWithoutMissCallback()
+      throws Exception {
+    StoreHitTranslator translator = new StoreHitTranslator();
+    ArrayList<CueGroup> outputs = new ArrayList<>();
+    TextRenderer renderer =
+        new TextRenderer(
+            outputs::add,
+            /* outputLooper= */ null,
+            SubtitleDecoderFactory.DEFAULT,
+            translator);
+    FakeSampleStream fakeSampleStream =
+        createFakeSampleStream(ImmutableList.of(cuesSample(/* timeUs= */ 0, "bonjour")));
+    fakeSampleStream.writeData(/* startPositionUs= */ 0);
+    renderer.replaceStream(
+        new Format[] {MEDIA3_CUES_FORMAT},
+        fakeSampleStream,
+        /* startPositionUs= */ 0,
+        /* offsetUs= */ 0,
+        new MediaSource.MediaPeriodId(new Object()));
+
+    renderer.render(/* positionUs= */ 0, /* elapsedRealtimeUs= */ 0);
+    renderer.render(/* positionUs= */ 0, /* elapsedRealtimeUs= */ 0);
+
+    assertThat(lastOutputText(outputs)).isEqualTo("hallo");
+    assertThat(translator.renderedWithoutTranslationCount).isEqualTo(0);
   }
 
   private FakeSampleStream.FakeSampleStreamItem cuesSample(long timeUs, String text) {
@@ -205,6 +233,43 @@ public final class TextRendererTest {
               new CueGroup(
                   ImmutableList.of(new Cue.Builder().setText(text).build()),
                   sourceCueGroup.presentationTimeUs)));
+    }
+  }
+
+  private static final class StoreHitTranslator implements CueGroupSubtitleTranslator {
+    public int renderedWithoutTranslationCount;
+
+    @Override
+    @Nullable
+    public String getConfigurationToken(Format format) {
+      return "test";
+    }
+
+    @Override
+    public long getPrefetchDurationUs() {
+      return Long.MAX_VALUE / 2;
+    }
+
+    @Override
+    @Nullable
+    public CueGroup getTranslatedCueGroup(Format format, CueGroup sourceCueGroup) {
+      if (lastOutputText(ImmutableList.of(sourceCueGroup)).equals("bonjour")) {
+        return new CueGroup(
+            ImmutableList.of(new Cue.Builder().setText("hallo").build()),
+            sourceCueGroup.presentationTimeUs);
+      }
+      return null;
+    }
+
+    @Override
+    public void onCueGroupRenderedWithoutTranslation(Format format, CueGroup sourceCueGroup) {
+      renderedWithoutTranslationCount++;
+    }
+
+    @Override
+    public void translate(
+        Format format, List<CueGroup> cueGroups, TranslationCallback callback) {
+      callback.onSuccess(ImmutableList.of());
     }
   }
 }
