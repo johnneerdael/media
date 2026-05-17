@@ -326,7 +326,11 @@ public final class AudioTrackAudioOutput implements AudioOutput {
       onRoutingChangedListener.release();
       onRoutingChangedListener = null;
     }
-    releaseAudioTrackAsync(audioTrack, listeners);
+    if (isOutputPcm) {
+      releaseAudioTrackAsync(audioTrack, listeners);
+    } else {
+      releaseAudioTrackSynchronously(audioTrack, listeners);
+    }
   }
 
   @Override
@@ -566,6 +570,18 @@ public final class AudioTrackAudioOutput implements AudioOutput {
               // can completely ramp down the audio output after the preceding pause.
               AUDIO_TRACK_VOLUME_RAMP_TIME_MS,
               MILLISECONDS);
+    }
+  }
+
+  private static void releaseAudioTrackSynchronously(
+      AudioTrack audioTrack, ListenerSet<Listener> listeners) {
+    try {
+      // Encoded passthrough tracks carry platform AV-sync state. Releasing synchronously prevents
+      // an immediate post-seek RAW_HWSYNC track from overlapping the previous one.
+      audioTrack.flush();
+      audioTrack.release();
+    } finally {
+      listeners.sendEvent(Listener::onReleased);
     }
   }
 
