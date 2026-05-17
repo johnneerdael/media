@@ -682,10 +682,18 @@ public final class TextRenderer extends BaseRenderer implements Callback {
   }
 
   private void maybeUpdateOutput(CueGroup cueGroup) {
-    CueGroup translatedCueGroup = maybeGetTranslatedCueGroup(cueGroup);
-    if (!translatedCueGroup.equals(lastOutputCueGroup)) {
-      updateOutput(translatedCueGroup);
+    TranslationResolution translationResolution = maybeResolveTranslatedCueGroup(cueGroup);
+    if (!cueGroupsEqual(translationResolution.cueGroup, lastOutputCueGroup)) {
+      if (translationResolution.renderedWithoutTranslation) {
+        checkNotNull(cueGroupSubtitleTranslator)
+            .onCueGroupRenderedWithoutTranslation(checkNotNull(streamFormat), cueGroup);
+      }
+      updateOutput(translationResolution.cueGroup);
     }
+  }
+
+  private static boolean cueGroupsEqual(CueGroup first, CueGroup second) {
+    return first.presentationTimeUs == second.presentationTimeUs && first.cues.equals(second.cues);
   }
 
   private CueGroup getCueGroupForCuesWithTiming(long positionUs) {
@@ -851,27 +859,38 @@ public final class TextRenderer extends BaseRenderer implements Callback {
     }
   }
 
-  private CueGroup maybeGetTranslatedCueGroup(CueGroup cueGroup) {
+  private TranslationResolution maybeResolveTranslatedCueGroup(CueGroup cueGroup) {
     @Nullable Format streamFormat = this.streamFormat;
     if (cueGroupSubtitleTranslator == null
         || cueGroupTranslationToken == null
         || cueGroup.cues.isEmpty()
         || streamFormat == null) {
-      return cueGroup;
+      return new TranslationResolution(cueGroup, /* renderedWithoutTranslation= */ false);
     }
     @Nullable CueGroup translatedCueGroup =
         cueGroupSubtitleTranslator.getTranslatedCueGroup(streamFormat, cueGroup);
     if (translatedCueGroup != null) {
-      return translatedCueGroup;
+      return new TranslationResolution(
+          translatedCueGroup, /* renderedWithoutTranslation= */ false);
     }
     synchronized (cueGroupTranslationLock) {
       translatedCueGroup = translatedCueGroupsByPresentationTimeUs.get(cueGroup.presentationTimeUs);
       if (translatedCueGroup != null) {
-        return translatedCueGroup;
+        return new TranslationResolution(
+            translatedCueGroup, /* renderedWithoutTranslation= */ false);
       }
     }
-    cueGroupSubtitleTranslator.onCueGroupRenderedWithoutTranslation(streamFormat, cueGroup);
-    return cueGroup;
+    return new TranslationResolution(cueGroup, /* renderedWithoutTranslation= */ true);
+  }
+
+  private static final class TranslationResolution {
+    public final CueGroup cueGroup;
+    public final boolean renderedWithoutTranslation;
+
+    public TranslationResolution(CueGroup cueGroup, boolean renderedWithoutTranslation) {
+      this.cueGroup = cueGroup;
+      this.renderedWithoutTranslation = renderedWithoutTranslation;
+    }
   }
 
   private ImmutableList<CueGroup> getUpcomingCuesWithTimingCueGroups(

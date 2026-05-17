@@ -110,6 +110,7 @@ public final class TextRendererTest {
     renderer.render(/* positionUs= */ 0, /* elapsedRealtimeUs= */ 0);
 
     assertThat(lastOutputText(outputs)).isEqualTo("bonjour");
+    assertThat(translator.renderedWithoutTranslationCount).isEqualTo(1);
 
     translator.completeWith("hallo");
     renderer.render(/* positionUs= */ 0, /* elapsedRealtimeUs= */ 0);
@@ -202,6 +203,7 @@ public final class TextRendererTest {
   }
 
   private static final class PendingTranslator implements CueGroupSubtitleTranslator {
+    public int renderedWithoutTranslationCount;
     private List<CueGroup> cueGroups;
     @Nullable private TranslationCallback callback;
 
@@ -221,6 +223,11 @@ public final class TextRendererTest {
         Format format, List<CueGroup> cueGroups, TranslationCallback callback) {
       this.cueGroups = cueGroups;
       this.callback = callback;
+    }
+
+    @Override
+    public void onCueGroupRenderedWithoutTranslation(Format format, CueGroup sourceCueGroup) {
+      renderedWithoutTranslationCount++;
     }
 
     public void completeWith(String text) {
