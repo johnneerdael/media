@@ -214,6 +214,20 @@ public final class Mp4ExtractorNonParameterizedTest {
     assertThat(output.trackOutputs.get(1).getSampleCount()).isEqualTo(0);
   }
 
+  @Test
+  public void extract_withTextTracksOnlyFlag_omitsAudioVideoTracks() throws Exception {
+    Context context = ApplicationProvider.getApplicationContext();
+    String inputFilePath = "media/mp4/sample.mp4";
+    Mp4Extractor mp4Extractor =
+        new Mp4Extractor(
+            new DefaultSubtitleParserFactory(), Mp4Extractor.FLAG_READ_TEXT_TRACKS_ONLY);
+
+    FakeExtractorOutput output =
+        TestUtil.extractAllSamplesFromFile(mp4Extractor, context, inputFilePath);
+
+    assertThat(output.numberOfTracks).isEqualTo(0);
+  }
+
   private static String getDumpFilePath(String inputFilePath, String suffix) {
     return inputFilePath.replaceFirst("media", "extractordumps") + suffix;
   }

@@ -152,8 +152,8 @@ public final class Mp4Extractor implements Extractor {
    * Flags controlling the behavior of the extractor. Possible flag values are {@link
    * #FLAG_WORKAROUND_IGNORE_EDIT_LISTS}, {@link #FLAG_READ_MOTION_PHOTO_METADATA}, {@link
    * #FLAG_READ_SEF_DATA}, {@link #FLAG_READ_WITHIN_GOP_SAMPLE_DEPENDENCIES}, {@link
-   * #FLAG_READ_AUXILIARY_TRACKS}, {@link #FLAG_READ_WITHIN_GOP_SAMPLE_DEPENDENCIES_H265} and {@link
-   * #FLAG_OMIT_TRACK_SAMPLE_TABLE}.
+   * #FLAG_READ_AUXILIARY_TRACKS}, {@link #FLAG_READ_WITHIN_GOP_SAMPLE_DEPENDENCIES_H265}, {@link
+   * #FLAG_OMIT_TRACK_SAMPLE_TABLE} and {@link #FLAG_READ_TEXT_TRACKS_ONLY}.
    */
   @Documented
   @Retention(RetentionPolicy.SOURCE)
@@ -169,7 +169,8 @@ public final class Mp4Extractor implements Extractor {
         FLAG_READ_WITHIN_GOP_SAMPLE_DEPENDENCIES,
         FLAG_READ_AUXILIARY_TRACKS,
         FLAG_READ_WITHIN_GOP_SAMPLE_DEPENDENCIES_H265,
-        FLAG_OMIT_TRACK_SAMPLE_TABLE
+        FLAG_OMIT_TRACK_SAMPLE_TABLE,
+        FLAG_READ_TEXT_TRACKS_ONLY
       })
   public @interface Flags {}
 
@@ -238,6 +239,14 @@ public final class Mp4Extractor implements Extractor {
    */
   public static final int FLAG_OMIT_TRACK_SAMPLE_TABLE = 1 << 8;
 
+  /**
+   * Flag to output and read only text tracks.
+   *
+   * <p>This is intended for independent subtitle harvesting paths that need to walk subtitle sample
+   * tables without also reading audio/video media samples.
+   */
+  public static final int FLAG_READ_TEXT_TRACKS_ONLY = 1 << 9;
+
   /** The maximum number of sync samples to scan when searching for a thumbnail. */
   private static final int MAX_SYNC_SAMPLES_TO_SCAN_FOR_THUMBNAIL = 20;
 
@@ -297,6 +306,7 @@ public final class Mp4Extractor implements Extractor {
   private final SubtitleParser.Factory subtitleParserFactory;
   private final @Flags int flags;
   private final boolean omitTrackSampleTable;
+  private final boolean readTextTracksOnly;
   @Nullable private final DolbyVisionSampleTransformer dolbyVisionSampleTransformer;
 
   // Temporary arrays.
@@ -393,6 +403,7 @@ public final class Mp4Extractor implements Extractor {
     this.flags = flags;
     this.dolbyVisionSampleTransformer = dolbyVisionSampleTransformer;
     omitTrackSampleTable = (flags & FLAG_OMIT_TRACK_SAMPLE_TABLE) != 0;
+    readTextTracksOnly = (flags & FLAG_READ_TEXT_TRACKS_ONLY) != 0;
     lastSniffFailures = ImmutableList.of();
     parserState =
         ((flags & FLAG_READ_SEF_DATA) != 0) ? STATE_READING_SEF : STATE_READING_ATOM_HEADER;
@@ -747,6 +758,9 @@ public final class Mp4Extractor implements Extractor {
         continue;
       }
       Track track = trackSampleTable.track;
+      if (readTextTracksOnly && track.type != C.TRACK_TYPE_TEXT) {
+        continue;
+      }
       Mp4Track mp4Track =
           new Mp4Track(track, trackSampleTable, extractorOutput.track(trackIndex++, track.type));
       long trackDurationUs =
