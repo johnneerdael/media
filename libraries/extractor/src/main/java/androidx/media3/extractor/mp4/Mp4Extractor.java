@@ -308,6 +308,7 @@ public final class Mp4Extractor implements Extractor {
   private final boolean omitTrackSampleTable;
   private final boolean readTextTracksOnly;
   @Nullable private final DolbyVisionSampleTransformer dolbyVisionSampleTransformer;
+  @Nullable private final Mp4TextTrackSampleTableListener textTrackSampleTableListener;
 
   // Temporary arrays.
   private final ParsableByteArray nalStartCode;
@@ -399,9 +400,33 @@ public final class Mp4Extractor implements Extractor {
       SubtitleParser.Factory subtitleParserFactory,
       @Flags int flags,
       @Nullable DolbyVisionSampleTransformer dolbyVisionSampleTransformer) {
+    this(
+        subtitleParserFactory,
+        flags,
+        dolbyVisionSampleTransformer,
+        /* textTrackSampleTableListener= */ null);
+  }
+
+  /**
+   * Creates a new extractor for unfragmented MP4 streams, using the specified flags to control the
+   * extractor's behavior and optional hooks.
+   *
+   * @param subtitleParserFactory The {@link SubtitleParser.Factory} for parsing subtitles during
+   *     extraction.
+   * @param flags Flags that control the extractor's behavior.
+   * @param dolbyVisionSampleTransformer Optional Dolby Vision sample/signaling transformer.
+   * @param textTrackSampleTableListener Optional listener for exporting text track sample tables as
+   *     soon as the moov atom is parsed.
+   */
+  public Mp4Extractor(
+      SubtitleParser.Factory subtitleParserFactory,
+      @Flags int flags,
+      @Nullable DolbyVisionSampleTransformer dolbyVisionSampleTransformer,
+      @Nullable Mp4TextTrackSampleTableListener textTrackSampleTableListener) {
     this.subtitleParserFactory = subtitleParserFactory;
     this.flags = flags;
     this.dolbyVisionSampleTransformer = dolbyVisionSampleTransformer;
+    this.textTrackSampleTableListener = textTrackSampleTableListener;
     omitTrackSampleTable = (flags & FLAG_OMIT_TRACK_SAMPLE_TABLE) != 0;
     readTextTracksOnly = (flags & FLAG_READ_TEXT_TRACKS_ONLY) != 0;
     lastSniffFailures = ImmutableList.of();
@@ -751,7 +776,9 @@ public final class Mp4Extractor implements Extractor {
               trackSampleTables.size()));
     }
     int trackIndex = 0;
+    int textTrackOrdinal = 0;
     String containerMimeType = getContainerMimeType(trackSampleTables);
+    ImmutableList.Builder<Mp4TextTrackSampleTable> textTrackSampleTables = ImmutableList.builder();
     for (int i = 0; i < trackSampleTables.size(); i++) {
       TrackSampleTable trackSampleTable = trackSampleTables.get(i);
       if (trackSampleTable.sampleCount == 0) {
@@ -843,6 +870,20 @@ public final class Mp4Extractor implements Extractor {
       } else {
         mp4Track.trackOutput.format(formatBuilder.build());
       }
+      Format outputFormat = formatBuilder.build();
+      if (track.type == C.TRACK_TYPE_TEXT) {
+        textTrackSampleTables.add(
+            new Mp4TextTrackSampleTable(
+                textTrackOrdinal++,
+                track.id,
+                outputFormat,
+                trackSampleTable.sampleCount,
+                trackSampleTable.offsets,
+                trackSampleTable.sizes,
+                trackSampleTable.timestampsUs,
+                trackSampleTable.flags,
+                trackSampleTable.durationUs));
+      }
 
       if (track.type == C.TRACK_TYPE_VIDEO && firstVideoTrackIndex == C.INDEX_UNSET) {
         firstVideoTrackIndex = tracks.size();
@@ -853,6 +894,9 @@ public final class Mp4Extractor implements Extractor {
     accumulatedSampleSizes =
         !omitTrackSampleTable ? calculateAccumulatedSampleSizes(this.tracks) : null;
 
+    if (textTrackSampleTableListener != null) {
+      textTrackSampleTableListener.onTextTrackSampleTables(textTrackSampleTables.build());
+    }
     extractorOutput.endTracks();
     extractorOutput.seekMap(new Mp4SeekMap(durationUs, this.tracks, firstVideoTrackIndex));
   }

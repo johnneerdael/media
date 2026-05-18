@@ -19,6 +19,7 @@ import static com.google.common.truth.Truth.assertThat;
 
 import android.content.Context;
 import androidx.media3.common.Format;
+import androidx.media3.common.MimeTypes;
 import androidx.media3.extractor.Extractor;
 import androidx.media3.extractor.PositionHolder;
 import androidx.media3.extractor.SniffFailure;
@@ -226,6 +227,53 @@ public final class Mp4ExtractorNonParameterizedTest {
         TestUtil.extractAllSamplesFromFile(mp4Extractor, context, inputFilePath);
 
     assertThat(output.numberOfTracks).isEqualTo(0);
+  }
+
+  @Test
+  public void extract_withTextSampleTableListener_exportsTextTrackSampleTables() throws Exception {
+    Context context = ApplicationProvider.getApplicationContext();
+    String inputFilePath = "media/mp4/sample_with_vobsub.mp4";
+    ImmutableList.Builder<ImmutableList<Mp4TextTrackSampleTable>> exportedTables =
+        ImmutableList.builder();
+    Mp4Extractor mp4Extractor =
+        new Mp4Extractor(
+            new DefaultSubtitleParserFactory(),
+            /* flags= */ 0,
+            /* dolbyVisionSampleTransformer= */ null,
+            exportedTables::add);
+
+    TestUtil.extractAllSamplesFromFile(mp4Extractor, context, inputFilePath);
+
+    ImmutableList<Mp4TextTrackSampleTable> tables = Iterables.getOnlyElement(exportedTables.build());
+    Mp4TextTrackSampleTable table = Iterables.getOnlyElement(tables);
+    assertThat(table.textTrackOrdinal).isEqualTo(0);
+    assertThat(table.trackId).isGreaterThan(0);
+    assertThat(table.format.sampleMimeType).isEqualTo(MimeTypes.APPLICATION_VOBSUB);
+    assertThat(table.sampleCount).isGreaterThan(0);
+    assertThat(table.offsets).hasLength(table.sampleCount);
+    assertThat(table.sizes).hasLength(table.sampleCount);
+    assertThat(table.timestampsUs).hasLength(table.sampleCount);
+    assertThat(table.flags).hasLength(table.sampleCount);
+    assertThat(table.offsets[0]).isGreaterThan(0);
+    assertThat(table.sizes[0]).isGreaterThan(0);
+  }
+
+  @Test
+  public void extract_withTextSampleTableListener_noTextTracksExportsEmptyList() throws Exception {
+    Context context = ApplicationProvider.getApplicationContext();
+    String inputFilePath = "media/mp4/sample.mp4";
+    ImmutableList.Builder<ImmutableList<Mp4TextTrackSampleTable>> exportedTables =
+        ImmutableList.builder();
+    Mp4Extractor mp4Extractor =
+        new Mp4Extractor(
+            new DefaultSubtitleParserFactory(),
+            /* flags= */ 0,
+            /* dolbyVisionSampleTransformer= */ null,
+            exportedTables::add);
+
+    TestUtil.extractAllSamplesFromFile(mp4Extractor, context, inputFilePath);
+
+    assertThat(Iterables.getOnlyElement(exportedTables.build())).isEmpty();
   }
 
   private static String getDumpFilePath(String inputFilePath, String suffix) {
