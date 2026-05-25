@@ -17,7 +17,6 @@ extern "C" {
 #include <cstddef>
 #include <cstdint>
 #include <cctype>
-#include <cstdio>
 #include <atomic>
 #include <string>
 
@@ -389,7 +388,6 @@ Java_androidx_media3_decoder_ffmpeg_FfmpegLibrary_ffmpegProbeDolbyVisionStreamMe
 
             const AVCodecParameters *codecpar = stream->codecpar;
             if (codecpar->codec_type != AVMEDIA_TYPE_VIDEO &&
-                codecpar->codec_type != AVMEDIA_TYPE_AUDIO &&
                 codecpar->codec_type != AVMEDIA_TYPE_SUBTITLE) {
                 continue;
             }
@@ -429,15 +427,6 @@ Java_androidx_media3_decoder_ffmpeg_FfmpegLibrary_ffmpegProbeDolbyVisionStreamMe
             json += "\"index\":" + std::to_string(stream->index);
             json += ",\"codec_type\":\"" + escapeJsonString(codec_type) + "\"";
             json += ",\"codec_name\":\"" + escapeJsonString(codec_name) + "\"";
-            if (codecpar->codec_tag > 0) {
-                char codec_tag_buffer[16];
-                std::snprintf(
-                        codec_tag_buffer,
-                        sizeof(codec_tag_buffer),
-                        "0x%04x",
-                        codecpar->codec_tag);
-                json += ",\"codec_tag\":\"" + std::string(codec_tag_buffer) + "\"";
-            }
             if (codecpar->codec_type == AVMEDIA_TYPE_VIDEO) {
                 if (codecpar->width > 0) {
                     json += ",\"width\":" + std::to_string(codecpar->width);
@@ -464,14 +453,7 @@ Java_androidx_media3_decoder_ffmpeg_FfmpegLibrary_ffmpegProbeDolbyVisionStreamMe
         }
     }
 
-    json += "]";
-    if (format_context != nullptr &&
-        format_context->iformat != nullptr &&
-        format_context->iformat->name != nullptr) {
-        json += ",\"format\":{\"format_name\":\"" +
-                escapeJsonString(format_context->iformat->name) + "\"}";
-    }
-    json += "}";
+    json += "]}";
 
     if (format_context != nullptr) {
         avformat_close_input(&format_context);

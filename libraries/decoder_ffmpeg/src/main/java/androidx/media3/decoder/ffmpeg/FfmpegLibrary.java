@@ -117,14 +117,12 @@ public final class FfmpegLibrary {
   }
 
   /**
-   * Probes all streams once and returns stream metadata JSON for autoplay scoring, AFR and
-   * deterministic renderer routing.
+   * Probes all streams once and returns stream metadata JSON for autoplay scoring and AFR.
    *
    * <p>The payload mirrors the small ffprobe-style subset used by Nexio:
-   * {@code codec_type}, {@code codec_name}, {@code codec_tag}, {@code width}, {@code height},
+   * {@code codec_type}, {@code codec_name}, {@code width}, {@code height},
    * {@code avg_frame_rate}, {@code r_frame_rate}, {@code color_transfer},
-   * {@code color_primaries}, {@code dv_profile}, {@code hdr10_plus}, and format
-   * {@code format_name}.
+   * {@code color_primaries}, {@code dv_profile}, and {@code hdr10_plus}.
    */
   @Nullable
   public static String probeDolbyVisionStreamMetadataJson(
