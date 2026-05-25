@@ -367,11 +367,6 @@ Java_androidx_media3_decoder_ffmpeg_FfmpegLibrary_ffmpegProbeDolbyVisionStreamMe
 
     std::string json = "{\"streams\":[";
     bool first_stream = true;
-    const bool include_audio_streams =
-            format_context != nullptr &&
-            format_context->iformat != nullptr &&
-            format_context->iformat->name != nullptr &&
-            std::string(format_context->iformat->name).find("avi") != std::string::npos;
 
     int find_info_result = -1;
     if (open_result >= 0 && format_context != nullptr) {
@@ -394,7 +389,7 @@ Java_androidx_media3_decoder_ffmpeg_FfmpegLibrary_ffmpegProbeDolbyVisionStreamMe
 
             const AVCodecParameters *codecpar = stream->codecpar;
             if (codecpar->codec_type != AVMEDIA_TYPE_VIDEO &&
-                !(include_audio_streams && codecpar->codec_type == AVMEDIA_TYPE_AUDIO) &&
+                codecpar->codec_type != AVMEDIA_TYPE_AUDIO &&
                 codecpar->codec_type != AVMEDIA_TYPE_SUBTITLE) {
                 continue;
             }
