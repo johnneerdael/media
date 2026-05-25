@@ -12,6 +12,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cinttypes>
+#include <deque>
 #include <dlfcn.h>
 #include <map>
 #include <mutex>
@@ -1311,6 +1312,11 @@ struct JniContext {
 #endif
     bool enable_tone_map_to_sdr = false;
     int64_t last_queued_input_time_us = AV_NOPTS_VALUE;
+    struct PendingVideoPacket {
+        std::vector<uint8_t> data;
+        int64_t pts;
+    };
+    std::deque<PendingVideoPacket> pending_video_packets;
 
     ANativeWindow *native_window = nullptr;
     jobject surface = nullptr;
@@ -2257,6 +2263,7 @@ Java_androidx_media3_decoder_ffmpeg_FfmpegVideoDecoder_ffmpegReset(JNIEnv *env, 
     }
 
     avcodec_flush_buffers(context);
+    jniContext->pending_video_packets.clear();
     clearToneMapFilterGraph(jniContext);
     return (jlong) jniContext;
 }
@@ -2406,34 +2413,56 @@ Java_androidx_media3_decoder_ffmpeg_FfmpegVideoDecoder_ffmpegSendPacket(JNIEnv *
     auto *const jniContext = reinterpret_cast<JniContext *>(jContext);
     AVCodecContext *avContext = jniContext->codecContext;
 
-    auto *inputBuffer = (uint8_t *) env->GetDirectBufferAddress(encoded_data);
-    AVPacket *packet = av_packet_alloc();
-    if (!packet) {
-        LOGE("Failed to allocate packet.");
+    auto *inputBuffer = reinterpret_cast<uint8_t *>(env->GetDirectBufferAddress(encoded_data));
+    if (!inputBuffer && length > 0) {
+        LOGE("ffmpegSendPacket: encoded input direct buffer is null.");
         return VIDEO_DECODER_ERROR_OTHER;
     }
-    packet->data = inputBuffer;
-    packet->size = length;
-    packet->pts = input_time;
-    packet->dts = input_time;
-    jniContext->last_queued_input_time_us = input_time;
 
-    // Queue input data.
-    int result = avcodec_send_packet(avContext, packet);
-    av_packet_free(&packet);
-    if (result) {
-        logError("avcodec_send_packet", result);
-        if (result == AVERROR_INVALIDDATA) {
-            // need more data
-            return VIDEO_DECODER_ERROR_INVALID_DATA;
-        } else if (result == AVERROR(EAGAIN)) {
-            // need read frame
-            return VIDEO_DECODER_ERROR_READ_FRAME;
-        } else {
+    auto &pendingPackets = jniContext->pending_video_packets;
+    std::vector<uint8_t> packetData;
+    if (length > 0) {
+        packetData.assign(inputBuffer, inputBuffer + length);
+    }
+    pendingPackets.push_back({
+            std::move(packetData),
+            input_time
+    });
+
+    while (!pendingPackets.empty()) {
+        auto &pending = pendingPackets.front();
+        AVPacket *packet = av_packet_alloc();
+        if (!packet) {
+            LOGE("Failed to allocate packet.");
             return VIDEO_DECODER_ERROR_OTHER;
         }
+        packet->data = pending.data.data();
+        packet->size = static_cast<int>(pending.data.size());
+        packet->pts = pending.pts;
+        packet->dts = pending.pts;
+
+        // Queue input data. If FFmpeg asks us to drain output first, keep
+        // this packet queued and retry it after the next receive_frame call.
+        int result = avcodec_send_packet(avContext, packet);
+        av_packet_free(&packet);
+        if (result == 0) {
+            jniContext->last_queued_input_time_us = pending.pts;
+            pendingPackets.pop_front();
+            continue;
+        }
+
+        if (result == AVERROR(EAGAIN)) {
+            return VIDEO_DECODER_ERROR_READ_FRAME;
+        } else if (result == AVERROR_INVALIDDATA) {
+            logError("avcodec_send_packet", result);
+            pendingPackets.pop_front();
+            return VIDEO_DECODER_ERROR_INVALID_DATA;
+        }
+        logError("avcodec_send_packet", result);
+        pendingPackets.pop_front();
+        return VIDEO_DECODER_ERROR_OTHER;
     }
-    return result;
+    return VIDEO_DECODER_SUCCESS;
 }
 
 extern "C"
@@ -2470,6 +2499,13 @@ Java_androidx_media3_decoder_ffmpeg_FfmpegVideoDecoder_ffmpegReceiveFrame(JNIEnv
     AVFrame *outputFrame = applyToneMapToFrame(jniContext, frame);
     AVFrame *convertedOutputFrame = nullptr;
     if (!convertFrameToYuv420p(jniContext, outputFrame, &convertedOutputFrame)) {
+        LOGE(
+                "ffmpegReceiveFrame: convertFrameToYuv420p failed codec=%s format=%s width=%d height=%d pts=%" PRId64,
+                avContext->codec ? avContext->codec->name : "unknown",
+                av_get_pix_fmt_name(static_cast<AVPixelFormat>(outputFrame->format)),
+                outputFrame->width,
+                outputFrame->height,
+                outputFrame->pts);
         av_frame_free(&frame);
         return VIDEO_DECODER_ERROR_OTHER;
     }
@@ -2502,10 +2538,22 @@ Java_androidx_media3_decoder_ffmpeg_FfmpegVideoDecoder_ffmpegReceiveFrame(JNIEnv
             outputFrame->linesize[0], outputFrame->linesize[1],
             0);
     if (env->ExceptionCheck()) {
+        LOGE(
+                "ffmpegReceiveFrame: VideoDecoderOutputBuffer.initForYuvFrame threw width=%d height=%d yStride=%d uvStride=%d",
+                outputFrame->width,
+                outputFrame->height,
+                outputFrame->linesize[0],
+                outputFrame->linesize[1]);
         // Exception is thrown in Java when returning from the native call.
         return VIDEO_DECODER_ERROR_OTHER;
     }
     if (!init_result) {
+        LOGE(
+                "ffmpegReceiveFrame: VideoDecoderOutputBuffer.initForYuvFrame returned false width=%d height=%d yStride=%d uvStride=%d",
+                outputFrame->width,
+                outputFrame->height,
+                outputFrame->linesize[0],
+                outputFrame->linesize[1]);
         return VIDEO_DECODER_ERROR_OTHER;
     }
 

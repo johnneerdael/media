@@ -145,9 +145,12 @@ LIBDOVI_PREBUILT_ROOT="${LIBDOVI_PREBUILT_ROOT:-${FFMPEG_MODULE_PATH}/../../../.
 FFMPEG_REQUIRE_LIBDOVI="${FFMPEG_REQUIRE_LIBDOVI:-0}"
 FFMPEG_ENABLE_MBEDTLS="${FFMPEG_ENABLE_MBEDTLS:-0}"
 MBEDTLS_PREBUILT_ROOT="${MBEDTLS_PREBUILT_ROOT:-${FFMPEG_MODULE_PATH}/../../../../../third_party/mbedtls-prebuilt}"
+FFMPEG_ENABLE_LIBDAV1D="${FFMPEG_ENABLE_LIBDAV1D:-0}"
+LIBDAV1D_PREBUILT_ROOT="${LIBDAV1D_PREBUILT_ROOT:-${FFMPEG_MODULE_PATH}/../../../decoder_av1/src/main/jni}"
 echo "FFMPEG_ENABLE_LIBPLACEBO is ${FFMPEG_ENABLE_LIBPLACEBO}"
 echo "FFMPEG_ENABLE_LIBDOVI is ${FFMPEG_ENABLE_LIBDOVI}"
 echo "FFMPEG_ENABLE_MBEDTLS is ${FFMPEG_ENABLE_MBEDTLS}"
+echo "FFMPEG_ENABLE_LIBDAV1D is ${FFMPEG_ENABLE_LIBDAV1D}"
 COMMON_OPTIONS="
     --target-os=android
     --pkg-config=pkg-config
@@ -297,6 +300,20 @@ then
     fi
 fi
 
+if [[ "${FFMPEG_ENABLE_LIBDAV1D}" == "1" ]]
+then
+    if [[ ! -d "${LIBDAV1D_PREBUILT_ROOT}" ]]
+    then
+        echo "LIBDAV1D_PREBUILT_ROOT does not exist: ${LIBDAV1D_PREBUILT_ROOT}"
+        exit 1
+    fi
+    if ! configure_supports_option "--enable-libdav1d"
+    then
+        echo "Current FFmpeg source (${FFMPEG_SOURCE_PATH}) does not support --enable-libdav1d."
+        exit 1
+    fi
+fi
+
 if [[ "${FFMPEG_ENABLE_LIBPLACEBO}" == "1" && -z "${LIBPLACEBO_PREBUILT_ROOT}" ]]
 then
     echo "LIBPLACEBO_PREBUILT_ROOT must be set when FFMPEG_ENABLE_LIBPLACEBO=1"
@@ -315,6 +332,14 @@ then
     COMMON_OPTIONS="${COMMON_OPTIONS}
         --enable-mbedtls
         --enable-version3
+    "
+fi
+
+if [[ "${FFMPEG_ENABLE_LIBDAV1D}" == "1" ]]
+then
+    COMMON_OPTIONS="${COMMON_OPTIONS}
+        --enable-libdav1d
+        --enable-decoder=libdav1d
     "
 fi
 
@@ -423,6 +448,95 @@ validate_ffmpeg_tls_config() {
     require_ffmpeg_define_enabled "${config_components_h}" "CONFIG_TCP_PROTOCOL"
     require_ffmpeg_define_enabled "${config_components_h}" "CONFIG_TLS_PROTOCOL"
     require_ffmpeg_define_enabled "${config_components_h}" "CONFIG_HTTPS_PROTOCOL"
+}
+
+validate_ffmpeg_libdav1d_config() {
+    if [[ "${FFMPEG_ENABLE_LIBDAV1D}" != "1" ]]
+    then
+        return
+    fi
+    local config_h="${FFMPEG_SOURCE_PATH}/config.h"
+    local config_components_h="${FFMPEG_SOURCE_PATH}/config_components.h"
+    require_ffmpeg_define_enabled "${config_h}" "CONFIG_LIBDAV1D"
+    require_ffmpeg_define_enabled "${config_components_h}" "CONFIG_LIBDAV1D_DECODER"
+}
+
+libdav1d_include_dir_for_target() {
+    local target_abi="$1"
+    local standalone_include_dir="${LIBDAV1D_PREBUILT_ROOT}/${target_abi}/include"
+    if [[ -f "${standalone_include_dir}/dav1d/dav1d.h" ]]
+    then
+        echo "${standalone_include_dir}"
+        return
+    fi
+    local decoder_av1_include_dir="${LIBDAV1D_PREBUILT_ROOT}/dav1d/include"
+    if [[ -f "${decoder_av1_include_dir}/dav1d/dav1d.h" ]]
+    then
+        echo "${decoder_av1_include_dir}"
+        return
+    fi
+    echo "Missing dav1d headers for ${target_abi} under ${LIBDAV1D_PREBUILT_ROOT}" >&2
+    exit 1
+}
+
+libdav1d_lib_dir_for_target() {
+    local target_abi="$1"
+    local standalone_lib_dir="${LIBDAV1D_PREBUILT_ROOT}/${target_abi}/lib"
+    if [[ -f "${standalone_lib_dir}/libdav1d.a" ]]
+    then
+        echo "${standalone_lib_dir}"
+        return
+    fi
+    local decoder_av1_lib_dir="${LIBDAV1D_PREBUILT_ROOT}/nativelib/${target_abi}"
+    if [[ -f "${decoder_av1_lib_dir}/libdav1d.a" ]]
+    then
+        echo "${decoder_av1_lib_dir}"
+        return
+    fi
+    echo "Missing libdav1d.a for ${target_abi} under ${LIBDAV1D_PREBUILT_ROOT}" >&2
+    exit 1
+}
+
+validate_libdav1d_prebuilts_for_abi() {
+    local target_abi="$1"
+    if [[ "${FFMPEG_ENABLE_LIBDAV1D}" != "1" ]]
+    then
+        return
+    fi
+    libdav1d_include_dir_for_target "${target_abi}" > /dev/null
+    libdav1d_lib_dir_for_target "${target_abi}" > /dev/null
+}
+
+prepare_libdav1d_pkgconfig_for_abi() {
+    local target_abi="$1"
+    validate_libdav1d_prebuilts_for_abi "${target_abi}"
+
+    local standalone_pkgconfig_dir="${LIBDAV1D_PREBUILT_ROOT}/${target_abi}/lib/pkgconfig"
+    if [[ -f "${standalone_pkgconfig_dir}/dav1d.pc" ]]
+    then
+        echo "${standalone_pkgconfig_dir}"
+        return
+    fi
+
+    local include_dir
+    include_dir="$(libdav1d_include_dir_for_target "${target_abi}")"
+    local lib_dir
+    lib_dir="$(libdav1d_lib_dir_for_target "${target_abi}")"
+    local staged_pkgconfig_dir="${FFMPEG_MODULE_PATH}/jni/.libdav1d-pkgconfig/${target_abi}"
+    mkdir -p "${staged_pkgconfig_dir}"
+    cat > "${staged_pkgconfig_dir}/dav1d.pc" <<EOF
+prefix=${LIBDAV1D_PREBUILT_ROOT}
+exec_prefix=\${prefix}
+libdir=${lib_dir}
+includedir=${include_dir}
+
+Name: dav1d
+Description: AV1 decoder by VideoLAN
+Version: 1.0.0
+Libs: -L\${libdir} -ldav1d
+Cflags: -I\${includedir}
+EOF
+    echo "${staged_pkgconfig_dir}"
 }
 
 validate_mbedtls_prebuilts_for_abi() {
@@ -578,7 +692,7 @@ validate_tonemap_outputs_for_abi() {
 stage_shared_ffmpeg_for_aar() {
     local target_abi="$1"
     local source_lib_dir="${FFMPEG_SOURCE_PATH}/android-libs/${target_abi}"
-    local jnilibs_dir="${FFMPEG_MODULE_PATH}/src/main/jniLibs/${target_abi}"
+    local jnilibs_dir="${FFMPEG_MODULE_PATH}/jniLibs/${target_abi}"
     mkdir -p "${jnilibs_dir}"
     local lib
     for lib in libavcodec.so libavformat.so libavutil.so libswresample.so libswscale.so
@@ -804,6 +918,11 @@ configure_ffmpeg() {
         pkg_config_dirs+=("${MBEDTLS_PREBUILT_ROOT}/${target_abi}/lib/pkgconfig")
     fi
 
+    if [[ "${FFMPEG_ENABLE_LIBDAV1D}" == "1" ]]
+    then
+        pkg_config_dirs+=("$(prepare_libdav1d_pkgconfig_for_abi "${target_abi}")")
+    fi
+
     local pkg_config_joined=""
     if [[ "${#pkg_config_dirs[@]}" -gt 0 ]]
     then
@@ -820,6 +939,7 @@ configure_ffmpeg() {
     fi
     validate_ffmpeg_tonemap_config
     validate_ffmpeg_tls_config
+    validate_ffmpeg_libdav1d_config
 }
 
 cd "${FFMPEG_MODULE_PATH}/jni/ffmpeg"

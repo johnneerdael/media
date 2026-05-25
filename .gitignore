@@ -74,6 +74,7 @@ libraries/decoder_flac/src/main/jni/libflac
 
 # FFmpeg decoder extension
 libraries/decoder_ffmpeg/src/main/jni/ffmpeg
+libraries/decoder_ffmpeg/src/main/jni/.libdav1d-pkgconfig
 libraries/decoder_ffmpeg/src/main/jniLibs/
 
 # Cronet datasource extension

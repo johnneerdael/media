@@ -64,7 +64,7 @@ FFMPEG_PATH="$(pwd)"
   details of the available decoders, and which formats they support.
 
 ```
-ENABLED_DECODERS=(aac mp3 ac3 eac3 truehd dca vorbis opus amrnb amrwb flac alac pcm_mulaw pcm_alaw h264 hevc vc1 mpegvideo mpeg2video vp8 vp9)
+ENABLED_DECODERS=(aac mp3 ac3 eac3 truehd dca vorbis opus amrnb amrwb flac alac pcm_mulaw pcm_alaw h264 hevc av1 vc1 mpegvideo mpeg2video vp8 vp9)
 ```
 
 *   Add a link to the FFmpeg source code in the FFmpeg module `jni` directory.
@@ -83,6 +83,37 @@ cd "${FFMPEG_MODULE_PATH}/jni" && \
 ./build_ffmpeg.sh \
   "${FFMPEG_MODULE_PATH}" "${NDK_PATH}" "${HOST_PLATFORM}" "${ANDROID_ABI}" "${ENABLED_DECODERS[@]}"
 ```
+
+### Optional: AV1 with libdav1d
+
+The built-in FFmpeg AV1 decoder is not sufficient for Nexio's trailer software
+decode path: YouTube's 2160p trailer variants commonly arrive as AV1 (`av01`),
+and device logs showed the native `av1` decoder failing at
+`avcodec_send_packet` with `Function not implemented`. Build FFmpeg with
+VideoLAN's `libdav1d` decoder and the Java bridge will prefer `libdav1d` when
+the native build exposes it.
+
+This repository already vendors dav1d through the Media3 `decoder_av1` module.
+If `media/libraries/decoder_av1/src/main/jni/nativelib/<abi>/libdav1d.a`
+exists, `build_ffmpeg.sh` can consume it directly:
+
+```
+FFMPEG_ENABLE_LIBDAV1D=1 \
+./build_ffmpeg.sh \
+  "${FFMPEG_MODULE_PATH}" "${NDK_PATH}" "${HOST_PLATFORM}" "${ANDROID_ABI}" "${ENABLED_DECODERS[@]}"
+```
+
+For standalone dav1d prebuilts, set `LIBDAV1D_PREBUILT_ROOT` to a root with
+this layout:
+
+```
+<LIBDAV1D_PREBUILT_ROOT>/<abi>/include/dav1d/dav1d.h
+<LIBDAV1D_PREBUILT_ROOT>/<abi>/lib/libdav1d.a
+<LIBDAV1D_PREBUILT_ROOT>/<abi>/lib/pkgconfig/dav1d.pc  # optional
+```
+
+The build script validates the result after FFmpeg configure by requiring both
+`CONFIG_LIBDAV1D=1` and `CONFIG_LIBDAV1D_DECODER=1`.
 
 ### Optional: DV5 tone mapping with libplacebo (experimental)
 

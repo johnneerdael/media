@@ -105,7 +105,7 @@ public final class FfmpegLibrary {
     if (!isAvailable()) {
       return false;
     }
-    @Nullable String codecName = getCodecName(mimeType);
+    @Nullable String codecName = getCodecNameForDecoder(mimeType);
     if (codecName == null) {
       return false;
     }
@@ -327,6 +327,19 @@ public final class FfmpegLibrary {
       default:
         return null;
     }
+  }
+
+  @Nullable
+  /* package */ static String getCodecNameForDecoder(String mimeType) {
+    @Nullable String codecName = getCodecName(mimeType);
+    if (MimeTypes.VIDEO_AV1.equals(mimeType)) {
+      return getPreferredAv1CodecName(ffmpegHasDecoder("libdav1d"));
+    }
+    return codecName;
+  }
+
+  /* package */ static String getPreferredAv1CodecName(boolean libdav1dAvailable) {
+    return libdav1dAvailable ? "libdav1d" : "av1";
   }
 
   private static native String ffmpegGetVersion();

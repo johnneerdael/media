@@ -57,7 +57,7 @@ final class FfmpegVideoDecoder extends
             throw new FfmpegDecoderException("Failed to load decoder native library.");
         }
         assert format.sampleMimeType != null;
-        codecName = Assertions.checkNotNull(FfmpegLibrary.getCodecName(format.sampleMimeType));
+        codecName = Assertions.checkNotNull(FfmpegLibrary.getCodecNameForDecoder(format.sampleMimeType));
         extraData = getExtraData(format.sampleMimeType, format.initializationData);
         nativeContext =
                 ffmpegInitialize(

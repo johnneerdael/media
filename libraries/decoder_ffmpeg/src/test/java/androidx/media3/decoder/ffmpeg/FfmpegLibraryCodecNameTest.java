@@ -30,4 +30,12 @@ public final class FfmpegLibraryCodecNameTest {
     assertThat(FfmpegLibrary.getCodecName(MimeTypes.VIDEO_VC1)).isEqualTo("vc1");
     assertThat(FfmpegLibrary.getCodecName(MimeTypes.VIDEO_AV1)).isEqualTo("av1");
   }
+
+  @Test
+  public void getPreferredAv1CodecName_prefersLibdav1dWhenAvailable() {
+    assertThat(FfmpegLibrary.getPreferredAv1CodecName(/* libdav1dAvailable= */ true))
+        .isEqualTo("libdav1d");
+    assertThat(FfmpegLibrary.getPreferredAv1CodecName(/* libdav1dAvailable= */ false))
+        .isEqualTo("av1");
+  }
 }
